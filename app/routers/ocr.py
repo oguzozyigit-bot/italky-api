@@ -18,9 +18,8 @@ class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 class OCRRequest(FlexibleModel):
-    # data:image/jpeg;base64,... veya direkt base64 kabul
     image_base64: str
-    language_hints: Optional[List[str]] = None  # ör: ["it","en"]
+    language_hints: Optional[List[str]] = None
 
 class OCRResponse(FlexibleModel):
     ok: bool
@@ -37,7 +36,7 @@ class OCRTranslateResponse(FlexibleModel):
 
 def _strip_data_url(s: str) -> str:
     s = (s or "").strip()
-    if "," in s and s.lower().startswith("data:"):
+    if s.lower().startswith("data:") and "," in s:
         return s.split(",", 1)[1].strip()
     return s
 
@@ -49,24 +48,25 @@ def ping():
 async def ocr(req: OCRRequest):
     if not GOOGLE_API_KEY:
         raise HTTPException(500, "GOOGLE_API_KEY missing")
+
     b64 = _strip_data_url(req.image_base64)
     if not b64:
         raise HTTPException(400, "image_base64 required")
 
     url = f"https://vision.googleapis.com/v1/images:annotate?key={GOOGLE_API_KEY}"
-    features = [{"type": "TEXT_DETECTION", "maxResults": 1}]
-    img: Dict[str, Any] = {"content": b64}
-    image_ctx: Dict[str, Any] = {}
-    if req.language_hints:
-        image_ctx["languageHints"] = req.language_hints
-
-    body = {"requests": [{"image": img, "features": features, "imageContext": image_ctx}]}
+    body: Dict[str, Any] = {
+        "requests": [{
+            "image": {"content": b64},
+            "features": [{"type":"TEXT_DETECTION","maxResults":1}],
+            "imageContext": {"languageHints": req.language_hints or []}
+        }]
+    }
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(url, json=body)
         if r.status_code >= 400:
-            logger.error("OCR_FAIL %s %s", r.status_code, r.text[:400])
+            logger.error("OCR_FAIL %s %s", r.status_code, (r.text or "")[:400])
             raise HTTPException(r.status_code, "ocr failed")
 
         data = r.json()
@@ -78,6 +78,7 @@ async def ocr(req: OCRRequest):
             txt = (res0["textAnnotations"][0].get("description") or "").strip()
 
         return OCRResponse(ok=True, text=txt)
+
     except HTTPException:
         raise
     except Exception as e:
@@ -86,33 +87,28 @@ async def ocr(req: OCRRequest):
 
 @router.post("/ocr/translate", response_model=OCRTranslateResponse)
 async def ocr_translate(req: OCRTranslateRequest):
-    # OCR -> Translate
-    # Translate endpointini direkt çağırıyoruz (v2)
-    if not GOOGLE_API_KEY:
-        raise HTTPException(500, "GOOGLE_API_KEY missing")
-
     # 1) OCR
-    ocr_res = await ocr(OCRRequest(image_base64=req.image_base64, language_hints=["it", "en", "de", "fr", "es"]))
-    extracted = (ocr_res.text or "").strip()
+    o = await ocr(OCRRequest(image_base64=req.image_base64, language_hints=["it","en","de","fr","es"]))
+    extracted = (o.text or "").strip()
     if not extracted:
-        return OCRTranslateResponse(ok=True, extracted_text="", translated="Metin bulamadım evladım.")
+        return OCRTranslateResponse(ok=True, extracted_text="", translated="Metin bulamadım.")
 
-    # 2) Translate
+    # 2) Translate (same API key)
     url = "https://translation.googleapis.com/language/translate/v2"
-    payload = {"q": extracted, "target": req.target, "key": GOOGLE_API_KEY, "format": "text"}
+    payload = {"q": extracted, "target": req.target, "format":"text", "key": GOOGLE_API_KEY}
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(url, data=payload)
         if r.status_code >= 400:
-            logger.error("OCR_TRANSLATE_FAIL %s %s", r.status_code, r.text[:400])
+            logger.error("OCR_TRANSLATE_FAIL %s %s", r.status_code, (r.text or "")[:400])
             raise HTTPException(r.status_code, "ocr translate failed")
 
         data = r.json()
         tr0 = (((data.get("data") or {}).get("translations") or [])[0] or {})
-        translated = (tr0.get("translatedText") or "").strip()
+        out = (tr0.get("translatedText") or "").strip()
 
-        return OCRTranslateResponse(ok=True, extracted_text=extracted, translated=translated or extracted)
+        return OCRTranslateResponse(ok=True, extracted_text=extracted, translated=(out or extracted))
     except HTTPException:
         raise
     except Exception as e:
