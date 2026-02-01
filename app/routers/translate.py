@@ -1,94 +1,206 @@
-# italky-api/app/routers/translate.py
+# FILE: app/models/translate.py
 from __future__ import annotations
 
 import os
 import logging
 from typing import Optional, Dict, Any
 
-import httpx
-from fastapi import APIRouter
+import requests
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 
-# ✅ Önce Translate key (önerilen), yoksa Gemini key (fallback)
-GOOGLE_TRANSLATE_API_KEY = (os.getenv("GOOGLE_TRANSLATE_API_KEY", "") or "").strip()
-if not GOOGLE_TRANSLATE_API_KEY:
-    GOOGLE_TRANSLATE_API_KEY = (os.getenv("GEMINI_API_KEY", "") or "").strip()
+GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
 
 
+# -------------------------
+# MODELS
+# -------------------------
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-class TranslateReq(FlexibleModel):
+class TranslateRequest(FlexibleModel):
     text: str
-    target: str
-    source: Optional[str] = None
+    from_lang: Optional[str] = None
+    to_lang: str
 
 
-def _s(x: Any) -> str:
-    return str(x or "").strip()
+class TranslateResponse(FlexibleModel):
+    ok: bool
+    translated: str
+    detected_source: Optional[str] = None
 
 
-@router.get("/translate/ping")
+class TTSRequest(FlexibleModel):
+    text: str
+    lang: str = "en"
+    gender: str = "FEMALE"
+    speaking_rate: float = 1.0
+    pitch: float = 0.0
+
+
+class TTSResponse(FlexibleModel):
+    ok: bool
+    audio_base64: str
+
+
+# -------------------------
+# HELPERS
+# -------------------------
+def _ensure_key():
+    if not GOOGLE_API_KEY:
+        raise HTTPException(500, "GOOGLE_API_KEY missing (Render ENV)")
+
+
+def _norm_lang(code: Optional[str]) -> Optional[str]:
+    if not code:
+        return None
+    c = str(code).strip().lower()
+    if "-" in c:
+        c = c.split("-", 1)[0]
+    if "_" in c:
+        c = c.split("_", 1)[0]
+    return c or None
+
+
+# -------------------------
+# ✅ QUICK PING (en hızlı teşhis)
+# GET /api/translate/_ping
+# -------------------------
+@router.get("/translate/_ping")
 def translate_ping():
-    return {"ok": True, "has_key": bool(GOOGLE_TRANSLATE_API_KEY)}
+    has = bool(GOOGLE_API_KEY)
+    masked = (GOOGLE_API_KEY[:6] + "..." + GOOGLE_API_KEY[-4:]) if has else ""
+    return {"ok": True, "has_key": has, "key": masked}
 
 
-@router.get("/translate")
-def translate_get_help():
-    # ✅ Tarayıcıdan açınca “Method Not Allowed” yerine açıklama ver
-    return {
-        "ok": False,
-        "detail": "Bu endpoint POST ister. Örnek: POST /api/translate {text, target, source?}",
-        "example": {"text": "Merhaba", "target": "en", "source": "tr"},
-    }
+# -------------------------
+# ✅ GOOGLE TRANSLATE v2
+# POST /api/translate
+# -------------------------
+@router.post("/translate", response_model=TranslateResponse)
+def api_translate(req: TranslateRequest):
+    _ensure_key()
 
-
-@router.post("/translate")
-async def translate_post(req: TranslateReq) -> Dict[str, Any]:
-    text = _s(req.text)
-    target = _s(req.target).lower()
-    source = _s(req.source).lower() or None
-
+    text = (req.text or "").strip()
     if not text:
-        return {"ok": False, "error": "empty_text"}
-    if not target:
-        return {"ok": False, "error": "missing_target"}
-    if not GOOGLE_TRANSLATE_API_KEY:
-        return {"ok": False, "error": "missing_google_translate_key"}
+        raise HTTPException(400, "empty text")
+
+    src = _norm_lang(req.from_lang)
+    dst = _norm_lang(req.to_lang) or "en"
 
     url = "https://translation.googleapis.com/language/translate/v2"
-    params = {"key": GOOGLE_TRANSLATE_API_KEY}
-    payload: Dict[str, Any] = {"q": text, "target": target, "format": "text"}
-    if source:
-        payload["source"] = source
+    payload: Dict[str, Any] = {
+        "q": text,
+        "target": dst,
+        "format": "text",
+        "key": GOOGLE_API_KEY,
+    }
+    if src:
+        payload["source"] = src
 
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            r = await client.post(url, params=params, json=payload)
-            raw = await r.json()
+        r = requests.post(url, data=payload, timeout=18)
 
-        if r.status_code != 200:
-            logger.error("TRANSLATE_FAIL %s %s", r.status_code, raw)
-            return {"ok": False, "error": "translate_failed", "raw": raw}
+        # ✅ HATA DETAYINI SAKLAMA: Google ne döndüyse göster
+        if r.status_code >= 400:
+            body = (r.text or "")[:1200]
+            logger.error("GOOGLE_TRANSLATE_FAIL status=%s body=%s", r.status_code, body)
+            raise HTTPException(
+                status_code=502,
+                detail=f"google_translate_error status={r.status_code} body={body}"
+            )
 
-        data = (raw or {}).get("data", {}) or {}
-        translations = data.get("translations", []) or []
-        first = translations[0] if translations else {}
+        data = r.json() or {}
+        tr = (((data.get("data") or {}).get("translations")) or [])
+        if not tr:
+            return TranslateResponse(ok=True, translated=text, detected_source=src)
 
-        translated = _s(first.get("translatedText")) or text
-        detected = _s(first.get("detectedSourceLanguage")) or (source or None)
+        first = tr[0] or {}
+        translated = str(first.get("translatedText") or "").strip() or text
+        detected = str(first.get("detectedSourceLanguage") or "").strip() or None
 
-        return {
-            "ok": True,
-            "translated": translated,
-            "detected_source": detected,
-            "target": target,
-        }
+        # Basit HTML entity temizliği
+        translated = (
+            translated
+            .replace("&amp;", "&")
+            .replace("&quot;", '"')
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+        )
 
+        return TranslateResponse(ok=True, translated=translated, detected_source=detected)
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("TRANSLATE_EXC: %s", str(e))
-        return {"ok": False, "error": "exception", "message": str(e)}
+        logger.error("TRANSLATE_EXCEPTION %s", str(e))
+        raise HTTPException(500, "translate error")
+
+
+# -------------------------
+# ✅ GOOGLE TEXT-TO-SPEECH
+# POST /api/tts
+# -------------------------
+@router.post("/tts", response_model=TTSResponse)
+def api_tts(req: TTSRequest):
+    _ensure_key()
+
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(400, "empty text")
+
+    lang = _norm_lang(req.lang) or "en"
+
+    voice_map = {
+        "tr": {"languageCode": "tr-TR", "name": "tr-TR-Standard-A"},
+        "en": {"languageCode": "en-US", "name": "en-US-Standard-C"},
+        "de": {"languageCode": "de-DE", "name": "de-DE-Standard-A"},
+        "fr": {"languageCode": "fr-FR", "name": "fr-FR-Standard-A"},
+        "es": {"languageCode": "es-ES", "name": "es-ES-Standard-A"},
+        "ar": {"languageCode": "ar-XA", "name": "ar-XA-Standard-A"},
+        "ru": {"languageCode": "ru-RU", "name": "ru-RU-Standard-A"},
+    }
+    voice = voice_map.get(lang, {"languageCode": "en-US", "name": "en-US-Standard-C"})
+
+    url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_API_KEY}"
+    body = {
+        "input": {"text": text[:4500]},
+        "voice": {
+            "languageCode": voice["languageCode"],
+            "name": voice["name"],
+            "ssmlGender": str(req.gender or "FEMALE").upper(),
+        },
+        "audioConfig": {
+            "audioEncoding": "MP3",
+            "speakingRate": float(req.speaking_rate or 1.0),
+            "pitch": float(req.pitch or 0.0),
+        },
+    }
+
+    try:
+        r = requests.post(url, json=body, timeout=20)
+        if r.status_code >= 400:
+            body_txt = (r.text or "")[:1200]
+            logger.error("GOOGLE_TTS_FAIL status=%s body=%s", r.status_code, body_txt)
+            raise HTTPException(
+                status_code=502,
+                detail=f"google_tts_error status={r.status_code} body={body_txt}"
+            )
+
+        data = r.json() or {}
+        audio = str(data.get("audioContent") or "").strip()
+        if not audio:
+            raise HTTPException(502, "tts no audioContent")
+
+        return TTSResponse(ok=True, audio_base64=audio)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("TTS_EXCEPTION %s", str(e))
+        raise HTTPException(500, "tts error")
