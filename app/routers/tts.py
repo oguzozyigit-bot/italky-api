@@ -19,8 +19,8 @@ class FlexibleModel(BaseModel):
 
 class TTSRequest(FlexibleModel):
     text: str
-    lang: str = "tr-TR"   # tr-TR, en-US ...
-    voice: Optional[str] = None
+    lang: str = "tr-TR"           # ör: tr-TR, en-US
+    voice: Optional[str] = None   # opsiyonel
     speaking_rate: float = 1.0
     pitch: float = 0.0
 
@@ -40,12 +40,9 @@ async def tts(req: TTSRequest):
         raise HTTPException(400, "text required")
 
     url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_API_KEY}"
-
     body: Dict[str, Any] = {
         "input": {"text": req.text},
-        "voice": {
-            "languageCode": req.lang,
-        },
+        "voice": {"languageCode": req.lang},
         "audioConfig": {
             "audioEncoding": "MP3",
             "speakingRate": float(req.speaking_rate),
@@ -59,12 +56,16 @@ async def tts(req: TTSRequest):
         async with httpx.AsyncClient(timeout=25.0) as client:
             r = await client.post(url, json=body)
         if r.status_code >= 400:
-            logger.error("TTS_FAIL %s %s", r.status_code, r.text[:400])
+            logger.error("TTS_FAIL %s %s", r.status_code, (r.text or "")[:400])
             raise HTTPException(r.status_code, "tts failed")
 
         data = r.json()
         audio = (data.get("audioContent") or "").strip()
+        if not audio:
+            raise HTTPException(500, "tts empty audio")
+
         return TTSResponse(ok=True, audio_base64=audio)
+
     except HTTPException:
         raise
     except Exception as e:
