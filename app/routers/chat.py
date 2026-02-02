@@ -151,11 +151,9 @@ async def call_gemini(messages: List[Dict[str, Any]], max_tokens: int = 520) -> 
             return ""
 
     out = await asyncio.to_thread(_sync)
-
     if out == "__MODEL_NOT_FOUND__":
         _selected_model_cache["name"] = ""
         return ""
-
     return out.strip() if out else ""
 
 
@@ -202,7 +200,6 @@ def sanitize_reply(text: str, max_chars: int = 900) -> str:
         return t
     t = _dedupe_lines(t)
     if _looks_like_loop(t):
-        # ilk 3 cümleye kırp
         parts = re.split(r"([.!?…]+)", t)
         keep = []
         cnt = 0
@@ -230,13 +227,12 @@ async def api_chat(req: ChatRequest):
     if not msg:
         raise HTTPException(400, "empty text")
 
-    # Italky persona: nötr, hızlı, çeviri/öğrenme odaklı
     system = (
         "You are Italky Chat AI.\n"
         "Reply in Turkish unless the user asks otherwise.\n"
         "Be concise, helpful, and do not hallucinate.\n"
-        "If you are unsure, say you are unsure.\n"
-        "No rude/insulting tone.\n"
+        "If unsure, say you are unsure.\n"
+        "No rude tone.\n"
     )
 
     hist = []
