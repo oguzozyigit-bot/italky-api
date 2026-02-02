@@ -1,4 +1,4 @@
-# italky-api/app/main.py
+# FILE: italky-api/app/main.py
 from __future__ import annotations
 
 import os
@@ -10,6 +10,9 @@ from fastapi.responses import Response
 from app.routers.translate import router as translate_router
 from app.routers.tts import router as tts_router
 from app.routers.ocr import router as ocr_router
+
+# ✅ CHAT ROUTER (Sohbet AI)
+from app.routers.chat import router as chat_router
 
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v1.0").strip()
 
@@ -34,6 +37,9 @@ app.add_middleware(
 app.include_router(translate_router, prefix="/api")
 app.include_router(tts_router, prefix="/api")
 app.include_router(ocr_router, prefix="/api")
+
+# ✅ /api/chat
+app.include_router(chat_router, prefix="/api")
 
 @app.get("/")
 def root():
