@@ -19,9 +19,6 @@ except Exception:
     requests = None  # type: ignore
 
 
-# -------------------------
-# MODELS
-# -------------------------
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -38,24 +35,6 @@ class ChatResponse(FlexibleModel):
     text: str
 
 
-# -------------------------
-# BRAND LOCK (NO GOOGLE/GEMINI TALK)
-# -------------------------
-BRAND_OWNER_LINE = "Ben italkyAI tarafından geliştirilen bir dil yazılımıyım."
-
-# Bu tip soruları yakalayıp modele hiç sormadan direkt cevap veriyoruz.
-BRAND_Q = re.compile(
-    r"(kim\s+(üretti|uretti|geliştirdi|gelistirdi)|yarat(ı|i)c(ı|i)n\s+kim|sen\s+kimsin|ad[ıi]n\s+ne|kimin\s+taraf(ı|i)ndan|google|gemini|openai)",
-    re.IGNORECASE
-)
-
-# Model cevabında “google/gemini/openai” geçerse de post-filter ile temizle
-FORBIDDEN = re.compile(r"\b(google|gemini|openai)\b", re.IGNORECASE)
-
-
-# -------------------------
-# GEMINI
-# -------------------------
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY", "") or "").strip()
 PREFERRED_MODELS = [
     (os.getenv("GEMINI_MODEL_CHAT", "") or "").strip(),
@@ -121,7 +100,7 @@ def _gemini_build(messages: List[Dict[str, Any]], max_tokens: int = 520) -> Dict
     body: Dict[str, Any] = {
         "contents": contents or [{"role": "user", "parts": [{"text": "Hi"}]}],
         "generationConfig": {
-            "temperature": 0.35,
+            "temperature": 0.25,
             "topP": 0.9,
             "maxOutputTokens": int(max_tokens or 520),
         },
@@ -133,9 +112,9 @@ def _gemini_build(messages: List[Dict[str, Any]], max_tokens: int = 520) -> Dict
 
 async def call_gemini(messages: List[Dict[str, Any]], max_tokens: int = 520) -> str:
     if not GEMINI_API_KEY:
-        return "Şu an yanıt veremiyorum. (AI anahtarı eksik)"
+        return "Gemini anahtarı yok. (GEMINI_API_KEY eksik)"
     if requests is None:
-        return "Şu an yanıt veremiyorum. (Sunucuda requests yok)"
+        return "Sunucuda requests yok. (pip install requests)"
 
     if not _selected_model_cache.get("name"):
         try:
@@ -172,9 +151,6 @@ async def call_gemini(messages: List[Dict[str, Any]], max_tokens: int = 520) -> 
     return out.strip() if out else ""
 
 
-# -------------------------
-# ANTI-LOOP CLEAN
-# -------------------------
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
@@ -206,29 +182,24 @@ def sanitize_reply(text: str, max_chars: int = 900) -> str:
     return t
 
 
-# -------------------------
-# ROUTE
-# -------------------------
 @router.post("/chat", response_model=ChatResponse)
 async def api_chat(req: ChatRequest):
     msg = (req.text or req.message or "").strip()
     if not msg:
         raise HTTPException(400, "empty text")
 
-    # ✅ BRAND LOCK: bu sorular gelirse modele gitme
-    if BRAND_Q.search(msg):
-        return ChatResponse(text=BRAND_OWNER_LINE)
-
+    # ✅ KİLİT KURAL: "Google/OpenAI/Gemini" geçmez.
     system = (
-        "Sen italkyAI'nin Sohbet AI modülüsün.\n"
-        "Türkçe cevap ver (kullanıcı özellikle başka dil istemedikçe).\n"
-        "Kısa, net, faydalı ol.\n"
-        "Asla 'Google', 'Gemini' veya 'OpenAI' tarafından üretildim/geliştirildim deme.\n"
-        "Sahiplik/yaratıcı sorularında şu cümleyi kullan: "
-        f"'{BRAND_OWNER_LINE}'\n"
+        "Sen Italky Chat AI'sın.\n"
+        "Her zaman Türkçe yanıt ver (kullanıcı özellikle başka dil istemedikçe).\n"
+        "Seni geliştiren ve üreten firma: Italky AI.\n"
+        "Kesin kural: Google, OpenAI, Gemini, Alphabet, DeepMind gibi isimleri ASLA anma.\n"
+        "Kullanıcı 'seni kim geliştirdi/üretti/yarattı' derse tek cevap: "
+        "'Ben Italky AI tarafından geliştirilen bir dil yazılımıyım.'\n"
+        "Kısa, net, yardımcı ol. Uydurma yapma.\n"
     )
 
-    hist: List[Dict[str, Any]] = []
+    hist = []
     try:
         for h in (req.history or [])[-20:]:
             r = str(h.get("role", "")).strip().lower()
@@ -245,9 +216,4 @@ async def api_chat(req: ChatRequest):
 
     out = await call_gemini(messages, max_tokens=int(req.max_tokens or 520))
     out = sanitize_reply(out or "Bir aksilik oldu.")
-
-    # ✅ post-filter: yine de kaçarsa temizle
-    if FORBIDDEN.search(out):
-        out = BRAND_OWNER_LINE
-
     return ChatResponse(text=out)
