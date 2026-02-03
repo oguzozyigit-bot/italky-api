@@ -14,6 +14,9 @@ from app.routers.ocr import router as ocr_router
 # ✅ CHAT ROUTER (Sohbet AI)
 from app.routers.chat import router as chat_router
 
+# ✅ OPENAI TTS ROUTER (Sesli cevap)
+from app.routers.tts_openai import router as tts_openai_router
+
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v1.0").strip()
 
 app = FastAPI(title="Italky API", version=APP_VERSION, redirect_slashes=False)
@@ -40,6 +43,9 @@ app.include_router(ocr_router, prefix="/api")
 
 # ✅ /api/chat
 app.include_router(chat_router, prefix="/api")
+
+# ✅ /api/tts_openai
+app.include_router(tts_openai_router, prefix="/api")
 
 @app.get("/")
 def root():
