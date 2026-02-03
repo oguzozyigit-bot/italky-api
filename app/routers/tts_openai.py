@@ -1,4 +1,3 @@
-# FILE: italky-api/app/routers/tts_openai.py
 from __future__ import annotations
 
 import os
@@ -12,22 +11,7 @@ router = APIRouter()
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
 OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL", "") or "gpt-4o-mini-tts").strip()
-OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "") or "ash").strip()
-
-# ✅ İSİM → SPEED HARİTASI (ÇÖZÜM 1)
-VOICE_SPEED = {
-    # Kadın
-    "Jale":   1.00,
-    "Hüma":   1.06,
-    "Selden": 0.96,
-    "Ayşem":  1.10,
-
-    # Erkek
-    "Ozan":   1.04,
-    "Oğuz":   0.92,
-    "Barış":  0.98,
-    "Emrah":  1.08,
-}
+OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "") or "alloy").strip()  # alloy/ash/nova/shimmer...
 
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -35,8 +19,8 @@ class FlexibleModel(BaseModel):
 class TTSReq(FlexibleModel):
     text: str
     voice: str | None = None
-    name: str | None = None   # 👈 İSİM GELİR
     format: str | None = "mp3"
+    speed: float | None = 1.0
 
 class TTSRes(FlexibleModel):
     ok: bool
@@ -45,28 +29,24 @@ class TTSRes(FlexibleModel):
 
 def _ensure():
     if not OPENAI_API_KEY:
-        raise HTTPException(500, "OPENAI_API_KEY missing")
+        raise HTTPException(500, "OPENAI_API_KEY missing (Render ENV)")
 
 @router.post("/tts_openai", response_model=TTSRes)
 def tts_openai(req: TTSReq):
     _ensure()
-
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(400, "empty text")
 
-    voice = (req.voice or OPENAI_TTS_VOICE).strip()
-    fmt = (req.format or "mp3").lower()
+    voice = (req.voice or OPENAI_TTS_VOICE or "alloy").strip()
+    fmt = (req.format or "mp3").strip().lower()
     if fmt not in ("mp3", "wav", "aac", "flac", "opus", "pcm"):
         fmt = "mp3"
 
-    # ✅ İSME GÖRE SPEED
-    speed = VOICE_SPEED.get((req.name or "").strip(), 1.0)
-
     try:
-        import requests
+        import requests  # type: ignore
     except Exception:
-        raise HTTPException(500, "requests missing")
+        raise HTTPException(500, "requests missing on server")
 
     url = "https://api.openai.com/v1/audio/speech"
     headers = {
@@ -78,17 +58,19 @@ def tts_openai(req: TTSReq):
         "input": text[:4096],
         "voice": voice,
         "response_format": fmt,
-        "speed": speed,   # 👈 KRİTİK
+        "speed": float(req.speed or 1.0),
     }
 
     try:
         r = requests.post(url, headers=headers, json=body, timeout=35)
         if r.status_code >= 400:
-            raise HTTPException(502, r.text[:800])
+            b = (r.text or "")[:1200]
+            logger.error("OPENAI_TTS_FAIL status=%s body=%s", r.status_code, b)
+            raise HTTPException(502, f"openai_tts_error status={r.status_code} body={b}")
 
-        audio_bytes = r.content
+        audio_bytes = r.content or b""
         if not audio_bytes:
-            raise HTTPException(502, "no audio")
+            raise HTTPException(502, "openai_tts_no_audio")
 
         b64 = base64.b64encode(audio_bytes).decode("utf-8")
         return TTSRes(ok=True, audio_base64=b64, format=fmt)
