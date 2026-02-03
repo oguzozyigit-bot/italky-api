@@ -85,3 +85,12 @@ def tts_openai(req: TTSReq):
     except Exception as e:
         logger.error("OPENAI_TTS_EXCEPTION %s", str(e))
         raise HTTPException(500, "tts_openai error")
+        @router.get("/tts_openai/_ping")
+def tts_openai_ping():
+    return {
+        "ok": True,
+        "router": "tts_openai",
+        "has_key": bool(OPENAI_API_KEY),
+        "model": OPENAI_TTS_MODEL,
+        "default_voice": OPENAI_TTS_VOICE,
+    }
