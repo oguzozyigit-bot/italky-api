@@ -1,4 +1,3 @@
-# FILE: italky-api/app/main.py
 from __future__ import annotations
 
 import os
@@ -7,45 +6,58 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
+# --- ROUTER IMPORTLARI ---
+# 1. Mevcut Routerlar
 from app.routers.translate import router as translate_router
 from app.routers.tts import router as tts_router
 from app.routers.ocr import router as ocr_router
 
-# ✅ CHAT ROUTER (Sohbet AI)
+# 2. Yeni Routerlar (Sohbet ve Sesli Asistan)
+# NOT: Bu dosyaların (chat.py ve tts_openai.py) app/routers/ klasöründe olduğundan emin olun.
 from app.routers.chat import router as chat_router
-
-# ✅ OPENAI TTS ROUTER (Sesli cevap)
 from app.routers.tts_openai import router as tts_openai_router
 
-APP_VERSION = os.getenv("APP_VERSION", "italky-api-v1.0").strip()
+# --- AYARLAR ---
+APP_VERSION = os.getenv("APP_VERSION", "italky-api-v2.0").strip()
 
-app = FastAPI(title="Italky API", version=APP_VERSION, redirect_slashes=False)
+app = FastAPI(
+    title="Italky API", 
+    version=APP_VERSION, 
+    description="italkyAI Backend Services",
+    redirect_slashes=False
+)
 
+# --- CORS (Erişim İzinleri) ---
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
     "https://italky-web.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
+    "http://127.0.0.1:5500", # VS Code Live Server için
+    "*" # Geliştirme aşamasında her yerden erişime izin ver (Canlıda kapatılabilir)
 ]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(translate_router, prefix="/api")
-app.include_router(tts_router, prefix="/api")
-app.include_router(ocr_router, prefix="/api")
+# --- ROUTERLARI AKTİF ETME ---
 
-# ✅ /api/chat
-app.include_router(chat_router, prefix="/api")
+# Eski Özellikler
+app.include_router(translate_router, prefix="/api", tags=["Translate"])
+app.include_router(tts_router, prefix="/api", tags=["Legacy TTS"])
+app.include_router(ocr_router, prefix="/api", tags=["OCR"])
 
-# ✅ /api/tts_openai
-app.include_router(tts_openai_router, prefix="/api")
+# Yeni Özellikler (Sohbet ve Ses)
+app.include_router(chat_router, prefix="/api", tags=["Chat AI"])
+app.include_router(tts_openai_router, prefix="/api", tags=["Voice AI"])
+
+# --- TEMEL ENDPOINTLER ---
 
 @app.get("/")
 def root():
@@ -57,4 +69,9 @@ def healthz():
 
 @app.get("/favicon.ico")
 async def favicon():
-    return Response(status_code=204)
+    return Response(status_code=204) # İçerik yok (Hata vermemesi için)
+
+if __name__ == "__main__":
+    import uvicorn
+    # Local test için
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
