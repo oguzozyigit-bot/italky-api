@@ -39,6 +39,21 @@ class ChatResponse(FlexibleModel):
 
 
 # -------------------------
+# BRAND LOCK (NO GOOGLE/GEMINI TALK)
+# -------------------------
+BRAND_OWNER_LINE = "Ben italkyAI tarafından geliştirilen bir dil yazılımıyım."
+
+# Bu tip soruları yakalayıp modele hiç sormadan direkt cevap veriyoruz.
+BRAND_Q = re.compile(
+    r"(kim\s+(üretti|uretti|geliştirdi|gelistirdi)|yarat(ı|i)c(ı|i)n\s+kim|sen\s+kimsin|ad[ıi]n\s+ne|kimin\s+taraf(ı|i)ndan|google|gemini|openai)",
+    re.IGNORECASE
+)
+
+# Model cevabında “google/gemini/openai” geçerse de post-filter ile temizle
+FORBIDDEN = re.compile(r"\b(google|gemini|openai)\b", re.IGNORECASE)
+
+
+# -------------------------
 # GEMINI
 # -------------------------
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY", "") or "").strip()
@@ -118,9 +133,9 @@ def _gemini_build(messages: List[Dict[str, Any]], max_tokens: int = 520) -> Dict
 
 async def call_gemini(messages: List[Dict[str, Any]], max_tokens: int = 520) -> str:
     if not GEMINI_API_KEY:
-        return "Anahtar yok. (GEMINI_API_KEY eksik)"
+        return "Şu an yanıt veremiyorum. (AI anahtarı eksik)"
     if requests is None:
-        return "Sunucuda requests yok. (pip install requests)"
+        return "Şu an yanıt veremiyorum. (Sunucuda requests yok)"
 
     if not _selected_model_cache.get("name"):
         try:
@@ -181,77 +196,14 @@ def _dedupe_lines(text: str) -> str:
         prev = n
     return "\n".join(out).strip()
 
-def _looks_like_loop(text: str) -> bool:
-    t = _norm(text)
-    if len(t) < 60:
-        return False
-    words = t.split(" ")
-    if len(words) >= 30:
-        grams = [" ".join(words[i:i+6]) for i in range(0, len(words)-6)]
-        if grams:
-            from collections import Counter
-            top = Counter(grams).most_common(1)[0][1]
-            return top >= 5
-    return False
-
 def sanitize_reply(text: str, max_chars: int = 900) -> str:
     t = (text or "").strip()
     if not t:
         return t
     t = _dedupe_lines(t)
-    if _looks_like_loop(t):
-        parts = re.split(r"([.!?…]+)", t)
-        keep = []
-        cnt = 0
-        for i in range(0, len(parts), 2):
-            sent = (parts[i] or "").strip()
-            punct = (parts[i+1] if i+1 < len(parts) else "")
-            if sent:
-                keep.append(sent + punct)
-                cnt += 1
-            if cnt >= 3:
-                break
-        t = " ".join(keep).strip()
-
     if len(t) > max_chars:
         t = t[:max_chars].rstrip() + "…"
     return t
-
-
-# -------------------------
-# ✅ ITALKY IDENTITY LOCK (HARD RULES)
-# -------------------------
-IDENTITY_LOCK = """
-KİMLİK KURALI (ZORUNLU):
-- Senin adın: italkyAI.
-- Bu yazılım italkyAI tarafından geliştirilmiştir.
-- "Google", "Gemini", "OpenAI", "ChatGPT" veya başka kurum/şirket adı ASLA söyleme.
-- "Seni kim üretti / kim geliştirdi / yaratıcın kim / kimsin" sorularına tek cevap:
-  "Ben italkyAI tarafından geliştirilen bir dil yazılımıyım."
-"""
-
-# Bu sorular LLM'ye gitmeden yakalanır (en sağlam yöntem)
-CREATOR_Q = re.compile(
-    r"\b("
-    r"seni\s*kim\s*(üretti|uretti|geliştirdi|gelistirdi|yaptı|yapti)|"
-    r"yaratıcın\s*kim|yaraticin\s*kim|"
-    r"sen\s*kimsin|"
-    r"adın\s*ne\s*senin|adin\s*ne\s*senin|"
-    r"kim\s*yazdı\s*seni|kim\s*yazdi\s*seni"
-    r")\b",
-    re.IGNORECASE
-)
-
-FORBIDDEN = ("google", "gemini", "openai", "chatgpt")
-
-def enforce_identity(reply: str) -> str:
-    """Cevapta yasak kelimeler varsa kesin düzelt (tam garanti)."""
-    if not reply:
-        return reply
-    low = reply.lower()
-    if any(w in low for w in FORBIDDEN):
-        return "Ben italkyAI tarafından geliştirilen bir dil yazılımıyım."
-    return reply
 
 
 # -------------------------
@@ -263,20 +215,20 @@ async def api_chat(req: ChatRequest):
     if not msg:
         raise HTTPException(400, "empty text")
 
-    # ✅ Önce creator/identity sorularını hard yakala
-    if CREATOR_Q.search(msg):
-        return ChatResponse(text="Ben italkyAI tarafından geliştirilen bir dil yazılımıyım.")
+    # ✅ BRAND LOCK: bu sorular gelirse modele gitme
+    if BRAND_Q.search(msg):
+        return ChatResponse(text=BRAND_OWNER_LINE)
 
     system = (
-        "You are italkyAI Chat.\n"
-        "Reply in Turkish unless the user asks otherwise.\n"
-        "Be concise, helpful, and do not hallucinate.\n"
-        "If unsure, say you are unsure.\n"
-        "No rude tone.\n"
-        + IDENTITY_LOCK
+        "Sen italkyAI'nin Sohbet AI modülüsün.\n"
+        "Türkçe cevap ver (kullanıcı özellikle başka dil istemedikçe).\n"
+        "Kısa, net, faydalı ol.\n"
+        "Asla 'Google', 'Gemini' veya 'OpenAI' tarafından üretildim/geliştirildim deme.\n"
+        "Sahiplik/yaratıcı sorularında şu cümleyi kullan: "
+        f"'{BRAND_OWNER_LINE}'\n"
     )
 
-    hist: List[Dict[str, str]] = []
+    hist: List[Dict[str, Any]] = []
     try:
         for h in (req.history or [])[-20:]:
             r = str(h.get("role", "")).strip().lower()
@@ -293,6 +245,9 @@ async def api_chat(req: ChatRequest):
 
     out = await call_gemini(messages, max_tokens=int(req.max_tokens or 520))
     out = sanitize_reply(out or "Bir aksilik oldu.")
-    out = enforce_identity(out)  # ✅ son emniyet kemeri
+
+    # ✅ post-filter: yine de kaçarsa temizle
+    if FORBIDDEN.search(out):
+        out = BRAND_OWNER_LINE
 
     return ChatResponse(text=out)
