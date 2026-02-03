@@ -11,8 +11,11 @@ router = APIRouter()
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
 OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL", "") or "gpt-4o-mini-tts").strip()
-OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "") or "alloy").strip()  # alloy/ash/nova/shimmer...
+OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "") or "alloy").strip()
 
+# --------------------
+# MODELS
+# --------------------
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -27,31 +30,33 @@ class TTSRes(FlexibleModel):
     audio_base64: str
     format: str
 
+# --------------------
+# HELPERS
+# --------------------
 def _ensure():
     if not OPENAI_API_KEY:
-        raise HTTPException(500, "OPENAI_API_KEY missing (Render ENV)")
+        raise HTTPException(500, "OPENAI_API_KEY missing")
 
+# --------------------
+# POST /tts_openai
+# --------------------
 @router.post("/tts_openai", response_model=TTSRes)
 def tts_openai(req: TTSReq):
-    """
-    OpenAI TTS: POST /v1/audio/speech
-    Docs: https://platform.openai.com/docs/api-reference/audio/create-speech
-    """
     _ensure()
+
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(400, "empty text")
 
-    voice = (req.voice or OPENAI_TTS_VOICE or "alloy").strip()
-    fmt = (req.format or "mp3").strip().lower()
-    if fmt not in ("mp3", "wav", "aac", "flac", "opus", "pcm"):
+    voice = (req.voice or OPENAI_TTS_VOICE).strip()
+    fmt = (req.format or "mp3").lower()
+    if fmt not in ("mp3", "wav", "aac", "flac", "opus"):
         fmt = "mp3"
 
     try:
-        # requests yerine stdlib httpx kullanmak isterseniz çevirebiliriz; şimdilik basit:
-        import requests  # type: ignore
+        import requests
     except Exception:
-        raise HTTPException(500, "requests missing on server")
+        raise HTTPException(500, "requests missing")
 
     url = "https://api.openai.com/v1/audio/speech"
     headers = {
@@ -59,7 +64,7 @@ def tts_openai(req: TTSReq):
         "Content-Type": "application/json",
     }
     body = {
-        "model": OPENAI_TTS_MODEL,   # gpt-4o-mini-tts / tts-1 / tts-1-hd
+        "model": OPENAI_TTS_MODEL,
         "input": text[:4096],
         "voice": voice,
         "response_format": fmt,
@@ -69,13 +74,11 @@ def tts_openai(req: TTSReq):
     try:
         r = requests.post(url, headers=headers, json=body, timeout=35)
         if r.status_code >= 400:
-            b = (r.text or "")[:1200]
-            logger.error("OPENAI_TTS_FAIL status=%s body=%s", r.status_code, b)
-            raise HTTPException(502, f"openai_tts_error status={r.status_code} body={b}")
+            raise HTTPException(502, r.text[:500])
 
-        audio_bytes = r.content or b""
+        audio_bytes = r.content
         if not audio_bytes:
-            raise HTTPException(502, "openai_tts_no_audio")
+            raise HTTPException(502, "no audio returned")
 
         b64 = base64.b64encode(audio_bytes).decode("utf-8")
         return TTSRes(ok=True, audio_base64=b64, format=fmt)
@@ -85,7 +88,11 @@ def tts_openai(req: TTSReq):
     except Exception as e:
         logger.error("OPENAI_TTS_EXCEPTION %s", str(e))
         raise HTTPException(500, "tts_openai error")
-        @router.get("/tts_openai/_ping")
+
+# --------------------
+# GET /tts_openai/_ping  ✅ EN ALTA
+# --------------------
+@router.get("/tts_openai/_ping")
 def tts_openai_ping():
     return {
         "ok": True,
