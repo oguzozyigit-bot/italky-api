@@ -118,7 +118,7 @@ def _gemini_build(messages: List[Dict[str, Any]], max_tokens: int = 520) -> Dict
 
 async def call_gemini(messages: List[Dict[str, Any]], max_tokens: int = 520) -> str:
     if not GEMINI_API_KEY:
-        return "Gemini anahtarı yok. (GEMINI_API_KEY eksik)"
+        return "Anahtar yok. (GEMINI_API_KEY eksik)"
     if requests is None:
         return "Sunucuda requests yok. (pip install requests)"
 
@@ -219,6 +219,42 @@ def sanitize_reply(text: str, max_chars: int = 900) -> str:
 
 
 # -------------------------
+# ✅ ITALKY IDENTITY LOCK (HARD RULES)
+# -------------------------
+IDENTITY_LOCK = """
+KİMLİK KURALI (ZORUNLU):
+- Senin adın: italkyAI.
+- Bu yazılım italkyAI tarafından geliştirilmiştir.
+- "Google", "Gemini", "OpenAI", "ChatGPT" veya başka kurum/şirket adı ASLA söyleme.
+- "Seni kim üretti / kim geliştirdi / yaratıcın kim / kimsin" sorularına tek cevap:
+  "Ben italkyAI tarafından geliştirilen bir dil yazılımıyım."
+"""
+
+# Bu sorular LLM'ye gitmeden yakalanır (en sağlam yöntem)
+CREATOR_Q = re.compile(
+    r"\b("
+    r"seni\s*kim\s*(üretti|uretti|geliştirdi|gelistirdi|yaptı|yapti)|"
+    r"yaratıcın\s*kim|yaraticin\s*kim|"
+    r"sen\s*kimsin|"
+    r"adın\s*ne\s*senin|adin\s*ne\s*senin|"
+    r"kim\s*yazdı\s*seni|kim\s*yazdi\s*seni"
+    r")\b",
+    re.IGNORECASE
+)
+
+FORBIDDEN = ("google", "gemini", "openai", "chatgpt")
+
+def enforce_identity(reply: str) -> str:
+    """Cevapta yasak kelimeler varsa kesin düzelt (tam garanti)."""
+    if not reply:
+        return reply
+    low = reply.lower()
+    if any(w in low for w in FORBIDDEN):
+        return "Ben italkyAI tarafından geliştirilen bir dil yazılımıyım."
+    return reply
+
+
+# -------------------------
 # ROUTE
 # -------------------------
 @router.post("/chat", response_model=ChatResponse)
@@ -227,15 +263,20 @@ async def api_chat(req: ChatRequest):
     if not msg:
         raise HTTPException(400, "empty text")
 
+    # ✅ Önce creator/identity sorularını hard yakala
+    if CREATOR_Q.search(msg):
+        return ChatResponse(text="Ben italkyAI tarafından geliştirilen bir dil yazılımıyım.")
+
     system = (
-        "You are Italky Chat AI.\n"
+        "You are italkyAI Chat.\n"
         "Reply in Turkish unless the user asks otherwise.\n"
         "Be concise, helpful, and do not hallucinate.\n"
         "If unsure, say you are unsure.\n"
         "No rude tone.\n"
+        + IDENTITY_LOCK
     )
 
-    hist = []
+    hist: List[Dict[str, str]] = []
     try:
         for h in (req.history or [])[-20:]:
             r = str(h.get("role", "")).strip().lower()
@@ -252,4 +293,6 @@ async def api_chat(req: ChatRequest):
 
     out = await call_gemini(messages, max_tokens=int(req.max_tokens or 520))
     out = sanitize_reply(out or "Bir aksilik oldu.")
+    out = enforce_identity(out)  # ✅ son emniyet kemeri
+
     return ChatResponse(text=out)
