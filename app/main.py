@@ -7,18 +7,14 @@ from typing import List
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from fastapi.staticfiles import StaticFiles  # ✅ NEW
+from fastapi.staticfiles import StaticFiles
 
-# --- ROUTER IMPORTLARI (Modülleri çağırıyoruz) ---
+# --- ROUTER IMPORTLARI ---
 
-# 1. Yeni Eklenen Özellikler (Sohbet & Ses)
 from app.routers import chat
 from app.routers import tts_openai
-
-# ✅ NEW: Lang Pool (server-side build + static serve)
 from app.routers import lang_pool
 
-# 2. Mevcut Özellikler (Eğer bu dosyalar yoksa bu satırları silebilirsin)
 try:
     from app.routers import translate
     from app.routers import tts
@@ -27,7 +23,6 @@ try:
 except ImportError:
     has_legacy_modules = False
 
-# --- UYGULAMA AYARLARI ---
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v2.0").strip()
 
 app = FastAPI(
@@ -37,13 +32,13 @@ app = FastAPI(
     redirect_slashes=False
 )
 
-# ✅ NEW: Static assets mount
-# Bu sayede backend şuradan servis eder:
-#   /assets/lang/en.json  -> static/lang/en.json
-# Not: "static" klasörü yoksa oluştur. lang_pool router zaten static/lang yaratır.
+# ✅ KRİTİK: static/lang klasörü garanti (mount'tan ÖNCE)
+os.makedirs("static/lang", exist_ok=True)
+
+# ✅ Static assets mount
+# /assets/lang/en.json -> static/lang/en.json
 app.mount("/assets", StaticFiles(directory="static"), name="assets")
 
-# --- CORS (Tarayıcı Erişim İzinleri) ---
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
@@ -51,7 +46,7 @@ ALLOWED_ORIGINS: List[str] = [
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5500",
-    "*"  # Geliştirme ortamı için tümüne izin ver
+    "*"
 ]
 
 app.add_middleware(
@@ -62,24 +57,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- ROUTERLARI BAĞLAMA (INCLUDE) ---
-
-# 1. Voice AI (Konuşkan Mod)
+# --- ROUTERLAR ---
 app.include_router(chat.router, prefix="/api", tags=["Chat AI"])
 app.include_router(tts_openai.router, prefix="/api", tags=["Voice AI"])
-
-# ✅ NEW: Lang Pool (admin build endpoint + optional serve route)
-# Not: lang_pool router içinde /admin/lang/build ve /assets/lang/{lang}.json var.
-# /assets mount zaten static dosyayı servis eder; router'daki GET endpoint de opsiyonel fallback.
 app.include_router(lang_pool.router, tags=["Lang Pool"])
 
-# 2. Eski Modüller (Varsa ekle)
 if has_legacy_modules:
     app.include_router(translate.router, prefix="/api", tags=["Translate"])
     app.include_router(tts.router, prefix="/api", tags=["Legacy TTS"])
     app.include_router(ocr.router, prefix="/api", tags=["OCR"])
-
-# --- TEMEL ENDPOINTLER ---
 
 @app.get("/")
 def root():
@@ -90,7 +76,7 @@ def root():
         "modules": {
             "chat": True,
             "voice_ai": True,
-            "lang_pool": True,  # ✅ NEW
+            "lang_pool": True,
             "legacy_modules": has_legacy_modules
         }
     }
@@ -105,5 +91,4 @@ async def favicon():
 
 if __name__ == "__main__":
     import uvicorn
-    # Localde çalıştırmak için: python app/main.py
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
