@@ -75,7 +75,7 @@ async def call_gemini(messages: List[Dict[str, Any]], system_instruction: str, m
 
     try:
         # ✅ ASENKRON ÇAĞRI: Burası sunucuyu kilitlemez, arkada bekler.
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=45.0) as client:
             response = await client.post(url, params=params, json=body, headers=headers)
             
         if response.status_code != 200:
