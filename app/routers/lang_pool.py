@@ -46,7 +46,7 @@ def require_admin(x_admin_secret: Optional[str] = Header(default=None)):
 class BuildReq(BaseModel):
     lang: str
     target: int = 1000
-    chunk: int = 120          # ✅ 200 yerine 120: JSON daha stabil çıkar
+    chunk: int = 120
     max_rounds: int = 60
     version: int = 1
 
@@ -110,27 +110,24 @@ def sanitize_items(arr: Any) -> List[Dict[str, str]]:
     return out
 
 def build_prompt(lang_name: str, n: int, seed: int) -> str:
-    # Burada kullanıcı mesajı olarak sadece “üret” diyoruz.
-    # Formatı system_instruction’da sıkı tutacağız.
     return f"{lang_name} dilinde {n} farklı kelime üret. Seed:{seed}"
 
 def build_system_instruction() -> str:
     return (
         "SEN BİR VERİ ÜRETİCİSİN. SADECE JSON ÜRET.\n"
-        "Her zaman SADECE JSON ARRAY döndür. Ek açıklama yok.\n"
-        "Şema:\n"
+        "KESİNLİKLE SADECE GEÇERLİ JSON ARRAY döndür.\n"
+        "Başta/sonda hiçbir açıklama, markdown, kod bloğu, not, cümle YOK.\n"
+        "Yalnızca şu şemaya uygun liste gelecek:\n"
         "[\n"
         '  {"w":"word","tr":"türkçe","pos":"noun|verb|adj|adv","lvl":"A1|A2|B1|B2|C1"}\n'
         "]\n"
         "Kurallar:\n"
+        "- w ve tr boş olamaz\n"
+        "- pos sadece noun,verb,adj,adv\n"
+        "- lvl sadece A1,A2,B1,B2,C1\n"
+        "- kelimeler tekrarsız olacak\n"
         "- küfür/argo yok\n"
-        "- kelimeler birbirinden farklı olacak\n"
-        "- w alanı tek kelime veya max 2 kelimelik kalıp olabilir (take off)\n"
-        "- tr kısa ve net Türkçe karşılık\n"
-        "- pos mutlaka noun/verb/adj/adv\n"
-        "- lvl mutlaka A1/A2/B1/B2/C1\n"
-        "Dağılım hedefi:\n"
-        "- A1 %20, A2 %20, B1 %25, B2 %20, C1 %15\n"
+        "Dağılım hedefi: A1 %20, A2 %20, B1 %25, B2 %20, C1 %15\n"
     )
 
 def load_existing(lang: str) -> List[Dict[str, str]]:
@@ -156,14 +153,17 @@ def load_existing(lang: str) -> List[Dict[str, str]]:
         return []
 
 def write_lang(lang: str, version: int, items: List[Dict[str, str]]):
-    payload = {"lang": lang, "version": version, "items": items}
-    (LANG_DIR / f"{lang}.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    try:
+        LANG_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {"lang": lang, "version": version, "items": items}
+        (LANG_DIR / f"{lang}.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"write_lang failed: {e}")
 
 async def gemini_generate_json(prompt_user: str, system_instruction: str, max_tokens: int) -> str:
-    # call_gemini, OpenAI benzeri messages listesi bekliyor
     messages = [{"role": "user", "content": prompt_user}]
     return await call_gemini(messages, system_instruction=system_instruction, max_tokens=max_tokens)
 
@@ -175,8 +175,8 @@ async def build_lang(req: BuildReq):
         raise HTTPException(status_code=400, detail=f"Unsupported lang: {lang}")
 
     target = max(50, min(20000, int(req.target)))
-    chunk = max(50, min(200, int(req.chunk)))          # ✅ 200 üstü istemiyoruz
-    max_rounds = max(3, min(120, int(req.max_rounds)))
+    chunk = max(50, min(200, int(req.chunk)))
+    max_rounds = max(3, min(200, int(req.max_rounds)))
     version = int(req.version)
 
     items = load_existing(lang)
@@ -189,18 +189,31 @@ async def build_lang(req: BuildReq):
         rounds += 1
         need = target - len(items)
         ask = chunk if need > chunk else need
-        seed = random.randint(1, 10**9)
 
+        seed = random.randint(1, 10**9)
         user_prompt = build_prompt(LANGS[lang], ask, seed)
 
-        # ✅ max_tokens: JSON büyüyünce 3200 şart değil, 1800 daha stabil
-        raw_text = await gemini_generate_json(user_prompt, system_instruction, max_tokens=1800)
+        raw_text = await gemini_generate_json(user_prompt, system_instruction, max_tokens=3200)
 
-        try:
-            arr = extract_json_array(raw_text)
-            cleaned = sanitize_items(arr)
-        except Exception:
-            # parse olmadıysa bu turu pas geç, sistem çökmesin
+        # ✅ 3 kez retry
+        cleaned: List[Dict[str, str]] = []
+        for _ in range(3):
+            try:
+                arr = extract_json_array(raw_text)
+                cleaned = sanitize_items(arr)
+                if cleaned:
+                    break
+            except Exception:
+                cleaned = []
+
+            seed2 = random.randint(1, 10**9)
+            raw_text = await gemini_generate_json(
+                f"{LANGS[lang]} dilinde {ask} farklı kelime üret. Seed:{seed2}. SADECE JSON ARRAY!",
+                system_instruction,
+                max_tokens=3200
+            )
+
+        if not cleaned:
             continue
 
         added = 0
@@ -212,11 +225,13 @@ async def build_lang(req: BuildReq):
             items.append(it)
             added += 1
 
-        # ara kaydet
         write_lang(lang, version, items[:target])
 
         if added == 0:
             break
+
+    if len(items) == 0:
+        raise HTTPException(status_code=500, detail="No items generated (model did not return parseable JSON).")
 
     write_lang(lang, version, items[:target])
     return BuildResp(lang=lang, target=target, total=min(len(items), target), path=str(LANG_DIR / f"{lang}.json"))
