@@ -96,10 +96,14 @@ def sanitize_items(arr: Any) -> List[Dict[str, str]]:
             continue
 
         if pos not in POS_ALLOWED:
-            if pos.startswith("n"): pos = "noun"
-            elif pos.startswith("v"): pos = "verb"
-            elif pos.startswith("ad") and pos != "adj": pos = "adv"
-            elif pos.startswith("a"): pos = "adj"
+            if pos.startswith("n"):
+                pos = "noun"
+            elif pos.startswith("v"):
+                pos = "verb"
+            elif pos.startswith("ad") and pos != "adj":
+                pos = "adv"
+            elif pos.startswith("a"):
+                pos = "adj"
         if pos not in POS_ALLOWED:
             continue
 
@@ -139,14 +143,14 @@ def load_existing(lang: str) -> List[Dict[str, str]]:
         items = data.get("items", [])
         if not isinstance(items, list):
             return []
-        cleaned = []
+        cleaned: List[Dict[str, str]] = []
         for it in items:
             if isinstance(it, dict) and it.get("w") and it.get("tr"):
                 cleaned.append({
                     "w": str(it["w"]).strip(),
                     "tr": str(it["tr"]).strip(),
-                    "pos": str(it.get("pos","noun")).strip().lower(),
-                    "lvl": str(it.get("lvl","B1")).strip().upper(),
+                    "pos": str(it.get("pos", "noun")).strip().lower(),
+                    "lvl": str(it.get("lvl", "B1")).strip().upper(),
                 })
         return cleaned
     except Exception:
@@ -185,6 +189,8 @@ async def build_lang(req: BuildReq):
     system_instruction = build_system_instruction()
 
     rounds = 0
+    no_progress = 0
+
     while len(items) < target and rounds < max_rounds:
         rounds += 1
         need = target - len(items)
@@ -213,7 +219,11 @@ async def build_lang(req: BuildReq):
                 max_tokens=3200
             )
 
+        # ✅ hiç üretemediyse no_progress say
         if not cleaned:
+            no_progress += 1
+            if no_progress >= 5:
+                break
             continue
 
         added = 0
@@ -228,7 +238,11 @@ async def build_lang(req: BuildReq):
         write_lang(lang, version, items[:target])
 
         if added == 0:
-            break
+            no_progress += 1
+            if no_progress >= 5:
+                break
+        else:
+            no_progress = 0
 
     if len(items) == 0:
         raise HTTPException(status_code=500, detail="No items generated (model did not return parseable JSON).")
