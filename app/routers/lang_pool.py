@@ -118,20 +118,21 @@ def build_prompt(lang_name: str, n: int, seed: int) -> str:
 
 def build_system_instruction() -> str:
     return (
-        "SEN BİR VERİ ÜRETİCİSİN. SADECE JSON ÜRET.\n"
-        "KESİNLİKLE SADECE GEÇERLİ JSON ARRAY döndür.\n"
-        "Başta/sonda hiçbir açıklama, markdown, kod bloğu, not, cümle YOK.\n"
-        "Yalnızca şu şemaya uygun liste gelecek:\n"
+        "YOU ARE A DATA GENERATOR. OUTPUT ONLY VALID JSON.\n"
+        "Return ONLY a JSON ARRAY. No markdown. No extra text.\n"
+        "Schema:\n"
         "[\n"
-        '  {"w":"word","tr":"türkçe","pos":"noun|verb|adj|adv","lvl":"A1|A2|B1|B2|C1"}\n'
+        '  {"w":"word","tr":"turkish_ascii","pos":"noun|verb|adj|adv","lvl":"A1|A2|B1|B2|C1"}\n'
         "]\n"
-        "Kurallar:\n"
-        "- w ve tr boş olamaz\n"
-        "- pos sadece noun,verb,adj,adv\n"
-        "- lvl sadece A1,A2,B1,B2,C1\n"
-        "- kelimeler tekrarsız olacak\n"
-        "- küfür/argo yok\n"
-        "Dağılım hedefi: A1 %20, A2 %20, B1 %25, B2 %20, C1 %15\n"
+        "Rules:\n"
+        "- All items must be unique\n"
+        "- No profanity\n"
+        "- w is 1 word or max 2-word phrase\n"
+        "- tr MUST be Turkish meaning but written in ASCII only (no ğüşöçıİ).\n"
+        "  Example: 'ozgurluk', 'guzel', 'cocuk', 'soguk'\n"
+        "- pos must be noun|verb|adj|adv\n"
+        "- lvl must be A1|A2|B1|B2|C1\n"
+        "Target level distribution: A1 20%, A2 20%, B1 25%, B2 20%, C1 15%\n"
     )
 
 def load_existing(lang: str) -> List[Dict[str, str]]:
