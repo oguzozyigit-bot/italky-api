@@ -49,7 +49,7 @@ class BuildReq(BaseModel):
     chunk: int = 120
     max_rounds: int = 60
     version: int = 1
-    mode: str = "fill"   # ✅ "fill" veya "add"
+    mode: str = "fill"  # "fill" veya "add"
 
 class BuildResp(BaseModel):
     lang: str
@@ -115,9 +115,10 @@ def sanitize_items(arr: Any) -> List[Dict[str, str]]:
     return out
 
 def build_prompt(lang_name: str, n: int, seed: int) -> str:
-    return f"{lang_name} dilinde {n} farklı kelime üret. Seed:{seed}"
+    return f"{lang_name} dilinde {n} farkli kelime uret. Seed:{seed}"
 
 def build_system_instruction() -> str:
+    # ✅ ASCII-safe TR (encoding sıkıntısı yüzünden)
     return (
         "YOU ARE A DATA GENERATOR. OUTPUT ONLY VALID JSON.\n"
         "Return ONLY a JSON ARRAY. No markdown. No extra text.\n"
@@ -180,19 +181,19 @@ async def build_lang(req: BuildReq):
     if lang not in LANGS:
         raise HTTPException(status_code=400, detail=f"Unsupported lang: {lang}")
 
+    # request param sanitize
     target = max(50, min(20000, int(req.target)))
     chunk = max(50, min(200, int(req.chunk)))
     max_rounds = max(3, min(200, int(req.max_rounds)))
     version = int(req.version)
 
-        items = load_existing(lang)
+    items = load_existing(lang)
 
-    # mode="add" ise: bu çağrıda sadece chunk kadar ekle, hızlı dön
-    if req.mode == "add":
+    # ✅ mode="add": bu çağrıda sadece chunk kadar ekle ve dön
+    if (req.mode or "").strip().lower() == "add":
         target = min(len(items) + chunk, 20000)
 
     seen = set(norm(it["w"]) for it in items if it.get("w"))
-
     system_instruction = build_system_instruction()
 
     rounds = 0
@@ -221,12 +222,11 @@ async def build_lang(req: BuildReq):
 
             seed2 = random.randint(1, 10**9)
             raw_text = await gemini_generate_json(
-                f"{LANGS[lang]} dilinde {ask} farklı kelime üret. Seed:{seed2}. SADECE JSON ARRAY!",
+                f"{LANGS[lang]} dilinde {ask} farkli kelime uret. Seed:{seed2}. ONLY JSON ARRAY!",
                 system_instruction,
                 max_tokens=3200
             )
 
-        # ✅ hiç üretemediyse no_progress say
         if not cleaned:
             no_progress += 1
             if no_progress >= 5:
@@ -255,7 +255,12 @@ async def build_lang(req: BuildReq):
         raise HTTPException(status_code=500, detail="No items generated (model did not return parseable JSON).")
 
     write_lang(lang, version, items[:target])
-    return BuildResp(lang=lang, target=target, total=min(len(items), target), path=str(LANG_DIR / f"{lang}.json"))
+    return BuildResp(
+        lang=lang,
+        target=target,
+        total=min(len(items), target),
+        path=str(LANG_DIR / f"{lang}.json")
+    )
 
 @router.get("/assets/lang/{lang}.json")
 def get_lang(lang: str):
