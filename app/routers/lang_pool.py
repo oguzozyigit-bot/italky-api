@@ -49,6 +49,7 @@ class BuildReq(BaseModel):
     chunk: int = 120
     max_rounds: int = 60
     version: int = 1
+    mode: str = "fill"   # ✅ "fill" veya "add"
 
 class BuildResp(BaseModel):
     lang: str
@@ -185,6 +186,9 @@ async def build_lang(req: BuildReq):
     version = int(req.version)
 
     items = load_existing(lang)
+    # mode="add" ise: bu çağrıda sadece chunk kadar ekle, hızlı dön
+    if req.mode == "add":
+    target = min(len(items) + chunk, 20000)
     seen = set(norm(it["w"]) for it in items if it.get("w"))
 
     system_instruction = build_system_instruction()
