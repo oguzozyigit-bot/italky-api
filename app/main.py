@@ -3,15 +3,20 @@ from __future__ import annotations
 
 import os
 from typing import List
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles  # ✅ NEW
 
 # --- ROUTER IMPORTLARI (Modülleri çağırıyoruz) ---
 
 # 1. Yeni Eklenen Özellikler (Sohbet & Ses)
 from app.routers import chat
 from app.routers import tts_openai
+
+# ✅ NEW: Lang Pool (server-side build + static serve)
+from app.routers import lang_pool
 
 # 2. Mevcut Özellikler (Eğer bu dosyalar yoksa bu satırları silebilirsin)
 try:
@@ -32,6 +37,12 @@ app = FastAPI(
     redirect_slashes=False
 )
 
+# ✅ NEW: Static assets mount
+# Bu sayede backend şuradan servis eder:
+#   /assets/lang/en.json  -> static/lang/en.json
+# Not: "static" klasörü yoksa oluştur. lang_pool router zaten static/lang yaratır.
+app.mount("/assets", StaticFiles(directory="static"), name="assets")
+
 # --- CORS (Tarayıcı Erişim İzinleri) ---
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
@@ -40,7 +51,7 @@ ALLOWED_ORIGINS: List[str] = [
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5500",
-    "*" # Geliştirme ortamı için tümüne izin ver
+    "*"  # Geliştirme ortamı için tümüne izin ver
 ]
 
 app.add_middleware(
@@ -56,6 +67,11 @@ app.add_middleware(
 # 1. Voice AI (Konuşkan Mod)
 app.include_router(chat.router, prefix="/api", tags=["Chat AI"])
 app.include_router(tts_openai.router, prefix="/api", tags=["Voice AI"])
+
+# ✅ NEW: Lang Pool (admin build endpoint + optional serve route)
+# Not: lang_pool router içinde /admin/lang/build ve /assets/lang/{lang}.json var.
+# /assets mount zaten static dosyayı servis eder; router'daki GET endpoint de opsiyonel fallback.
+app.include_router(lang_pool.router, tags=["Lang Pool"])
 
 # 2. Eski Modüller (Varsa ekle)
 if has_legacy_modules:
@@ -74,6 +90,7 @@ def root():
         "modules": {
             "chat": True,
             "voice_ai": True,
+            "lang_pool": True,  # ✅ NEW
             "legacy_modules": has_legacy_modules
         }
     }
