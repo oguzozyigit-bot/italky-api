@@ -185,10 +185,12 @@ async def build_lang(req: BuildReq):
     max_rounds = max(3, min(200, int(req.max_rounds)))
     version = int(req.version)
 
-    items = load_existing(lang)
+        items = load_existing(lang)
+
     # mode="add" ise: bu çağrıda sadece chunk kadar ekle, hızlı dön
     if req.mode == "add":
-    target = min(len(items) + chunk, 20000)
+        target = min(len(items) + chunk, 20000)
+
     seen = set(norm(it["w"]) for it in items if it.get("w"))
 
     system_instruction = build_system_instruction()
