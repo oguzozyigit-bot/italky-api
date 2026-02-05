@@ -1,27 +1,26 @@
-# FILE: italky-api/app/routers/lang_pool.py
 from __future__ import annotations
 
 import json
 import os
 import re
 import random
-from pathlib import Path
 from typing import Dict, List, Any, Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 
-# ✅ chat.py içinden direkt gemini çağrısını kullanacağız (API /chat değil!)
+# ✅ Gemini çağrısı (chat.py içindeki async fonksiyon)
 from app.routers.chat import call_gemini
 
 router = APIRouter()
 
-# ====== AYARLAR ======
+# ====== ENV ======
 ADMIN_SECRET = (os.getenv("ADMIN_SECRET", "") or "").strip()
 
-STATIC_DIR = Path(os.getenv("LANGPOOL_STATIC_DIR", "static")).resolve()
-LANG_DIR = STATIC_DIR / "lang"
-LANG_DIR.mkdir(parents=True, exist_ok=True)
+SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or "").strip().rstrip("/")
+SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
+LANGPOOL_BUCKET = (os.getenv("LANGPOOL_BUCKET", "lang") or "lang").strip()
 
 LANGS = {
     "en": "İngilizce",
@@ -42,20 +41,20 @@ def require_admin(x_admin_secret: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=401, detail="Unauthorized")
     return True
 
-# ====== MODELLER ======
+# ====== MODELS ======
 class BuildReq(BaseModel):
     lang: str
     target: int = 1000
     chunk: int = 120
     max_rounds: int = 60
     version: int = 1
-    mode: str = "fill"  # "fill" veya "add"
+    mode: str = "fill"  # "fill" | "add"
 
 class BuildResp(BaseModel):
     lang: str
     target: int
     total: int
-    path: str
+    public_url: str
 
 # ====== HELPERS ======
 def norm(s: str) -> str:
@@ -115,10 +114,11 @@ def sanitize_items(arr: Any) -> List[Dict[str, str]]:
     return out
 
 def build_prompt(lang_name: str, n: int, seed: int) -> str:
+    # ASCII güvenli (tr alanı da ascii)
     return f"{lang_name} dilinde {n} farkli kelime uret. Seed:{seed}"
 
 def build_system_instruction() -> str:
-    # ✅ ASCII-safe TR (encoding sıkıntısı yüzünden)
+    # ASCII-safe tr: Türkçe karakter istemiyoruz (encoding riskini azaltır)
     return (
         "YOU ARE A DATA GENERATOR. OUTPUT ONLY VALID JSON.\n"
         "Return ONLY a JSON ARRAY. No markdown. No extra text.\n"
@@ -134,44 +134,44 @@ def build_system_instruction() -> str:
         "  Example: 'ozgurluk', 'guzel', 'cocuk', 'soguk'\n"
         "- pos must be noun|verb|adj|adv\n"
         "- lvl must be A1|A2|B1|B2|C1\n"
-        "Target level distribution: A1 20%, A2 20%, B1 25%, B2 20%, C1 15%\n"
+        "Target distribution: A1 20%, A2 20%, B1 25%, B2 20%, C1 15%\n"
     )
 
-def load_existing(lang: str) -> List[Dict[str, str]]:
-    p = LANG_DIR / f"{lang}.json"
-    if not p.exists():
-        return []
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-        items = data.get("items", [])
-        if not isinstance(items, list):
-            return []
-        cleaned: List[Dict[str, str]] = []
-        for it in items:
-            if isinstance(it, dict) and it.get("w") and it.get("tr"):
-                cleaned.append({
-                    "w": str(it["w"]).strip(),
-                    "tr": str(it["tr"]).strip(),
-                    "pos": str(it.get("pos", "noun")).strip().lower(),
-                    "lvl": str(it.get("lvl", "B1")).strip().upper(),
-                })
-        return cleaned
-    except Exception:
-        return []
+async def supabase_upload(lang: str, payload: dict):
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Supabase env missing (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)")
 
-def write_lang(lang: str, version: int, items: List[Dict[str, str]]):
-    try:
-        LANG_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {"lang": lang, "version": version, "items": items}
-        (LANG_DIR / f"{lang}.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"write_lang failed: {e}")
+    path = f"{lang}.json"
+    url = f"{SUPABASE_URL}/storage/v1/object/{LANGPOOL_BUCKET}/{path}"
 
-async def gemini_generate_json(prompt_user: str, system_instruction: str, max_tokens: int) -> str:
-    messages = [{"role": "user", "content": prompt_user}]
+    headers = {
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Content-Type": "application/json",
+        "x-upsert": "true",
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.put(url, headers=headers, content=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    if r.status_code not in (200, 201):
+        raise HTTPException(status_code=500, detail=f"Supabase upload failed: {r.status_code} {r.text}")
+
+async def supabase_download(lang: str) -> dict:
+    # Public bucket ise public URL ile çekiyoruz
+    if not SUPABASE_URL:
+        raise HTTPException(status_code=500, detail="SUPABASE_URL missing")
+    url = f"{SUPABASE_URL}/storage/v1/object/public/{LANGPOOL_BUCKET}/{lang}.json"
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(url)
+    if r.status_code != 200:
+        return {"lang": lang, "version": 1, "items": []}
+    return r.json()
+
+def public_url(lang: str) -> str:
+    return f"{SUPABASE_URL}/storage/v1/object/public/{LANGPOOL_BUCKET}/{lang}.json"
+
+async def gemini_generate_json(user_prompt: str, system_instruction: str, max_tokens: int) -> str:
+    messages = [{"role": "user", "content": user_prompt}]
     return await call_gemini(messages, system_instruction=system_instruction, max_tokens=max_tokens)
 
 # ====== ENDPOINTS ======
@@ -181,19 +181,44 @@ async def build_lang(req: BuildReq):
     if lang not in LANGS:
         raise HTTPException(status_code=400, detail=f"Unsupported lang: {lang}")
 
-    # request param sanitize
     target = max(50, min(20000, int(req.target)))
-    chunk = max(50, min(200, int(req.chunk)))
-    max_rounds = max(3, min(200, int(req.max_rounds)))
+    chunk = max(20, min(200, int(req.chunk)))
+    max_rounds = max(1, min(200, int(req.max_rounds)))
     version = int(req.version)
+    mode = (req.mode or "fill").strip().lower()
 
-    items = load_existing(lang)
+    existing = await supabase_download(lang)
+    items = existing.get("items", [])
+    if not isinstance(items, list):
+        items = []
 
-    # ✅ mode="add": bu çağrıda sadece chunk kadar ekle ve dön
-    if (req.mode or "").strip().lower() == "add":
+    # normalize existing
+    seen = set()
+    cleaned_existing: List[Dict[str, str]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        w = str(it.get("w","")).strip()
+        tr = str(it.get("tr","")).strip()
+        if not w or not tr:
+            continue
+        k = norm(w)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        cleaned_existing.append({
+            "w": w,
+            "tr": tr,
+            "pos": str(it.get("pos","noun")).strip().lower() or "noun",
+            "lvl": str(it.get("lvl","B1")).strip().upper() or "B1",
+        })
+
+    items = cleaned_existing
+
+    # mode add: sadece chunk kadar ekle
+    if mode == "add":
         target = min(len(items) + chunk, 20000)
 
-    seen = set(norm(it["w"]) for it in items if it.get("w"))
     system_instruction = build_system_instruction()
 
     rounds = 0
@@ -209,16 +234,16 @@ async def build_lang(req: BuildReq):
 
         raw_text = await gemini_generate_json(user_prompt, system_instruction, max_tokens=3200)
 
-        # ✅ 3 kez retry
-        cleaned: List[Dict[str, str]] = []
+        # retry parse
+        new_batch: List[Dict[str, str]] = []
         for _ in range(3):
             try:
                 arr = extract_json_array(raw_text)
-                cleaned = sanitize_items(arr)
-                if cleaned:
+                new_batch = sanitize_items(arr)
+                if new_batch:
                     break
             except Exception:
-                cleaned = []
+                new_batch = []
 
             seed2 = random.randint(1, 10**9)
             raw_text = await gemini_generate_json(
@@ -227,22 +252,20 @@ async def build_lang(req: BuildReq):
                 max_tokens=3200
             )
 
-        if not cleaned:
+        if not new_batch:
             no_progress += 1
             if no_progress >= 5:
                 break
             continue
 
         added = 0
-        for it in cleaned:
+        for it in new_batch:
             k = norm(it["w"])
             if not k or k in seen:
                 continue
             seen.add(k)
             items.append(it)
             added += 1
-
-        write_lang(lang, version, items[:target])
 
         if added == 0:
             no_progress += 1
@@ -251,21 +274,23 @@ async def build_lang(req: BuildReq):
         else:
             no_progress = 0
 
+        # her turda upload (kaldığı yerden devam)
+        payload = {"lang": lang, "version": version, "items": items[:target]}
+        await supabase_upload(lang, payload)
+
     if len(items) == 0:
         raise HTTPException(status_code=500, detail="No items generated (model did not return parseable JSON).")
 
-    write_lang(lang, version, items[:target])
-    return BuildResp(
-        lang=lang,
-        target=target,
-        total=min(len(items), target),
-        path=str(LANG_DIR / f"{lang}.json")
-    )
+    payload = {"lang": lang, "version": version, "items": items[:target]}
+    await supabase_upload(lang, payload)
+
+    return BuildResp(lang=lang, target=target, total=min(len(items), target), public_url=public_url(lang))
 
 @router.get("/assets/lang/{lang}.json")
-def get_lang(lang: str):
+async def get_lang(lang: str):
     lang = (lang or "").strip().lower()
-    p = LANG_DIR / f"{lang}.json"
-    if not p.exists():
-        raise HTTPException(status_code=404, detail="not found")
-    return json.loads(p.read_text(encoding="utf-8"))
+    if lang not in LANGS:
+        raise HTTPException(status_code=400, detail="Unsupported lang")
+    data = await supabase_download(lang)
+    # eğer bucket boşsa 404 yerine boş havuz dönelim
+    return data
