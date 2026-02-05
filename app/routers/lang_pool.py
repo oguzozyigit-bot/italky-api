@@ -58,6 +58,10 @@ class BuildResp(BaseModel):
 
 # ====== HELPERS ======
 def norm(s: str) -> str:
+    """
+    Unique key için sadece w üzerinde kullanıyoruz.
+    (TR karakterleri öldürmesi sorun değil çünkü tr alanına uygulanmıyor.)
+    """
     s = (s or "").strip().lower()
     try:
         import unicodedata
@@ -81,16 +85,24 @@ def extract_json_array(text: str) -> Any:
         return json.loads(t.replace("'", '"'))
 
 def sanitize_items(arr: Any) -> List[Dict[str, str]]:
+    """
+    ✅ tr alanı artık gerçek Türkçe karakterlerle gelir (öğrenmek, sık sık vs.)
+    ✅ sentence opsiyonel alanı destekler.
+    """
     if not isinstance(arr, list):
         return []
     out: List[Dict[str, str]] = []
     for it in arr:
         if not isinstance(it, dict):
             continue
+
         w = str(it.get("w", "")).strip()
         tr = str(it.get("tr", "")).strip()
         pos = str(it.get("pos", "")).strip().lower()
         lvl = str(it.get("lvl", "")).strip().upper()
+
+        # optional
+        sentence = str(it.get("sentence", "") or it.get("ex", "") or "").strip()
 
         if not w or not tr:
             continue
@@ -110,30 +122,36 @@ def sanitize_items(arr: Any) -> List[Dict[str, str]]:
         if lvl not in LVL_ALLOWED:
             lvl = "B1"
 
-        out.append({"w": w, "tr": tr, "pos": pos, "lvl": lvl})
+        row: Dict[str, str] = {"w": w, "tr": tr, "pos": pos, "lvl": lvl}
+        if sentence:
+            row["sentence"] = sentence
+
+        out.append(row)
     return out
 
 def build_prompt(lang_name: str, n: int, seed: int) -> str:
-    # ASCII güvenli (tr alanı da ascii)
-    return f"{lang_name} dilinde {n} farkli kelime uret. Seed:{seed}"
+    # ✅ Türkçe karakter serbest: modelin doğru TR yazmasını isteriz
+    return f"{lang_name} dilinde {n} farklı kelime üret. Seed:{seed}"
 
 def build_system_instruction() -> str:
-    # ASCII-safe tr: Türkçe karakter istemiyoruz (encoding riskini azaltır)
+    # ✅ TR alanı gerçek Türkçe olacak (öğrenmek, sık sık vs.)
     return (
         "YOU ARE A DATA GENERATOR. OUTPUT ONLY VALID JSON.\n"
         "Return ONLY a JSON ARRAY. No markdown. No extra text.\n"
         "Schema:\n"
         "[\n"
-        '  {"w":"word","tr":"turkish_ascii","pos":"noun|verb|adj|adv","lvl":"A1|A2|B1|B2|C1"}\n'
+        '  {"w":"word","tr":"turkish","pos":"noun|verb|adj|adv","lvl":"A1|A2|B1|B2|C1","sentence":"optional"}\n'
         "]\n"
         "Rules:\n"
         "- All items must be unique\n"
         "- No profanity\n"
         "- w is 1 word or max 2-word phrase\n"
-        "- tr MUST be Turkish meaning but written in ASCII only (no ğüşöçıİ).\n"
-        "  Example: 'ozgurluk', 'guzel', 'cocuk', 'soguk'\n"
+        "- tr MUST be correct Turkish with diacritics preserved (ğüşöçıİ).\n"
+        "  Examples: 'özgürlük', 'güzel', 'çocuk', 'soğuk', 'sık sık', 'öğrenmek'\n"
+        "- Do NOT ascii-fy Turkish. Do NOT remove accents.\n"
         "- pos must be noun|verb|adj|adv\n"
         "- lvl must be A1|A2|B1|B2|C1\n"
+        "- sentence is optional; if present keep it short and simple.\n"
         "Target distribution: A1 20%, A2 20%, B1 25%, B2 20%, C1 15%\n"
     )
 
@@ -152,7 +170,11 @@ async def supabase_upload(lang: str, payload: dict):
     }
 
     async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.put(url, headers=headers, content=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        r = await client.put(
+            url,
+            headers=headers,
+            content=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        )
     if r.status_code not in (200, 201):
         raise HTTPException(status_code=500, detail=f"Supabase upload failed: {r.status_code} {r.text}")
 
@@ -192,26 +214,30 @@ async def build_lang(req: BuildReq):
     if not isinstance(items, list):
         items = []
 
-    # normalize existing
+    # normalize existing (unique by w only)
     seen = set()
     cleaned_existing: List[Dict[str, str]] = []
     for it in items:
         if not isinstance(it, dict):
             continue
-        w = str(it.get("w","")).strip()
-        tr = str(it.get("tr","")).strip()
+        w = str(it.get("w", "")).strip()
+        tr = str(it.get("tr", "")).strip()
         if not w or not tr:
             continue
         k = norm(w)
         if not k or k in seen:
             continue
         seen.add(k)
-        cleaned_existing.append({
-            "w": w,
-            "tr": tr,
-            "pos": str(it.get("pos","noun")).strip().lower() or "noun",
-            "lvl": str(it.get("lvl","B1")).strip().upper() or "B1",
-        })
+
+        pos = str(it.get("pos", "noun")).strip().lower() or "noun"
+        lvl = str(it.get("lvl", "B1")).strip().upper() or "B1"
+        sentence = str(it.get("sentence", "") or it.get("ex", "") or "").strip()
+
+        row: Dict[str, str] = {"w": w, "tr": tr, "pos": pos, "lvl": lvl}
+        if sentence:
+            row["sentence"] = sentence
+
+        cleaned_existing.append(row)
 
     items = cleaned_existing
 
@@ -247,7 +273,7 @@ async def build_lang(req: BuildReq):
 
             seed2 = random.randint(1, 10**9)
             raw_text = await gemini_generate_json(
-                f"{LANGS[lang]} dilinde {ask} farkli kelime uret. Seed:{seed2}. ONLY JSON ARRAY!",
+                f"{LANGS[lang]} dilinde {ask} farklı kelime üret. Seed:{seed2}. ONLY JSON ARRAY!",
                 system_instruction,
                 max_tokens=3200
             )
