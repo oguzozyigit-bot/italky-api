@@ -7,6 +7,8 @@ from typing import Optional, List, Dict
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
+
+# ✅ openai python sdk
 from openai import OpenAI
 
 logger = logging.getLogger("uvicorn.error")
@@ -41,7 +43,6 @@ def chat_openai(req: ChatOpenAIRequest):
         raise HTTPException(status_code=400, detail="Boş mesaj gönderilemez.")
 
     name = req.persona_name or "italkyAI"
-
     system_prompt = (
         f"Adın {name}. italkyAI tarafından geliştirilen sesli asistansın. "
         "Cevapların kısa ve sohbet gibi olsun (1-2 cümle). "
@@ -68,6 +69,7 @@ def chat_openai(req: ChatOpenAIRequest):
         )
         text_out = (out.choices[0].message.content or "").strip()
         return ChatOpenAIResponse(text=text_out or "...", model=CHAT_MODEL)
+
     except Exception as e:
         logger.error("OpenAI chat failed: %s", e)
         raise HTTPException(status_code=500, detail=f"OpenAI chat failed: {str(e)}")
