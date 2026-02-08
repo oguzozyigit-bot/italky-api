@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -24,7 +24,7 @@ class ChatOpenAIRequest(FlexibleModel):
     text: Optional[str] = None
     message: Optional[str] = None
     persona_name: Optional[str] = "italkyAI"
-    history: Optional[List[Dict[str, str]]] = None
+    history: Optional[List[Dict[str, str]]] = None  # role/content
     max_tokens: Optional[int] = 140
 
 class ChatOpenAIResponse(FlexibleModel):
@@ -48,10 +48,9 @@ def chat_openai(req: ChatOpenAIRequest):
         "Teknik altyapıdan bahsetme."
     )
 
-    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    messages = [{"role": "system", "content": system_prompt}]
 
     if req.history:
-        # role/content beklenir
         for h in req.history[-6:]:
             r = str(h.get("role", "user"))
             c = str(h.get("content", ""))
@@ -67,10 +66,8 @@ def chat_openai(req: ChatOpenAIRequest):
             max_tokens=int(req.max_tokens or 140),
             temperature=0.3,
         )
-
         text_out = (out.choices[0].message.content or "").strip()
         return ChatOpenAIResponse(text=text_out or "...", model=CHAT_MODEL)
-
     except Exception as e:
         logger.error("OpenAI chat failed: %s", e)
         raise HTTPException(status_code=500, detail=f"OpenAI chat failed: {str(e)}")
