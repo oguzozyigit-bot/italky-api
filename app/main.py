@@ -14,8 +14,10 @@ from app.routers import chat
 from app.routers import tts_openai
 from app.routers import lang_pool
 
+# ✅ NEW: OpenAI chat (voice text)
+from app.routers import chat_openai
+
 # ✅ YENİ: OpenAI STT/TTS (voice) router
-# (Bu dosyayı bir sonraki adımda oluşturacağız: app/routers/voice_openai.py)
 try:
     from app.routers import voice_openai
     has_voice_openai = True
@@ -40,14 +42,10 @@ app = FastAPI(
     redirect_slashes=False
 )
 
-# ✅ KRİTİK: static/lang klasörü garanti (mount'tan ÖNCE)
 os.makedirs("static/lang", exist_ok=True)
 
-# ✅ Static assets mount
-# /assets/lang/en.json -> static/lang/en.json
 app.mount("/assets", StaticFiles(directory="static"), name="assets")
 
-# ✅ CORS: allow_credentials=True iken "*" KULLANILMAZ (tarayıcıda patlar)
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
@@ -66,11 +64,11 @@ app.add_middleware(
 )
 
 # --- ROUTERLAR ---
-app.include_router(chat.router, prefix="/api", tags=["Chat AI"])
-app.include_router(tts_openai.router, prefix="/api", tags=["Voice AI"])
+app.include_router(chat.router, prefix="/api", tags=["Chat AI"])               # Gemini chat (site chat)
+app.include_router(chat_openai.router, prefix="/api", tags=["Chat OpenAI"])   # ✅ OpenAI chat (voice text)
+app.include_router(tts_openai.router, prefix="/api", tags=["Voice AI"])       # your /api/tts_openai (base64)
 app.include_router(lang_pool.router, tags=["Lang Pool"])
 
-# ✅ YENİ: voice_openai router (dosya varsa devreye girer)
 if has_voice_openai and voice_openai is not None:
     app.include_router(voice_openai.router, prefix="/api", tags=["Voice OpenAI"])
 
@@ -87,6 +85,7 @@ def root():
         "version": APP_VERSION,
         "modules": {
             "chat": True,
+            "chat_openai": True,
             "voice_ai": True,
             "voice_openai": bool(has_voice_openai),
             "lang_pool": True,
