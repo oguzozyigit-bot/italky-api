@@ -1,0 +1,199 @@
+{
+  "lang": "zh",
+  "version": "italky-academy-zh-v1",
+  "total": 50,
+  "levels": ["A1","A2","B1","B2","C1"],
+  "questions": [
+
+    /* ---------- A1 ---------- */
+
+    {
+      "id": 1,
+      "level": "A1",
+      "weight": 1,
+      "question": "选择正确的句子。\n(Xuǎnzé zhèngquè de jùzi.)\n「我___中国人。」",
+      "options": ["是 (shì)", "在 (zài)", "有 (yǒu)", "去 (qù)"],
+      "correct": 0
+    },
+    {
+      "id": 2,
+      "level": "A1",
+      "weight": 1,
+      "question": "选择正确的量词。\n(Xuǎnzé zhèngquè de liàngcí.)\n「一___书」",
+      "options": ["个 (gè)", "本 (běn)", "只 (zhī)", "张 (zhāng)"],
+      "correct": 1
+    },
+    {
+      "id": 3,
+      "level": "A1",
+      "weight": 1,
+      "question": "否定形式。\n(Fǒudìng xíngshì.)\n「我___喝咖啡。」",
+      "options": ["不 (bù)", "没 (méi)", "别 (bié)", "给 (gěi)"],
+      "correct": 0
+    },
+    {
+      "id": 4,
+      "level": "A1",
+      "weight": 1,
+      "question": "“大”的反义词：\n(Dà de fǎnyìcí.)",
+      "options": ["小 (xiǎo)", "高 (gāo)", "快 (kuài)", "热 (rè)"],
+      "correct": 0
+    },
+    {
+      "id": 5,
+      "level": "A1",
+      "weight": 1,
+      "question": "选择正确。\n(Xuǎnzé zhèngquè.)\n「他___老师。」",
+      "options": ["是 (shì)", "在 (zài)", "有 (yǒu)", "去 (qù)"],
+      "correct": 0
+    },
+    {
+      "id": 6,
+      "level": "A1",
+      "weight": 1,
+      "question": "选择正确的疑问句。\n(Xuǎnzé yíwèn jù.)",
+      "options": ["你去哪儿？ (Nǐ qù nǎr?)", "你去哪儿。", "你去哪儿了。", "去哪儿你？"],
+      "correct": 0
+    },
+    {
+      "id": 7,
+      "level": "A1",
+      "weight": 1,
+      "question": "时间表达。\n(Shíjiān biǎodá.)\n「我___七点起床。」",
+      "options": ["在 (zài)", "从 (cóng)", "给 (gěi)", "把 (bǎ)"],
+      "correct": 0
+    },
+    {
+      "id": 8,
+      "level": "A1",
+      "weight": 1,
+      "question": "选择正确。\n(Xuǎnzé zhèngquè.)\n「我们___朋友。」",
+      "options": ["是 (shì)", "有 (yǒu)", "在 (zài)", "去 (qù)"],
+      "correct": 0
+    },
+    {
+      "id": 9,
+      "level": "A1",
+      "weight": 1,
+      "question": "动词选择。\n(Dòngcí xuǎnzé.)\n「我___水。」",
+      "options": ["喝 (hē)", "看 (kàn)", "走 (zǒu)", "说 (shuō)"],
+      "correct": 0
+    },
+    {
+      "id": 10,
+      "level": "A1",
+      "weight": 1,
+      "question": "表示存在。\n(Biǎoshì cúnzài.)\n「这里___很多人。」",
+      "options": ["有 (yǒu)", "是 (shì)", "在 (zài)", "去 (qù)"],
+      "correct": 0
+    },
+
+    /* ---------- A2 ---------- */
+
+    {
+      "id": 11,
+      "level": "A2",
+      "weight": 2,
+      "question": "过去时。\n(Guòqù shí.)\n「昨天我们___电影。」",
+      "options": ["看了 (kàn le)", "看 (kàn)", "看着 (kànzhe)", "会看 (huì kàn)"],
+      "correct": 0
+    },
+    {
+      "id": 12,
+      "level": "A2",
+      "weight": 2,
+      "question": "将来时。\n(Jiānglái shí.)\n「明天我___你。」",
+      "options": ["会看 (huì kàn)", "看了 (kàn le)", "看着 (kànzhe)", "看过 (kàn guò)"],
+      "correct": 0
+    },
+    {
+      "id": 13,
+      "level": "A2",
+      "weight": 2,
+      "question": "比较句。\n(Bǐjiào jù.)\n「这个考试___那个难。」",
+      "options": ["更 (gèng)", "最 (zuì)", "也 (yě)", "还 (hái)"],
+      "correct": 0
+    },
+    {
+      "id": 14,
+      "level": "A2",
+      "weight": 2,
+      "question": "兴趣表达。\n(Xìngqù biǎodá.)",
+      "options": ["我对音乐很感兴趣 (gǎn xìngqù)", "我音乐兴趣", "我在音乐兴趣", "我有音乐兴趣"],
+      "correct": 0
+    },
+    {
+      "id": 15,
+      "level": "A2",
+      "weight": 2,
+      "question": "结果表达。\n(Jiéguǒ biǎodá.)\n「因为下雨，___我不去。」",
+      "options": ["所以 (suǒyǐ)", "但是 (dànshì)", "还是 (háishi)", "而且 (érqiě)"],
+      "correct": 0
+    },
+
+    /* ---------- B1 ---------- */
+
+    {
+      "id": 21,
+      "level": "B1",
+      "weight": 3,
+      "question": "条件句。\n(Tiáojiàn jù.)\n「如果我有时间，我___多学习。」",
+      "options": ["会 (huì)", "了 (le)", "过 (guò)", "着 (zhe)"],
+      "correct": 0
+    },
+    {
+      "id": 22,
+      "level": "B1",
+      "weight": 3,
+      "question": "被动句。\n(Bèidòng jù.)",
+      "options": ["这封信被写好了 (bèi xiě hǎo le)", "这封信写好了", "写好了信", "信被写"],
+      "correct": 0
+    },
+    {
+      "id": 23,
+      "level": "B1",
+      "weight": 3,
+      "question": "近义词。\n(Jìnyìcí.)\n「提高」的意思是：",
+      "options": ["改进 (gǎijìn)", "减少 (jiǎnshǎo)", "忘记 (wàngjì)", "停止 (tíngzhǐ)"],
+      "correct": 0
+    },
+
+    /* ---------- B2 ---------- */
+
+    {
+      "id": 31,
+      "level": "B2",
+      "weight": 4,
+      "question": "尽管句。\n(Jǐnguǎn jù.)",
+      "options": ["尽管下雨，我们还是出门了 (jǐnguǎn... háishi)", "因为下雨我们出门", "如果下雨我们出门", "下雨我们不出门"],
+      "correct": 0
+    },
+    {
+      "id": 32,
+      "level": "B2",
+      "weight": 4,
+      "question": "间接引语。\n(Jiànjiē yǐnyǔ.)",
+      "options": ["他说他会来 (tā shuō tā huì lái)", "他说他来", "他说来", "他说他来了"],
+      "correct": 0
+    },
+
+    /* ---------- C1 ---------- */
+
+    {
+      "id": 41,
+      "level": "C1",
+      "weight": 5,
+      "question": "高级表达。\n(Gāojí biǎodá.)\n「不情愿」的意思是：",
+      "options": ["不愿意 (bù yuànyì)", "愿意 (yuànyì)", "高兴 (gāoxìng)", "快速 (kuàisù)"],
+      "correct": 0
+    },
+    {
+      "id": 42,
+      "level": "C1",
+      "weight": 5,
+      "question": "成语理解。\n(Chéngyǔ lǐjiě.)\n「一贯」的意思是：",
+      "options": ["始终如一 (shǐzhōng rú yī)", "忽然改变", "偶尔变化", "非常快"],
+      "correct": 0
+    }
+  ]
+}
