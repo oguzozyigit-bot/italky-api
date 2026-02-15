@@ -4,193 +4,409 @@
   "total": 50,
   "levels": ["A1","A2","B1","B2","C1"],
   "questions": [
-
-    /* ---------- A1 ---------- */
-
     {
       "id": 1,
       "level": "A1",
       "weight": 1,
       "question": "次の文の（　）に入る一番いいものはどれですか。\n(Tsugi no bun no ( ) ni hairu ichiban ii mono wa dore desu ka.)\n「わたしは日本語を___。」",
-      "options": [
-        "話します (hanashimasu)",
-        "話しました (hanashimashita)",
-        "話す (hanasu)",
-        "話せます (hanasemasu)"
-      ],
+      "options": ["話します (hanashimasu)", "話しました (hanashimashita)", "話す (hanasu)", "話せます (hanasemasu)"],
       "correct": 0
     },
-
     {
       "id": 2,
       "level": "A1",
       "weight": 1,
       "question": "「これは___です。」（ほん）\n(Kore wa ___ desu.)",
-      "options": [
-        "本 (hon)",
-        "ほんだ (honda)",
-        "本だ (hon da)",
-        "本ですか (hon desu ka)"
-      ],
+      "options": ["本 (hon)", "ほんだ (honda)", "本だ (hon da)", "本ですか (hon desu ka)"],
       "correct": 0
     },
-
     {
       "id": 3,
       "level": "A1",
       "weight": 1,
       "question": "否定形はどれですか。\n(Hiteikei wa dore desu ka.)\n「飲みます」",
-      "options": [
-        "飲みません (nomimasen)",
-        "飲みました (nomimashita)",
-        "飲みたい (nomitai)",
-        "飲めます (nomemasu)"
-      ],
+      "options": ["飲みません (nomimasen)", "飲みました (nomimashita)", "飲みたい (nomitai)", "飲めます (nomemasu)"],
       "correct": 0
     },
-
     {
       "id": 4,
       "level": "A1",
       "weight": 1,
       "question": "反対の意味はどれですか。\n(Hantai no imi wa dore desu ka.)\n「大きい」",
-      "options": [
-        "小さい (chiisai)",
-        "高い (takai)",
-        "暑い (atsui)",
-        "新しい (atarashii)"
-      ],
+      "options": ["小さい (chiisai)", "高い (takai)", "暑い (atsui)", "新しい (atarashii)"],
       "correct": 0
     },
-
     {
       "id": 5,
       "level": "A1",
       "weight": 1,
       "question": "助詞はどれですか。\n(Joshi wa dore desu ka.)\n「東京___住んでいます。」",
-      "options": [
-        "に (ni)",
-        "を (o)",
-        "が (ga)",
-        "へ (e)"
-      ],
+      "options": ["に (ni)", "を (o)", "が (ga)", "へ (e)"],
       "correct": 0
     },
-
     {
       "id": 6,
       "level": "A1",
       "weight": 1,
       "question": "質問はどれですか。\n(Shitsumon wa dore desu ka.)",
-      "options": [
-        "お元気ですか (ogenki desu ka)",
-        "お元気です (ogenki desu)",
-        "元気です (genki desu)",
-        "元気でした (genki deshita)"
-      ],
+      "options": ["お元気ですか (ogenki desu ka)", "お元気です (ogenki desu)", "元気です (genki desu)", "元気でした (genki deshita)"],
       "correct": 0
     },
-
     {
       "id": 7,
       "level": "A1",
       "weight": 1,
       "question": "現在進行形はどれですか。\n(Genzai shinkoukei wa dore desu ka.)\n「読む」",
-      "options": [
-        "読んでいます (yonde imasu)",
-        "読みました (yomimashita)",
-        "読む (yomu)",
-        "読めます (yomemasu)"
-      ],
+      "options": ["読んでいます (yonde imasu)", "読みました (yomimashita)", "読む (yomu)", "読めます (yomemasu)"],
       "correct": 0
     },
-
     {
       "id": 8,
       "level": "A1",
       "weight": 1,
       "question": "曜日はどれですか。\n(Youbi wa dore desu ka.)",
-      "options": [
-        "火曜日 (kayoubi)",
-        "火 (hi)",
-        "日 (hi)",
-        "時 (ji)"
-      ],
+      "options": ["火曜日 (kayoubi)", "火 (hi)", "日 (hi)", "時 (ji)"],
       "correct": 0
     },
-
     {
       "id": 9,
       "level": "A1",
       "weight": 1,
       "question": "意味が正しいものはどれですか。\n(Imi ga tadashii mono wa dore desu ka.)\n「行きます」",
-      "options": [
-        "go (iku)",
-        "eat (taberu)",
-        "read (yomu)",
-        "drink (nomu)"
-      ],
+      "options": ["go (iku)", "eat (taberu)", "read (yomu)", "drink (nomu)"],
       "correct": 0
     },
-
     {
       "id": 10,
       "level": "A1",
       "weight": 1,
       "question": "数量詞はどれですか。\n(Suuryoushi wa dore desu ka.)\n「りんご___つ」",
-      "options": [
-        "ひとつ (hitotsu)",
-        "ひと (hito)",
-        "いち (ichi)",
-        "いっこ (ikko)"
-      ],
+      "options": ["ひとつ (hitotsu)", "ひと (hito)", "いち (ichi)", "いっこ (ikko)"],
       "correct": 0
     },
-
-    /* ---------- A2 ---------- */
 
     {
       "id": 11,
       "level": "A2",
       "weight": 2,
       "question": "過去形はどれですか。\n(Kakokei wa dore desu ka.)\n「見る」",
-      "options": [
-        "見ました (mimashita)",
-        "見ます (mimasu)",
-        "見ている (mite iru)",
-        "見たい (mitai)"
-      ],
+      "options": ["見ました (mimashita)", "見ます (mimasu)", "見ている (mite iru)", "見たい (mitai)"],
       "correct": 0
     },
-
     {
       "id": 12,
       "level": "A2",
       "weight": 2,
-      "question": "願望形はどれですか。\n(Ganboukei wa dore desu ka.)\n「行く」",
-      "options": [
-        "行きたい (ikitai)",
-        "行きます (ikimasu)",
-        "行った (itta)",
-        "行けます (ikemasu)"
-      ],
+      "question": "願望（～たい）はどれですか。\n(Ganbou ~tai wa dore desu ka.)\n「行く」",
+      "options": ["行きたい (ikitai)", "行きます (ikimasu)", "行った (itta)", "行けます (ikemasu)"],
       "correct": 0
     },
-
     {
       "id": 13,
       "level": "A2",
       "weight": 2,
       "question": "「～てもいい」はどれですか。\n(Te mo ii wa dore desu ka.)",
-      "options": [
-        "入ってもいいです (haitte mo ii desu)",
-        "入らないでください (hairanaide kudasai)",
-        "入ります (hairimasu)",
-        "入った (haitta)"
-      ],
+      "options": ["入ってもいいです (haitte mo ii desu)", "入らないでください (hairanaide kudasai)", "入ります (hairimasu)", "入った (haitta)"],
+      "correct": 0
+    },
+    {
+      "id": 14,
+      "level": "A2",
+      "weight": 2,
+      "question": "「～てはいけません」はどれですか。\n(Te wa ikemasen wa dore desu ka.)",
+      "options": ["ここでたばこを吸ってはいけません (koko de tabako o sutte wa ikemasen)", "ここでたばこを吸ってもいいです (sutte mo ii desu)", "ここでたばこを吸います (suimasu)", "ここでたばこを吸った (sutta)"],
+      "correct": 0
+    },
+    {
+      "id": 15,
+      "level": "A2",
+      "weight": 2,
+      "question": "助詞：友だち___会いました。\n(Joshi: tomodachi ___ aimashita.)",
+      "options": ["に (ni)", "を (o)", "で (de)", "が (ga)"],
+      "correct": 0
+    },
+    {
+      "id": 16,
+      "level": "A2",
+      "weight": 2,
+      "question": "理由：雨___、行きません。\n(Riyuu: ame ___, ikimasen.)",
+      "options": ["だから (dakara)", "から (kara)", "まで (made)", "のに (noni)"],
+      "correct": 1
+    },
+    {
+      "id": 17,
+      "level": "A2",
+      "weight": 2,
+      "question": "「～てから」はどれですか。\n(Te kara wa dore desu ka.)",
+      "options": ["ごはんを食べてから勉強します (gohan o tabete kara benkyou shimasu)", "ごはんを食べながら勉強します (tabenagara)", "ごはんを食べる前に勉強します (mae ni)", "ごはんを食べても勉強します (temo)"],
+      "correct": 0
+    },
+    {
+      "id": 18,
+      "level": "A2",
+      "weight": 2,
+      "question": "「～ないでください」はどれですか。\n(Naide kudasai wa dore desu ka.)",
+      "options": ["ここで話さないでください (koko de hanasanaide kudasai)", "ここで話してもいいです (hanashite mo ii)", "ここで話します (hanashimasu)", "ここで話した (hanashita)"],
+      "correct": 0
+    },
+    {
+      "id": 19,
+      "level": "A2",
+      "weight": 2,
+      "question": "「～たり～たりします」はどれですか。\n(Tari tari shimasu wa dore desu ka.)",
+      "options": ["週末は買い物したり映画を見たりします (shuumatsu wa kaimono shitari eiga o mitari shimasu)", "週末は買い物して映画を見ます (shite/mimasu)", "週末は買い物しました (shita)", "週末は買い物する (suru)"],
+      "correct": 0
+    },
+    {
+      "id": 20,
+      "level": "A2",
+      "weight": 2,
+      "question": "読解：『バスに遅れたので、会社に遅刻しました。』なぜ遅刻しましたか。\n(Dokkai: 'Basu ni okureta node, kaisha ni chikoku shimashita.' Naze?)",
+      "options": ["バスに遅れたから (basu ni okureta kara)", "雨だったから (ame datta kara)", "休みだったから (yasumi datta kara)", "眠かったから (nemukatta kara)"],
+      "correct": 0
+    },
+
+    {
+      "id": 21,
+      "level": "B1",
+      "weight": 3,
+      "question": "可能形はどれですか。\n(Kanoukei wa dore desu ka.)\n「話す」",
+      "options": ["話せます (hanasemasu)", "話します (hanashimasu)", "話しました (hanashimashita)", "話したい (hanashitai)"],
+      "correct": 0
+    },
+    {
+      "id": 22,
+      "level": "B1",
+      "weight": 3,
+      "question": "「～ように」はどれですか。\n(You ni wa dore desu ka.)",
+      "options": ["忘れないようにメモします (wasurenai you ni memo shimasu)", "忘れないでメモします (naide)", "忘れませんメモします (masen)", "忘れたメモします (ta)"],
+      "correct": 0
+    },
+    {
+      "id": 23,
+      "level": "B1",
+      "weight": 3,
+      "question": "「～ほうがいい」はどれですか。\n(Hou ga ii wa dore desu ka.)",
+      "options": ["早く寝たほうがいいです (hayaku neta hou ga ii desu)", "早く寝ます (nemasu)", "早く寝たいです (netai desu)", "早く寝ました (nemashita)"],
+      "correct": 0
+    },
+    {
+      "id": 24,
+      "level": "B1",
+      "weight": 3,
+      "question": "「～てしまう」はどれですか。\n(Te shimau wa dore desu ka.)",
+      "options": ["宿題を忘れてしまいました (shukudai o wasurete shimaimashita)", "宿題を忘れます (wasuremasu)", "宿題を忘れた (wasureta)", "宿題を忘れる (wasureru)"],
+      "correct": 0
+    },
+    {
+      "id": 25,
+      "level": "B1",
+      "weight": 3,
+      "question": "意味：『増える』はどれですか。\n(Imi: fueru)",
+      "options": ["多くなる (ooku naru)", "少なくなる (sukunaku naru)", "止まる (tomaru)", "落ちる (ochiru)"],
+      "correct": 0
+    },
+    {
+      "id": 26,
+      "level": "B1",
+      "weight": 3,
+      "question": "受け身はどれですか。\n(Ukemi wa dore desu ka.)",
+      "options": ["先生にほめられました (sensei ni homeraremashita)", "先生をほめました (home)", "先生がほめました (ga)", "先生にほめました (ni home)"],
+      "correct": 0
+    },
+    {
+      "id": 27,
+      "level": "B1",
+      "weight": 3,
+      "question": "「～ながら」はどれですか。\n(Nagara wa dore desu ka.)",
+      "options": ["音楽を聞きながら勉強します (ongaku o kikinagara benkyou shimasu)", "音楽を聞いて勉強します (kiite)", "音楽を聞いた勉強 (kaita)", "音楽を聞く勉強 (kiku)"],
+      "correct": 0
+    },
+    {
+      "id": 28,
+      "level": "B1",
+      "weight": 3,
+      "question": "正しい文はどれですか。\n(Tadashii bun wa dore desu ka.)",
+      "options": ["日本語が上手になりたいです (nihongo ga jouzu ni naritai desu)", "日本語が上手になりますたい (narimasu tai)", "日本語が上手なりたい (jouzu naritai)", "日本語が上手になりです (nari desu)"],
+      "correct": 0
+    },
+    {
+      "id": 29,
+      "level": "B1",
+      "weight": 3,
+      "question": "「～たことがある」はどれですか。\n(Ta koto ga aru wa dore desu ka.)",
+      "options": ["富士山に登ったことがあります (fujisan ni nobotta koto ga arimasu)", "富士山に登ります (noborimasu)", "富士山に登った (nobotta)", "富士山に登ること (noboru koto)"],
+      "correct": 0
+    },
+    {
+      "id": 30,
+      "level": "B1",
+      "weight": 3,
+      "question": "読解：『勉強したおかげで、試験に合格しました。』なにが起きましたか。\n(Dokkai: 'Benkyou shita okage de, shiken ni goukaku shimashita.' Nani ga okimashita ka.)",
+      "options": ["合格した (goukaku shita)", "落ちた (ochita)", "休んだ (yasunda)", "忘れた (wasureta)"],
+      "correct": 0
+    },
+
+    {
+      "id": 31,
+      "level": "B2",
+      "weight": 4,
+      "question": "「～わけではない」はどれですか。\n(Wake dewa nai wa dore desu ka.)",
+      "options": ["嫌いなわけではないです (kirai na wake dewa nai desu)", "嫌いです (kirai desu)", "嫌いではありません (kirai dewa arimasen)", "嫌いわけです (kirai wake desu)"],
+      "correct": 0
+    },
+    {
+      "id": 32,
+      "level": "B2",
+      "weight": 4,
+      "question": "「～ことになっている」はどれですか。\n(Koto ni natte iru wa dore desu ka.)",
+      "options": ["この部屋では禁煙ということになっている (kono heya dewa kin'en to iu koto ni natte iru)", "この部屋で禁煙です (kin'en desu)", "禁煙します (kin'en shimasu)", "禁煙した (kin'en shita)"],
+      "correct": 0
+    },
+    {
+      "id": 33,
+      "level": "B2",
+      "weight": 4,
+      "question": "「～に違いない」はどれですか。\n(Ni chigainai wa dore desu ka.)",
+      "options": ["彼は忙しいに違いない (kare wa isogashii ni chigainai)", "彼は忙しいそうだ (sou da)", "彼は忙しいらしい (rashii)", "彼は忙しいかもしれない (kamoshirenai)"],
+      "correct": 0
+    },
+    {
+      "id": 34,
+      "level": "B2",
+      "weight": 4,
+      "question": "意味：『納得する』はどれですか。\n(Imi: nattoku suru)",
+      "options": ["理解して同意する (rikai shite doui suru)", "反対する (hantai suru)", "忘れる (wasureru)", "驚く (odoroku)"],
+      "correct": 0
+    },
+    {
+      "id": 35,
+      "level": "B2",
+      "weight": 4,
+      "question": "「～にもかかわらず」はどれですか。\n(Nimo kakawarazu wa dore desu ka.)",
+      "options": ["雨にもかかわらず試合は行われた (ame nimo kakawarazu shiai wa okonawareta)", "雨なので中止した (node)", "雨のに行った (noni)", "雨だから行かない (dakara)"],
+      "correct": 0
+    },
+    {
+      "id": 36,
+      "level": "B2",
+      "weight": 4,
+      "question": "使役：先生は学生にもっと話すように___。\n(Shieki: sensei wa gakusei ni motto hanasu you ni ___.)",
+      "options": ["言った (itta)", "言われた (iwareta)", "言わせた (iwaseta)", "言って (itte)"],
+      "correct": 0
+    },
+    {
+      "id": 37,
+      "level": "B2",
+      "weight": 4,
+      "question": "正しい文はどれですか。\n(Tadashii bun wa dore desu ka.)",
+      "options": ["昨日、宿題を忘れてしまった (kinou, shukudai o wasurete shimatta)", "昨日、宿題を忘れてしまう (shimau)", "宿題を忘れたしまった (wasureta shimatta)", "宿題を昨日忘れてしまう (kinou...shimau)"],
+      "correct": 0
+    },
+    {
+      "id": 38,
+      "level": "B2",
+      "weight": 4,
+      "question": "意味：『慎重に』はどれですか。\n(Imi: shinchou ni)",
+      "options": ["注意深く (chuui bukaku)", "急いで (isoide)", "簡単に (kantan ni)", "適当に (tekitou ni)"],
+      "correct": 0
+    },
+    {
+      "id": 39,
+      "level": "B2",
+      "weight": 4,
+      "question": "「～ておく」はどれですか。\n(Te oku wa dore desu ka.)",
+      "options": ["明日のために準備しておきます (ashita no tame ni junbi shite okimasu)", "準備します (junbi shimasu)", "準備した (junbi shita)", "準備している (junbi shite iru)"],
+      "correct": 0
+    },
+    {
+      "id": 40,
+      "level": "B2",
+      "weight": 4,
+      "question": "読解：『値下げすることを条件に、契約を結びました。』条件は何ですか。\n(Dokkai: 'Nesage suru koto o jouken ni, keiyaku o musubimashita.' Jouken wa nani?)",
+      "options": ["値下げする (nesage suru)", "値上げする (neage suru)", "延期する (enki suru)", "中止する (chuushi suru)"],
+      "correct": 0
+    },
+
+    {
+      "id": 41,
+      "level": "C1",
+      "weight": 5,
+      "question": "反対語：『抽象的』の反対に近いのはどれですか。\n(Hantaigo: 'chuushouteki' no hantai)",
+      "options": ["具体的 (gutaiteki)", "高級 (koukyuu)", "複雑 (fukuzatsu)", "静か (shizuka)"],
+      "correct": 0
+    },
+    {
+      "id": 42,
+      "level": "C1",
+      "weight": 5,
+      "question": "「～にすぎない」はどれですか。\n(Ni suginai wa dore desu ka.)",
+      "options": ["それは噂にすぎない (sore wa uwasa ni suginai)", "それは噂に違いない (ni chigainai)", "それは噂のようだ (you da)", "それは噂だ (da)"],
+      "correct": 0
+    },
+    {
+      "id": 43,
+      "level": "C1",
+      "weight": 5,
+      "question": "「～ざるを得ない」はどれですか。\n(Zaru o enai wa dore desu ka.)",
+      "options": ["行かざるを得ない (ikazaru o enai)", "行かなくてもいい (ikanakute mo ii)", "行ってはいけない (itte wa ikenai)", "行かないで (ikanaide)"],
+      "correct": 0
+    },
+    {
+      "id": 44,
+      "level": "C1",
+      "weight": 5,
+      "question": "意味：『一貫した』はどれですか。\n(Imi: ikkan shita)",
+      "options": ["ぶれない (burenai)", "ばらばら (barabara)", "古い (furui)", "弱い (yowai)"],
+      "correct": 0
+    },
+    {
+      "id": 45,
+      "level": "C1",
+      "weight": 5,
+      "question": "「～に際して」はどれですか。\n(Ni saishite wa dore desu ka.)",
+      "options": ["出発に際して確認してください (shuppatsu ni saishite kakunin shite kudasai)", "出発について (ni tsuite)", "出発に対して (ni taishite)", "出発にして (ni shite)"],
+      "correct": 0
+    },
+    {
+      "id": 46,
+      "level": "C1",
+      "weight": 5,
+      "question": "意味：『促進する』はどれですか。\n(Imi: sokushin suru)",
+      "options": ["進める (susumeru)", "止める (tomeru)", "減らす (herasu)", "隠す (kakusu)"],
+      "correct": 0
+    },
+    {
+      "id": 47,
+      "level": "C1",
+      "weight": 5,
+      "question": "「～ことから」はどれですか。\n(Koto kara wa dore desu ka.)",
+      "options": ["努力したことから有名だ (doryoku shita koto kara yuumei da)", "努力したので有名だ (node)", "努力したのに有名だ (noni)", "努力したから有名だ (kara)"],
+      "correct": 0
+    },
+    {
+      "id": 48,
+      "level": "C1",
+      "weight": 5,
+      "question": "読解：『詳細に説明した。』「詳細に」はどういう意味ですか。\n(Dokkai: 'shousai ni setsumei shita')",
+      "options": ["くわしく (kuwashiku)", "すこし (sukoshi)", "はやく (hayaku)", "おこって (okotte)"],
+      "correct": 0
+    },
+    {
+      "id": 49,
+      "level": "C1",
+      "weight": 5,
+      "question": "「～かねない」はどれですか。\n(Kanenai wa dore desu ka.)",
+      "options": ["不注意だと事故が起こりかねない (fuchuui da to jiko ga okori kanenai)", "事故が起こる (okoru)", "事故が起こらない (okoranai)", "事故が起こってもいい (okotte mo ii)"],
+      "correct": 0
+    },
+    {
+      "id": 50,
+      "level": "C1",
+      "weight": 5,
+      "question": "読解：『証拠が不足していたため、提案は却下された。』なぜ却下？\n(Dokkai: 'shouko ga fusoku... kyakka sareta')",
+      "options": ["証拠不足 (shouko fusoku)", "高すぎる (takasugiru)", "人気がある (ninki ga aru)", "遅い (osoi)"],
       "correct": 0
     }
-
-    /* ... A2, B1, B2, C1 sorularının geri kalanı devam eder ... */
   ]
 }
