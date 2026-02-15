@@ -1,0 +1,223 @@
+{
+  "lang": "es",
+  "version": "italky-academy-es-v1",
+  "total": 50,
+  "levels": ["A1","A2","B1","B2","C1"],
+  "questions": [
+
+    /* ---------- A1 ---------- */
+
+    { "id": 1, "level": "A1", "weight": 1,
+      "question": "Elige la forma correcta: «Yo ___ español.»",
+      "options": ["hablo","hablas","habla","hablan"], "correct": 0 },
+
+    { "id": 2, "level": "A1", "weight": 1,
+      "question": "Artículo correcto: «___ manzana»",
+      "options": ["un","una","unos","el"], "correct": 1 },
+
+    { "id": 3, "level": "A1", "weight": 1,
+      "question": "Negación correcta: «Yo ___ fumo.»",
+      "options": ["no","ni","nunca","sin"], "correct": 0 },
+
+    { "id": 4, "level": "A1", "weight": 1,
+      "question": "Opuesto de «grande»:",
+      "options": ["pequeño","alto","lento","frío"], "correct": 0 },
+
+    { "id": 5, "level": "A1", "weight": 1,
+      "question": "«Él ___ en casa.»",
+      "options": ["estoy","estás","está","están"], "correct": 2 },
+
+    { "id": 6, "level": "A1", "weight": 1,
+      "question": "«Nosotros ___ amigos.»",
+      "options": ["soy","eres","somos","son"], "correct": 2 },
+
+    { "id": 7, "level": "A1", "weight": 1,
+      "question": "Preposición correcta: «Vivo ___ Madrid.»",
+      "options": ["en","a","de","por"], "correct": 0 },
+
+    { "id": 8, "level": "A1", "weight": 1,
+      "question": "Plural de «libro»:",
+      "options": ["los libros","las libro","los libro","libroses"], "correct": 0 },
+
+    { "id": 9, "level": "A1", "weight": 1,
+      "question": "«Tengo ___ agua.»",
+      "options": ["mucho","mucha","muchas","muchos"], "correct": 1 },
+
+    { "id": 10, "level": "A1", "weight": 1,
+      "question": "Pregunta correcta:",
+      "options": ["¿Cómo estás?","¿Cómo está?","¿Cómo estoy?","¿Cómo están yo?"], "correct": 0 },
+
+    /* ---------- A2 ---------- */
+
+    { "id": 11, "level": "A2", "weight": 2,
+      "question": "Futuro correcto: «Mañana ___ contigo.»",
+      "options": ["hablo","hablé","hablaré","hablando"], "correct": 2 },
+
+    { "id": 12, "level": "A2", "weight": 2,
+      "question": "Pasado correcto: «Ayer ___ al cine.»",
+      "options": ["voy","fui","iré","iba"], "correct": 1 },
+
+    { "id": 13, "level": "A2", "weight": 2,
+      "question": "Comparativo correcto:",
+      "options": ["más rápido","rápido","el más rápido","rápidamente"], "correct": 0 },
+
+    { "id": 14, "level": "A2", "weight": 2,
+      "question": "Preposición: «Estoy interesado ___ música.»",
+      "options": ["en","a","de","con"], "correct": 0 },
+
+    { "id": 15, "level": "A2", "weight": 2,
+      "question": "Sinónimo de «empezar»:",
+      "options": ["terminar","comenzar","romper","bajar"], "correct": 1 },
+
+    { "id": 16, "level": "A2", "weight": 2,
+      "question": "Cantidad correcta:",
+      "options": ["muchas personas","mucho personas","muchos persona","mucho persona"], "correct": 0 },
+
+    { "id": 17, "level": "A2", "weight": 2,
+      "question": "«Voy a ___ ahora.»",
+      "options": ["salir","salgo","salí","salía"], "correct": 0 },
+
+    { "id": 18, "level": "A2", "weight": 2,
+      "question": "Orden correcto:",
+      "options": ["Siempre llego temprano.","Llego siempre temprano.","Siempre temprano llego.","Temprano siempre llego."], "correct": 0 },
+
+    { "id": 19, "level": "A2", "weight": 2,
+      "question": "Artículo correcto: «Me gusta ___ café.»",
+      "options": ["el","la","los","las"], "correct": 0 },
+
+    { "id": 20, "level": "A2", "weight": 2,
+      "question": "Lectura: «Perdió el autobús, por eso llegó tarde.» ¿Por qué llegó tarde?",
+      "options": ["Porque perdió el autobús","Porque llovía","Porque trabajó","Porque estudió"], "correct": 0 },
+
+    /* ---------- B1 ---------- */
+
+    { "id": 21, "level": "B1", "weight": 3,
+      "question": "«Vivo aquí ___ 2020.»",
+      "options": ["desde","por","para","hasta"], "correct": 0 },
+
+    { "id": 22, "level": "B1", "weight": 3,
+      "question": "Condicional correcto:",
+      "options": ["viajaría","viajo","viajé","viajaré"], "correct": 0 },
+
+    { "id": 23, "level": "B1", "weight": 3,
+      "question": "«Cuando llegué, él ya ___.»",
+      "options": ["se había ido","se fue","se va","se irá"], "correct": 0 },
+
+    { "id": 24, "level": "B1", "weight": 3,
+      "question": "Pronombre correcto:",
+      "options": ["Se lo dije","Lo se dije","Se dije lo","Dije se lo"], "correct": 0 },
+
+    { "id": 25, "level": "B1", "weight": 3,
+      "question": "Pasiva correcta:",
+      "options": ["La carta fue escrita","La carta fue escribir","La carta escribir","La carta es escribir"], "correct": 0 },
+
+    { "id": 26, "level": "B1", "weight": 3,
+      "question": "Relativo correcto:",
+      "options": ["El libro que compré","El libro quien compré","El libro donde compré","El libro cuando compré"], "correct": 0 },
+
+    { "id": 27, "level": "B1", "weight": 3,
+      "question": "Conector correcto:",
+      "options": ["así que","aunque","porque","mientras"], "correct": 0 },
+
+    { "id": 28, "level": "B1", "weight": 3,
+      "question": "Frase correcta:",
+      "options": ["Estoy interesado en la música.","Estoy interesado a la música.","Estoy interesado de la música.","Estoy interesado con la música."],
+      "correct": 0 },
+
+    { "id": 29, "level": "B1", "weight": 3,
+      "question": "Modal correcto:",
+      "options": ["deberías","puedes","quieres","vas"], "correct": 0 },
+
+    { "id": 30, "level": "B1", "weight": 3,
+      "question": "Lectura: «Estudió mucho y aprobó.» ¿Resultado?",
+      "options": ["Aprobó","Suspendió","Se durmió","Olvidó"], "correct": 0 },
+
+    /* ---------- B2 ---------- */
+
+    { "id": 31, "level": "B2", "weight": 4,
+      "question": "Subjuntivo correcto:",
+      "options": ["Es importante que vengas.","Es importante que vienes.","Es importante que venir.","Es importante que vino."],
+      "correct": 0 },
+
+    { "id": 32, "level": "B2", "weight": 4,
+      "question": "«Ojalá ___ más tiempo.»",
+      "options": ["tuviera","tengo","tendré","tener"], "correct": 0 },
+
+    { "id": 33, "level": "B2", "weight": 4,
+      "question": "No solo canta, sino que también ___.",
+      "options": ["baila","bailar","baila ella","bailó"], "correct": 0 },
+
+    { "id": 34, "level": "B2", "weight": 4,
+      "question": "Colocación correcta:",
+      "options": ["tomar una decisión","hacer una decisión","dar una decisión","poner una decisión"], "correct": 0 },
+
+    { "id": 35, "level": "B2", "weight": 4,
+      "question": "A pesar de ___ tarde, llegó.",
+      "options": ["ser","estar","ir","tener"], "correct": 0 },
+
+    { "id": 36, "level": "B2", "weight": 4,
+      "question": "Estilo indirecto correcto:",
+      "options": ["Dijo que iría.","Dijo que irá.","Dijo que fue.","Dijo que va."],
+      "correct": 0 },
+
+    { "id": 37, "level": "B2", "weight": 4,
+      "question": "Sinónimo de «altamente»:",
+      "options": ["muy","poco","casi","nunca"], "correct": 0 },
+
+    { "id": 38, "level": "B2", "weight": 4,
+      "question": "Preferiría que me ___ antes.",
+      "options": ["llamaras","llamas","llamar","llamaste"], "correct": 0 },
+
+    { "id": 39, "level": "B2", "weight": 4,
+      "question": "Frase correcta:",
+      "options": ["A pesar de la lluvia, salimos.","A pesar la lluvia, salimos.","A pesar que lluvia, salimos.","A pesar de lluvia, salimos."],
+      "correct": 0 },
+
+    { "id": 40, "level": "B2", "weight": 4,
+      "question": "Condición correcta:",
+      "options": ["Bajar el precio","Subir el precio","Cambiar el día","Nada"], "correct": 0 },
+
+    /* ---------- C1 ---------- */
+
+    { "id": 41, "level": "C1", "weight": 5,
+      "question": "De no ser por tu ayuda, ___ fracasado.",
+      "options": ["habría","he","haya","había"], "correct": 0 },
+
+    { "id": 42, "level": "C1", "weight": 5,
+      "question": "Significado de «reticente»:",
+      "options": ["reacio","feliz","rápido","claro"], "correct": 0 },
+
+    { "id": 43, "level": "C1", "weight": 5,
+      "question": "Es esencial que ___ informado.",
+      "options": ["estés","estás","estar","estuviste"], "correct": 0 },
+
+    { "id": 44, "level": "C1", "weight": 5,
+      "question": "«coherente» significa:",
+      "options": ["lógico","vacío","largo","débil"], "correct": 0 },
+
+    { "id": 45, "level": "C1", "weight": 5,
+      "question": "«desencadenar» significa:",
+      "options": ["provocar","ocultar","detener","perder"], "correct": 0 },
+
+    { "id": 46, "level": "C1", "weight": 5,
+      "question": "Se dice que el informe ___ mañana.",
+      "options": ["saldrá","sale","salió","salga"], "correct": 0 },
+
+    { "id": 47, "level": "C1", "weight": 5,
+      "question": "«extensamente» significa:",
+      "options": ["en detalle","brevemente","en silencio","rápidamente"], "correct": 0 },
+
+    { "id": 48, "level": "C1", "weight": 5,
+      "question": "No bien ___, empezó a llover.",
+      "options": ["llegué","llego","llegaba","llegar"], "correct": 0 },
+
+    { "id": 49, "level": "C1", "weight": 5,
+      "question": "Sinónimo de «consolidar»:",
+      "options": ["fortalecer","debilitar","olvidar","borrar"], "correct": 0 },
+
+    { "id": 50, "level": "C1", "weight": 5,
+      "question": "Fue rechazado por falta de pruebas. ¿Por qué?",
+      "options": ["Falta de pruebas","Muy caro","Popular","Tarde"], "correct": 0 }
+
+  ]
+}
