@@ -1,0 +1,221 @@
+{
+  "lang": "fr",
+  "version": "italky-academy-fr-v1",
+  "total": 50,
+  "levels": ["A1","A2","B1","B2","C1"],
+  "questions": [
+
+    /* ---------- A1 ---------- */
+
+    { "id": 1, "level": "A1", "weight": 1,
+      "question": "Choisis la bonne forme : « Je ___ français. »",
+      "options": ["parle","parles","parlent","parlons"], "correct": 0 },
+
+    { "id": 2, "level": "A1", "weight": 1,
+      "question": "Choisis l’article correct : « ___ pomme »",
+      "options": ["un","une","des","le"], "correct": 1 },
+
+    { "id": 3, "level": "A1", "weight": 1,
+      "question": "Choisis la négation correcte : « Je ___ fume. »",
+      "options": ["ne...pas","pas","non","ne"], "correct": 0 },
+
+    { "id": 4, "level": "A1", "weight": 1,
+      "question": "Opposé de « grand » :",
+      "options": ["petit","long","rapide","chaud"], "correct": 0 },
+
+    { "id": 5, "level": "A1", "weight": 1,
+      "question": "Choisis : « Il ___ à l’école. »",
+      "options": ["va","vas","allez","vont"], "correct": 0 },
+
+    { "id": 6, "level": "A1", "weight": 1,
+      "question": "Question correcte :",
+      "options": ["Comment vas-tu ?","Comment va tu ?","Comment tu vas ?","Comment est tu ?"], "correct": 0 },
+
+    { "id": 7, "level": "A1", "weight": 1,
+      "question": "Choisis : « Nous ___ ici. »",
+      "options": ["sommes","êtes","suis","est"], "correct": 0 },
+
+    { "id": 8, "level": "A1", "weight": 1,
+      "question": "Préposition : « Je suis ___ Paris. »",
+      "options": ["à","au","en","de"], "correct": 0 },
+
+    { "id": 9, "level": "A1", "weight": 1,
+      "question": "Choisis : « Elle ___ une voiture. »",
+      "options": ["a","as","ont","avons"], "correct": 0 },
+
+    { "id": 10, "level": "A1", "weight": 1,
+      "question": "Pluriel de « un livre » :",
+      "options": ["des livres","les livre","des livre","les livreses"], "correct": 0 },
+
+    /* ---------- A2 ---------- */
+
+    { "id": 11, "level": "A2", "weight": 2,
+      "question": "Futur proche : « Je ___ partir. »",
+      "options": ["vais","va","allons","vont"], "correct": 0 },
+
+    { "id": 12, "level": "A2", "weight": 2,
+      "question": "Passé composé : « Hier, nous ___ au cinéma. »",
+      "options": ["sommes allés","allons","allait","allé"], "correct": 0 },
+
+    { "id": 13, "level": "A2", "weight": 2,
+      "question": "Quantité correcte :",
+      "options": ["beaucoup de","beaucoup des","beaucoup","de beaucoup"], "correct": 0 },
+
+    { "id": 14, "level": "A2", "weight": 2,
+      "question": "Accord correct : « Elles sont ___. »",
+      "options": ["fatiguées","fatigué","fatigués","fatigue"], "correct": 0 },
+
+    { "id": 15, "level": "A2", "weight": 2,
+      "question": "« J’ai ___ soif. »",
+      "options": ["de la","du","des","la"], "correct": 0 },
+
+    { "id": 16, "level": "A2", "weight": 2,
+      "question": "Phrase correcte :",
+      "options": ["Je suis allé hier.","Je vais hier.","J’allais demain.","Je aller hier."], "correct": 0 },
+
+    { "id": 17, "level": "A2", "weight": 2,
+      "question": "« Je travaille ___ lundi. »",
+      "options": ["depuis","pendant","pour","à"], "correct": 0 },
+
+    { "id": 18, "level": "A2", "weight": 2,
+      "question": "Préposition correcte : « Je pense ___ toi. »",
+      "options": ["à","de","en","pour"], "correct": 0 },
+
+    { "id": 19, "level": "A2", "weight": 2,
+      "question": "« On ___ manger ? »",
+      "options": ["peut","peux","pouvons","pouvez"], "correct": 0 },
+
+    { "id": 20, "level": "A2", "weight": 2,
+      "question": "Lecture : « Il pleut, alors je reste à la maison. » Pourquoi ?",
+      "options": ["Parce qu’il pleut.","Parce qu’il fait chaud.","Parce qu’il travaille.","Parce qu’il sort."], "correct": 0 },
+
+    /* ---------- B1 ---------- */
+
+    { "id": 21, "level": "B1", "weight": 3,
+      "question": "« Je ___ en France depuis 2020. »",
+      "options": ["vis","ai vécu","vivais","vais vivre"], "correct": 0 },
+
+    { "id": 22, "level": "B1", "weight": 3,
+      "question": "Conditionnel : « Si j’avais le temps, je ___. »",
+      "options": ["voyagerais","voyage","vais voyager","voyagé"], "correct": 0 },
+
+    { "id": 23, "level": "B1", "weight": 3,
+      "question": "Subjonctif : « Il faut que tu ___. »",
+      "options": ["viennes","viens","venir","venu"], "correct": 0 },
+
+    { "id": 24, "level": "B1", "weight": 3,
+      "question": "Pronom correct :",
+      "options": ["Je le lui donne.","Je lui le donne.","Je donne le lui.","Je lui donne le."], "correct": 0 },
+
+    { "id": 25, "level": "B1", "weight": 3,
+      "question": "Synonyme de « important » :",
+      "options": ["essentiel","facile","lent","vide"], "correct": 0 },
+
+    { "id": 26, "level": "B1", "weight": 3,
+      "question": "« Quand je suis arrivé, il ___ déjà parti. »",
+      "options": ["était","a","avait","est"], "correct": 2 },
+
+    { "id": 27, "level": "B1", "weight": 3,
+      "question": "Préposition correcte : « Je me souviens ___ ce jour. »",
+      "options": ["de","à","en","pour"], "correct": 0 },
+
+    { "id": 28, "level": "B1", "weight": 3,
+      "question": "Phrase correcte :",
+      "options": ["Je suis intéressé par la musique.","Je suis intéressé à la musique.","Je suis intéressé pour la musique.","Je suis intéressé de la musique."],
+      "correct": 0 },
+
+    { "id": 29, "level": "B1", "weight": 3,
+      "question": "Connecteur correct :",
+      "options": ["donc","malgré","tandis que","puisque"], "correct": 0 },
+
+    { "id": 30, "level": "B1", "weight": 3,
+      "question": "Lecture : « Elle a étudié, donc elle a réussi. » Résultat ?",
+      "options": ["Elle a réussi.","Elle a échoué.","Elle a oublié.","Elle est partie."], "correct": 0 },
+
+    /* ---------- B2 ---------- */
+
+    { "id": 31, "level": "B2", "weight": 4,
+      "question": "« Bien que ce ___ difficile, il a continué. »",
+      "options": ["soit","est","sera","été"], "correct": 0 },
+
+    { "id": 32, "level": "B2", "weight": 4,
+      "question": "« Je préférerais que tu ___ plus tôt. »",
+      "options": ["viennes","viens","venir","venu"], "correct": 0 },
+
+    { "id": 33, "level": "B2", "weight": 4,
+      "question": "Expression correcte :",
+      "options": ["prendre une décision","faire une décision","mettre une décision","donner une décision"], "correct": 0 },
+
+    { "id": 34, "level": "B2", "weight": 4,
+      "question": "Synonyme de « extrêmement » :",
+      "options": ["très","peu","jamais","souvent"], "correct": 0 },
+
+    { "id": 35, "level": "B2", "weight": 4,
+      "question": "« Il aurait ___ venir. »",
+      "options": ["pu","peut","pouvait","pouvoir"], "correct": 0 },
+
+    { "id": 36, "level": "B2", "weight": 4,
+      "question": "Phrase correcte :",
+      "options": ["Malgré la pluie, on est sortis.","Malgré de la pluie, on est sortis.","Malgré pluie, on est sortis.","Malgré la pleut, on est sortis."],
+      "correct": 0 },
+
+    { "id": 37, "level": "B2", "weight": 4,
+      "question": "« Il est probable qu’il ___ . »",
+      "options": ["vienne","vient","venir","venu"], "correct": 0 },
+
+    { "id": 38, "level": "B2", "weight": 4,
+      "question": "Connecteur correct :",
+      "options": ["cependant","jamais","toujours","encore"], "correct": 0 },
+
+    { "id": 39, "level": "B2", "weight": 4,
+      "question": "« Il a nié ___ au courant. »",
+      "options": ["d’être","être","étant","à être"], "correct": 0 },
+
+    { "id": 40, "level": "B2", "weight": 4,
+      "question": "Condition : « Il a accepté à condition que ___ . »",
+      "options": ["le prix baisse","le prix augmente","le jour change","rien"], "correct": 0 },
+
+    /* ---------- C1 ---------- */
+
+    { "id": 41, "level": "C1", "weight": 5,
+      "question": "« À peine ___ sorti que le téléphone a sonné. »",
+      "options": ["était-il","il était","était","a-t-il"], "correct": 0 },
+
+    { "id": 42, "level": "C1", "weight": 5,
+      "question": "Synonyme de « nuancé » :",
+      "options": ["subtil","bruyant","rapide","vide"], "correct": 0 },
+
+    { "id": 43, "level": "C1", "weight": 5,
+      "question": "« Quoi qu’il ___, je partirai. »",
+      "options": ["arrive","arrives","arrivé","arriver"], "correct": 0 },
+
+    { "id": 44, "level": "C1", "weight": 5,
+      "question": "« Il est essentiel que cela ___ fait. »",
+      "options": ["soit","est","sera","était"], "correct": 0 },
+
+    { "id": 45, "level": "C1", "weight": 5,
+      "question": "Synonyme de « cohérent » :",
+      "options": ["logique","lent","fragile","vide"], "correct": 0 },
+
+    { "id": 46, "level": "C1", "weight": 5,
+      "question": "« Il aurait mieux valu que tu ___ plus tôt. »",
+      "options": ["viennes","viens","venir","venu"], "correct": 0 },
+
+    { "id": 47, "level": "C1", "weight": 5,
+      "question": "« toutefois » signifie :",
+      "options": ["cependant","toujours","souvent","jamais"], "correct": 0 },
+
+    { "id": 48, "level": "C1", "weight": 5,
+      "question": "« Il est censé ___ demain. »",
+      "options": ["paraître","paraît","paru","paraissant"], "correct": 0 },
+
+    { "id": 49, "level": "C1", "weight": 5,
+      "question": "Expression correcte :",
+      "options": ["mettre en œuvre","mettre en travail","faire en œuvre","mettre œuvre"], "correct": 0 },
+
+    { "id": 50, "level": "C1", "weight": 5,
+      "question": "« Faute de preuves » signifie :",
+      "options": ["manque de preuves","trop de preuves","preuves fortes","preuves faibles"], "correct": 0 }
+
+  ]
+}
