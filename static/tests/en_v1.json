@@ -1,0 +1,216 @@
+{
+  "lang": "en",
+  "version": "italky-academy-en-v1",
+  "total": 50,
+  "levels": ["A1","A2","B1","B2","C1"],
+  "questions": [
+    { "id": 1, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Choose the correct form: 'She ___ to school every day.'",
+      "options": ["go", "goes", "going", "gone"], "correct": 1 },
+
+    { "id": 2, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Choose the correct article: 'I have ___ umbrella.'",
+      "options": ["a", "an", "the", "—"], "correct": 1 },
+
+    { "id": 3, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Choose the correct negative: 'He ___ like tea.'",
+      "options": ["don't", "doesn't", "isn't", "aren't"], "correct": 1 },
+
+    { "id": 4, "level": "A1", "weight": 1, "type": "vocab",
+      "question": "Choose the correct word: 'I ___ my teeth every morning.'",
+      "options": ["wash", "brush", "cleaning", "make"], "correct": 1 },
+
+    { "id": 5, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Choose the correct preposition: 'We meet ___ Monday.'",
+      "options": ["in", "on", "at", "to"], "correct": 1 },
+
+    { "id": 6, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Choose the correct question: '___ you from Türkiye?'",
+      "options": ["Is", "Are", "Am", "Be"], "correct": 1 },
+
+    { "id": 7, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Choose the correct form: 'I ___ a book now.'",
+      "options": ["read", "reads", "am reading", "reading"], "correct": 2 },
+
+    { "id": 8, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Choose the correct past form: 'Yesterday, we ___ late.'",
+      "options": ["are", "were", "was", "be"], "correct": 1 },
+
+    { "id": 9, "level": "A1", "weight": 1, "type": "vocab",
+      "question": "Choose the opposite of 'big':",
+      "options": ["small", "tall", "long", "wide"], "correct": 0 },
+
+    { "id": 10, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Choose the correct plural: 'mouse' →",
+      "options": ["mouses", "mice", "mouse", "mices"], "correct": 1 },
+
+    { "id": 11, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Choose the correct future: 'I ___ you tomorrow.'",
+      "options": ["see", "saw", "will see", "seeing"], "correct": 2 },
+
+    { "id": 12, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Choose the correct comparative: 'This test is ___ than the last one.'",
+      "options": ["easy", "easier", "easiest", "more easiest"], "correct": 1 },
+
+    { "id": 13, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Choose the correct form: 'There ___ a lot of people here.'",
+      "options": ["is", "are", "be", "am"], "correct": 1 },
+
+    { "id": 14, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Choose the correct modal: 'You ___ wear a seatbelt.'",
+      "options": ["must", "may", "might", "could"], "correct": 0 },
+
+    { "id": 15, "level": "A2", "weight": 2, "type": "vocab",
+      "question": "Choose the best word: 'I’m ___ in music.'",
+      "options": ["interested", "interesting", "interest", "interests"], "correct": 0 },
+
+    { "id": 16, "level": "A2", "weight": 2, "type": "error-spotting",
+      "question": "Which sentence is correct?",
+      "options": ["He don't like coffee.", "He doesn't like coffee.", "He not like coffee.", "He no likes coffee."],
+      "correct": 1 },
+
+    { "id": 17, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Choose the correct preposition: 'She is good ___ math.'",
+      "options": ["at", "in", "on", "to"], "correct": 0 },
+
+    { "id": 18, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Choose the correct form: 'I have lived here ___ 2021.'",
+      "options": ["for", "since", "during", "from"], "correct": 1 },
+
+    { "id": 19, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Choose the correct question tag: 'You’re ready, ___?'",
+      "options": ["are you", "aren’t you", "do you", "don’t you"], "correct": 1 },
+
+    { "id": 20, "level": "A2", "weight": 2, "type": "reading",
+      "question": "Reading: 'Tom missed the bus, so he arrived late.' Why was Tom late?",
+      "options": ["Because he overslept.", "Because he missed the bus.", "Because it was raining.", "Because he forgot his keys."],
+      "correct": 1 },
+
+    { "id": 21, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Choose the correct form: 'I ___ here since 2020.'",
+      "options": ["live", "lived", "have lived", "am live"], "correct": 2 },
+
+    { "id": 22, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Choose the correct passive: 'The window ___ yesterday.'",
+      "options": ["broke", "was broken", "is broke", "has broke"], "correct": 1 },
+
+    { "id": 23, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Choose the correct connector: 'I was tired, ___ I went home.'",
+      "options": ["so", "because", "although", "but"], "correct": 0 },
+
+    { "id": 24, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Choose the correct form: 'If I ___ time, I’ll call you.'",
+      "options": ["have", "had", "will have", "am having"], "correct": 0 },
+
+    { "id": 25, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Choose the correct form: 'By the time we arrived, the movie ___.'",
+      "options": ["starts", "had started", "has started", "start"], "correct": 1 },
+
+    { "id": 26, "level": "B1", "weight": 3, "type": "vocab",
+      "question": "Choose the closest meaning of 'improve':",
+      "options": ["get worse", "get better", "stay the same", "get smaller"], "correct": 1 },
+
+    { "id": 27, "level": "B1", "weight": 3, "type": "error-spotting",
+      "question": "Which sentence is correct?",
+      "options": ["I look forward to meet you.", "I look forward to meeting you.", "I look forward meet you.", "I look forward met you."],
+      "correct": 1 },
+
+    { "id": 28, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Choose the correct relative pronoun: 'The book ___ I bought is new.'",
+      "options": ["who", "which", "where", "when"], "correct": 1 },
+
+    { "id": 29, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Choose the correct modal: 'You ___ have told me earlier.'",
+      "options": ["should", "may", "must", "can"], "correct": 0 },
+
+    { "id": 30, "level": "B1", "weight": 3, "type": "reading",
+      "question": "Reading: 'Sara studied for weeks. As a result, she passed easily.' What happened because she studied?",
+      "options": ["She failed.", "She passed easily.", "She got sick.", "She forgot the exam."],
+      "correct": 1 },
+
+    { "id": 31, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Choose the correct inversion: 'Not only ___, but she also sings.'",
+      "options": ["she dances", "does she dance", "she does dance", "dances she"],
+      "correct": 1 },
+
+    { "id": 32, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Choose the correct form: 'He denied ___ the document.'",
+      "options": ["to sign", "sign", "signed", "signing"], "correct": 3 },
+
+    { "id": 33, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Choose the correct: 'It’s high time you ___.'",
+      "options": ["go", "went", "have gone", "going"], "correct": 1 },
+
+    { "id": 34, "level": "B2", "weight": 4, "type": "vocab",
+      "question": "Choose the correct collocation: '___ research'",
+      "options": ["make", "do", "take", "get"], "correct": 1 },
+
+    { "id": 35, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Choose the correct: 'Despite ___ late, he finished on time.'",
+      "options": ["be", "being", "to be", "was"], "correct": 1 },
+
+    { "id": 36, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Choose the correct reported speech: 'He said: I will help.' →",
+      "options": ["He said he will help.", "He said he would help.", "He said he helps.", "He said he helped."],
+      "correct": 1 },
+
+    { "id": 37, "level": "B2", "weight": 4, "type": "vocab",
+      "question": "Choose the best word: 'The results were ___ surprising.'",
+      "options": ["highly", "high", "deep", "strong"], "correct": 0 },
+
+    { "id": 38, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Choose the correct: 'I’d rather you ___ me earlier.'",
+      "options": ["tell", "told", "have told", "telling"], "correct": 1 },
+
+    { "id": 39, "level": "B2", "weight": 4, "type": "error-spotting",
+      "question": "Which sentence is correct?",
+      "options": ["Despite of the rain, we went out.", "Despite the rain, we went out.", "Although of the rain, we went out.", "In spite the rain, we went out."],
+      "correct": 1 },
+
+    { "id": 40, "level": "B2", "weight": 4, "type": "reading",
+      "question": "Reading: 'The manager approved the plan provided that costs were reduced.' What is the condition?",
+      "options": ["Costs must be reduced.", "The plan must be cancelled.", "Staff must increase.", "Time must be extended."],
+      "correct": 0 },
+
+    { "id": 41, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Choose: 'Had it not been for your help, I ___.'",
+      "options": ["fail", "failed", "would fail", "would have failed"], "correct": 3 },
+
+    { "id": 42, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Choose: 'No sooner ___ than it started snowing.'",
+      "options": ["had we left", "we had left", "did we left", "we left"], "correct": 0 },
+
+    { "id": 43, "level": "C1", "weight": 5, "type": "vocab",
+      "question": "Choose the closest meaning of 'reluctant':",
+      "options": ["eager", "unwilling", "excited", "careful"], "correct": 1 },
+
+    { "id": 44, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Choose the best: 'It is essential that he ___ informed.'",
+      "options": ["is", "be", "was", "being"], "correct": 1 },
+
+    { "id": 45, "level": "C1", "weight": 5, "type": "vocab",
+      "question": "Choose: 'This policy may ___ unintended consequences.'",
+      "options": ["trigger", "wander", "flutter", "sparkle"], "correct": 0 },
+
+    { "id": 46, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Choose the correct: 'The report is said ___ next week.'",
+      "options": ["to publish", "to be published", "publishing", "published"], "correct": 1 },
+
+    { "id": 47, "level": "C1", "weight": 5, "type": "reading",
+      "question": "Reading: 'He spoke at length about the issue.' What does 'at length' mean?",
+      "options": ["briefly", "in detail", "angrily", "quietly"], "correct": 1 },
+
+    { "id": 48, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Choose the correct: 'Hardly ___ when the lights went out.'",
+      "options": ["had I arrived", "I had arrived", "did I arrived", "I arrived"], "correct": 0 },
+
+    { "id": 49, "level": "C1", "weight": 5, "type": "vocab",
+      "question": "Choose: 'Her argument was ___ and convincing.'",
+      "options": ["coherent", "comic", "coarse", "coastal"], "correct": 0 },
+
+    { "id": 50, "level": "C1", "weight": 5, "type": "reading",
+      "question": "Reading: 'The proposal was rejected owing to a lack of evidence.' Why was it rejected?",
+      "options": ["Because it was expensive.", "Because it lacked evidence.", "Because it was popular.", "Because it was late."],
+      "correct": 1 }
+  ]
+}
