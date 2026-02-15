@@ -1,0 +1,196 @@
+{
+  "lang": "ja",
+  "version": "italky-academy-ja-v1",
+  "total": 50,
+  "levels": ["A1","A2","B1","B2","C1"],
+  "questions": [
+
+    /* ---------- A1 ---------- */
+
+    {
+      "id": 1,
+      "level": "A1",
+      "weight": 1,
+      "question": "次の文の（　）に入る一番いいものはどれですか。\n(Tsugi no bun no ( ) ni hairu ichiban ii mono wa dore desu ka.)\n「わたしは日本語を___。」",
+      "options": [
+        "話します (hanashimasu)",
+        "話しました (hanashimashita)",
+        "話す (hanasu)",
+        "話せます (hanasemasu)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 2,
+      "level": "A1",
+      "weight": 1,
+      "question": "「これは___です。」（ほん）\n(Kore wa ___ desu.)",
+      "options": [
+        "本 (hon)",
+        "ほんだ (honda)",
+        "本だ (hon da)",
+        "本ですか (hon desu ka)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 3,
+      "level": "A1",
+      "weight": 1,
+      "question": "否定形はどれですか。\n(Hiteikei wa dore desu ka.)\n「飲みます」",
+      "options": [
+        "飲みません (nomimasen)",
+        "飲みました (nomimashita)",
+        "飲みたい (nomitai)",
+        "飲めます (nomemasu)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 4,
+      "level": "A1",
+      "weight": 1,
+      "question": "反対の意味はどれですか。\n(Hantai no imi wa dore desu ka.)\n「大きい」",
+      "options": [
+        "小さい (chiisai)",
+        "高い (takai)",
+        "暑い (atsui)",
+        "新しい (atarashii)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 5,
+      "level": "A1",
+      "weight": 1,
+      "question": "助詞はどれですか。\n(Joshi wa dore desu ka.)\n「東京___住んでいます。」",
+      "options": [
+        "に (ni)",
+        "を (o)",
+        "が (ga)",
+        "へ (e)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 6,
+      "level": "A1",
+      "weight": 1,
+      "question": "質問はどれですか。\n(Shitsumon wa dore desu ka.)",
+      "options": [
+        "お元気ですか (ogenki desu ka)",
+        "お元気です (ogenki desu)",
+        "元気です (genki desu)",
+        "元気でした (genki deshita)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 7,
+      "level": "A1",
+      "weight": 1,
+      "question": "現在進行形はどれですか。\n(Genzai shinkoukei wa dore desu ka.)\n「読む」",
+      "options": [
+        "読んでいます (yonde imasu)",
+        "読みました (yomimashita)",
+        "読む (yomu)",
+        "読めます (yomemasu)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 8,
+      "level": "A1",
+      "weight": 1,
+      "question": "曜日はどれですか。\n(Youbi wa dore desu ka.)",
+      "options": [
+        "火曜日 (kayoubi)",
+        "火 (hi)",
+        "日 (hi)",
+        "時 (ji)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 9,
+      "level": "A1",
+      "weight": 1,
+      "question": "意味が正しいものはどれですか。\n(Imi ga tadashii mono wa dore desu ka.)\n「行きます」",
+      "options": [
+        "go (iku)",
+        "eat (taberu)",
+        "read (yomu)",
+        "drink (nomu)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 10,
+      "level": "A1",
+      "weight": 1,
+      "question": "数量詞はどれですか。\n(Suuryoushi wa dore desu ka.)\n「りんご___つ」",
+      "options": [
+        "ひとつ (hitotsu)",
+        "ひと (hito)",
+        "いち (ichi)",
+        "いっこ (ikko)"
+      ],
+      "correct": 0
+    },
+
+    /* ---------- A2 ---------- */
+
+    {
+      "id": 11,
+      "level": "A2",
+      "weight": 2,
+      "question": "過去形はどれですか。\n(Kakokei wa dore desu ka.)\n「見る」",
+      "options": [
+        "見ました (mimashita)",
+        "見ます (mimasu)",
+        "見ている (mite iru)",
+        "見たい (mitai)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 12,
+      "level": "A2",
+      "weight": 2,
+      "question": "願望形はどれですか。\n(Ganboukei wa dore desu ka.)\n「行く」",
+      "options": [
+        "行きたい (ikitai)",
+        "行きます (ikimasu)",
+        "行った (itta)",
+        "行けます (ikemasu)"
+      ],
+      "correct": 0
+    },
+
+    {
+      "id": 13,
+      "level": "A2",
+      "weight": 2,
+      "question": "「～てもいい」はどれですか。\n(Te mo ii wa dore desu ka.)",
+      "options": [
+        "入ってもいいです (haitte mo ii desu)",
+        "入らないでください (hairanaide kudasai)",
+        "入ります (hairimasu)",
+        "入った (haitta)"
+      ],
+      "correct": 0
+    }
+
+    /* ... A2, B1, B2, C1 sorularının geri kalanı devam eder ... */
+  ]
+}
