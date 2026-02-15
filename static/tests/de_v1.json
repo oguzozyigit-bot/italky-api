@@ -1,0 +1,213 @@
+{
+  "lang": "de",
+  "version": "italky-academy-de-v1",
+  "total": 50,
+  "levels": ["A1","A2","B1","B2","C1"],
+  "questions": [
+    { "id": 1, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle die richtige Form: „Ich ___ aus der Türkei.“",
+      "options": ["komme", "kommst", "kommt", "kommen"], "correct": 0 },
+
+    { "id": 2, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle den richtigen Artikel: „___ Apfel“",
+      "options": ["der", "die", "das", "den"], "correct": 0 },
+
+    { "id": 3, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle den richtigen Artikel: „___ Buch“",
+      "options": ["der", "die", "das", "dem"], "correct": 2 },
+
+    { "id": 4, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle die richtige Verbform: „Er ___ heute zu Hause.“",
+      "options": ["bin", "bist", "ist", "seid"], "correct": 2 },
+
+    { "id": 5, "level": "A1", "weight": 1, "type": "vocab",
+      "question": "Wähle das Gegenteil von „groß“:",
+      "options": ["klein", "lang", "schnell", "alt"], "correct": 0 },
+
+    { "id": 6, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle die richtige Frage: „Wo ___ du?“",
+      "options": ["bist", "bin", "ist", "seid"], "correct": 0 },
+
+    { "id": 7, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle die richtige Negation: „Ich ___ Kaffee.“",
+      "options": ["nicht trinke", "trinke nicht", "kein trinke", "trinke kein"], "correct": 1 },
+
+    { "id": 8, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle die richtige Pluralform: „das Kind“ →",
+      "options": ["die Kinde", "die Kinder", "die Kindes", "die Kindern"], "correct": 1 },
+
+    { "id": 9, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle die richtige Präposition: „Ich wohne ___ Berlin.“",
+      "options": ["in", "auf", "an", "nach"], "correct": 0 },
+
+    { "id": 10, "level": "A1", "weight": 1, "type": "grammar",
+      "question": "Wähle die richtige Zeitangabe: „Wir treffen uns ___ Montag.“",
+      "options": ["in", "am", "um", "bei"], "correct": 1 },
+
+    { "id": 11, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Wähle die richtige Perfektform: „Ich ___ gestern gearbeitet.“",
+      "options": ["habe", "hat", "bin", "war"], "correct": 0 },
+
+    { "id": 12, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Wähle die richtige Wortstellung: „Morgen ___ ich ins Büro.“",
+      "options": ["gehe", "ich gehe", "gehe ich", "ich"], "correct": 2 },
+
+    { "id": 13, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Wähle die richtige Modalform: „Du ___ hier nicht rauchen.“",
+      "options": ["musst", "darfst", "kannst", "willst"], "correct": 1 },
+
+    { "id": 14, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Wähle die richtige Vergleichsform: „Heute ist es ___ als gestern.“",
+      "options": ["warm", "wärmer", "am wärmsten", "mehr warm"], "correct": 1 },
+
+    { "id": 15, "level": "A2", "weight": 2, "type": "vocab",
+      "question": "Wähle das passende Wort: „Ich habe ___ Hunger.“",
+      "options": ["ein", "eine", "einen", "einem"], "correct": 2 },
+
+    { "id": 16, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Wähle die richtige Präposition: „Ich warte ___ den Bus.“",
+      "options": ["auf", "für", "bei", "zu"], "correct": 0 },
+
+    { "id": 17, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Wähle die richtige Form: „Es gibt ___ Leute hier.“",
+      "options": ["viel", "viele", "vielen", "vieler"], "correct": 1 },
+
+    { "id": 18, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Wähle den richtigen Nebensatz: „Ich bleibe zu Hause, weil ich ___.“",
+      "options": ["bin müde", "müde bin", "müde", "bin ich müde"], "correct": 1 },
+
+    { "id": 19, "level": "A2", "weight": 2, "type": "grammar",
+      "question": "Wähle die richtige Frage: „Wie spät ___ es?“",
+      "options": ["ist", "sind", "bin", "seid"], "correct": 0 },
+
+    { "id": 20, "level": "A2", "weight": 2, "type": "reading",
+      "question": "Lesen: „Tom hat den Bus verpasst, deshalb kam er zu spät.“ Warum kam Tom zu spät?",
+      "options": ["Weil er verschlafen hat.", "Weil er den Bus verpasst hat.", "Weil es geregnet hat.", "Weil er krank war."],
+      "correct": 1 },
+
+    { "id": 21, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Wähle die richtige Form: „Ich lerne Deutsch, ___ ich in Deutschland arbeiten möchte.“",
+      "options": ["weil", "aber", "trotzdem", "und"], "correct": 0 },
+
+    { "id": 22, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Wähle die richtige Relativform: „Das ist der Mann, ___ hier wohnt.“",
+      "options": ["der", "die", "das", "den"], "correct": 0 },
+
+    { "id": 23, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Wähle die richtige Konjunktiv-II-Form: „Wenn ich Zeit ___, würde ich kommen.“",
+      "options": ["habe", "hatte", "hätte", "haben"], "correct": 2 },
+
+    { "id": 24, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Wähle die richtige Perfektform: „Wir ___ ins Kino gegangen.“",
+      "options": ["haben", "sind", "waren", "hatten"], "correct": 1 },
+
+    { "id": 25, "level": "B1", "weight": 3, "type": "vocab",
+      "question": "Wähle das passende Wort: „Ich ___ mich für die Verspätung.“",
+      "options": ["entschuldige", "erkläre", "verbessere", "bestimme"], "correct": 0 },
+
+    { "id": 26, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Wähle die richtige Form: „Bevor wir ___, rufe ich dich an.“",
+      "options": ["gehen", "ging", "gegangen", "geht"], "correct": 0 },
+
+    { "id": 27, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Wähle die richtige Passivform: „Der Brief ___ gestern geschrieben.“",
+      "options": ["wird", "wurde", "ist", "war"], "correct": 1 },
+
+    { "id": 28, "level": "B1", "weight": 3, "type": "error-spotting",
+      "question": "Welcher Satz ist korrekt?",
+      "options": ["Ich freue mich dich zu sehen.", "Ich freue mich, dich zu sehen.", "Ich freue mich dich sehen.", "Ich freue mich zu dich sehen."],
+      "correct": 1 },
+
+    { "id": 29, "level": "B1", "weight": 3, "type": "grammar",
+      "question": "Wähle die richtige Präposition: „Ich interessiere mich ___ Technik.“",
+      "options": ["für", "an", "auf", "bei"], "correct": 0 },
+
+    { "id": 30, "level": "B1", "weight": 3, "type": "reading",
+      "question": "Lesen: „Sara hat wochenlang gelernt. Deshalb hat sie die Prüfung bestanden.“ Was ist passiert?",
+      "options": ["Sie ist durchgefallen.", "Sie hat bestanden.", "Sie hat vergessen.", "Sie war krank."],
+      "correct": 1 },
+
+    { "id": 31, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Wähle die richtige Form: „Obwohl es regnete, ___ wir spazieren.“",
+      "options": ["gehen", "gingen", "gegangen", "geht"], "correct": 1 },
+
+    { "id": 32, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Wähle die richtige Konjunktiv-II-Form: „Ich wünschte, ich ___ mehr Zeit.“",
+      "options": ["habe", "hatte", "hätte", "haben"], "correct": 2 },
+
+    { "id": 33, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Wähle die richtige Nominalisierung: „Er hat Angst ___ Fliegen.“",
+      "options": ["vom", "vor dem", "für das", "an dem"], "correct": 1 },
+
+    { "id": 34, "level": "B2", "weight": 4, "type": "vocab",
+      "question": "Wähle das passende Wort: „Die Ergebnisse waren ___ überraschend.“",
+      "options": ["äußerst", "äußere", "außen", "äußern"], "correct": 0 },
+
+    { "id": 35, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Wähle die richtige Form: „Er behauptet, er ___ das nie gesagt.“",
+      "options": ["hat", "habe", "hätte", "war"], "correct": 1 },
+
+    { "id": 36, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Wähle die richtige Relativform: „Das ist die Firma, bei ___ ich arbeite.“",
+      "options": ["der", "die", "das", "denen"], "correct": 0 },
+
+    { "id": 37, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Wähle die richtige Form: „Es kommt darauf an, ___ du willst.“",
+      "options": ["was", "dass", "ob", "weil"], "correct": 0 },
+
+    { "id": 38, "level": "B2", "weight": 4, "type": "error-spotting",
+      "question": "Welcher Satz ist korrekt?",
+      "options": ["Wegen dem Wetter bleiben wir.", "Wegen des Wetters bleiben wir.", "Wegen das Wetter bleiben wir.", "Wegen der Wetter bleiben wir."],
+      "correct": 1 },
+
+    { "id": 39, "level": "B2", "weight": 4, "type": "grammar",
+      "question": "Wähle die richtige Form: „Nicht nur ___ er, sondern auch sie.“",
+      "options": ["kommt", "kommt er", "kommt sie", "kommt er nicht"], "correct": 0 },
+
+    { "id": 40, "level": "B2", "weight": 4, "type": "reading",
+      "question": "Lesen: „Der Chef genehmigte den Plan, vorausgesetzt, die Kosten werden reduziert.“ Was ist die Bedingung?",
+      "options": ["Die Kosten müssen reduziert werden.", "Mehr Personal wird eingestellt.", "Der Plan wird abgesagt.", "Die Zeit wird verlängert."],
+      "correct": 0 },
+
+    { "id": 41, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Wähle die richtige Form: „Hätte ich das gewusst, ___ ich anders entschieden.“",
+      "options": ["habe", "würde", "hätte", "wäre"], "correct": 1 },
+
+    { "id": 42, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Wähle die richtige Form: „Kaum ___ wir angekommen, begann es zu schneien.“",
+      "options": ["sind", "waren", "hatten", "hat"], "correct": 0 },
+
+    { "id": 43, "level": "C1", "weight": 5, "type": "vocab",
+      "question": "Wähle die beste Bedeutung von „zögern“:",
+      "options": ["sich beeilen", "unsicher sein / warten", "laut sprechen", "sich freuen"], "correct": 1 },
+
+    { "id": 44, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Wähle die richtige Form: „Es ist wichtig, dass er informiert ___.“",
+      "options": ["ist", "sei", "war", "wäre"], "correct": 1 },
+
+    { "id": 45, "level": "C1", "weight": 5, "type": "vocab",
+      "question": "Wähle das passende Wort: „Diese Maßnahme kann unerwartete Folgen ___.“",
+      "options": ["auslösen", "wandern", "flattern", "glänzen"], "correct": 0 },
+
+    { "id": 46, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Wähle die richtige Form: „Der Bericht soll nächste Woche ___ werden.“",
+      "options": ["veröffentlichen", "veröffentlicht", "veröffentlicht werden", "veröffentliche"], "correct": 2 },
+
+    { "id": 47, "level": "C1", "weight": 5, "type": "reading",
+      "question": "Lesen: „Er sprach ausführlich über das Thema.“ Was bedeutet „ausführlich“?",
+      "options": ["kurz", "im Detail", "wütend", "leise"], "correct": 1 },
+
+    { "id": 48, "level": "C1", "weight": 5, "type": "grammar",
+      "question": "Wähle die richtige Form: „Nicht zuletzt ___ die Qualität eine Rolle.“",
+      "options": ["spielt", "spielen", "spielst", "spiel"], "correct": 0 },
+
+    { "id": 49, "level": "C1", "weight": 5, "type": "vocab",
+      "question": "Wähle das passende Wort: „Ihr Argument war ___ und überzeugend.“",
+      "options": ["kohärent", "komisch", "grob", "kühn"], "correct": 0 },
+
+    { "id": 50, "level": "C1", "weight": 5, "type": "reading",
+      "question": "Lesen: „Der Vorschlag wurde wegen mangelnder Beweise abgelehnt.“ Warum wurde er abgelehnt?",
+      "options": ["Weil er teuer war.", "Weil Beweise fehlten.", "Weil er beliebt war.", "Weil er zu spät war."],
+      "correct": 1 }
+  ]
+}
