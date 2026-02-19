@@ -1,206 +1,57 @@
-# FILE: app/models/translate.py
+# italky-api/app/routers/translate.py
 from __future__ import annotations
-
 import os
-import logging
-from typing import Optional, Dict, Any
-
-import requests
+import httpx
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
-logger = logging.getLogger("uvicorn.error")
 router = APIRouter()
 
-GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
+LIBRE_BASE = os.getenv("LIBRE_BASE", "").rstrip("/")
+LIBRE_KEY  = os.getenv("LT_API_KEY", "").strip()  # şimdilik boş kalabilir
 
-
-# -------------------------
-# MODELS
-# -------------------------
-class FlexibleModel(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-
-class TranslateRequest(FlexibleModel):
+class TranslateIn(BaseModel):
     text: str
-    from_lang: Optional[str] = None
-    to_lang: str
+    source: str | None = None
+    target: str | None = None
+    from_lang: str | None = None
+    to_lang: str | None = None
 
+@router.post("/translate")
+async def translate(payload: TranslateIn):
+    if not LIBRE_BASE:
+        raise HTTPException(status_code=500, detail="LIBRE_BASE not set")
 
-class TranslateResponse(FlexibleModel):
-    ok: bool
-    translated: str
-    detected_source: Optional[str] = None
-
-
-class TTSRequest(FlexibleModel):
-    text: str
-    lang: str = "en"
-    gender: str = "FEMALE"
-    speaking_rate: float = 1.0
-    pitch: float = 0.0
-
-
-class TTSResponse(FlexibleModel):
-    ok: bool
-    audio_base64: str
-
-
-# -------------------------
-# HELPERS
-# -------------------------
-def _ensure_key():
-    if not GOOGLE_API_KEY:
-        raise HTTPException(500, "GOOGLE_API_KEY missing (Render ENV)")
-
-
-def _norm_lang(code: Optional[str]) -> Optional[str]:
-    if not code:
-        return None
-    c = str(code).strip().lower()
-    if "-" in c:
-        c = c.split("-", 1)[0]
-    if "_" in c:
-        c = c.split("_", 1)[0]
-    return c or None
-
-
-# -------------------------
-# ✅ QUICK PING (en hızlı teşhis)
-# GET /api/translate/_ping
-# -------------------------
-@router.get("/translate/_ping")
-def translate_ping():
-    has = bool(GOOGLE_API_KEY)
-    masked = (GOOGLE_API_KEY[:6] + "..." + GOOGLE_API_KEY[-4:]) if has else ""
-    return {"ok": True, "has_key": has, "key": masked}
-
-
-# -------------------------
-# ✅ GOOGLE TRANSLATE v2
-# POST /api/translate
-# -------------------------
-@router.post("/translate", response_model=TranslateResponse)
-def api_translate(req: TranslateRequest):
-    _ensure_key()
-
-    text = (req.text or "").strip()
+    text = (payload.text or "").strip()
     if not text:
-        raise HTTPException(400, "empty text")
+        return {"translated": ""}
 
-    src = _norm_lang(req.from_lang)
-    dst = _norm_lang(req.to_lang) or "en"
+    src = (payload.source or payload.from_lang or "auto").strip().lower()
+    dst = (payload.target or payload.to_lang or "").strip().lower()
+    if not dst:
+        raise HTTPException(status_code=422, detail="to_lang/target is required")
 
-    url = "https://translation.googleapis.com/language/translate/v2"
-    payload: Dict[str, Any] = {
+    # LibreTranslate endpoint
+    url = f"{LIBRE_BASE}/translate"
+
+    data = {
         "q": text,
+        "source": src,     # "auto" da olabilir
         "target": dst,
         "format": "text",
-        "key": GOOGLE_API_KEY,
     }
-    if src:
-        payload["source"] = src
+    if LIBRE_KEY:
+        data["api_key"] = LIBRE_KEY
 
     try:
-        r = requests.post(url, data=payload, timeout=18)
-
-        # ✅ HATA DETAYINI SAKLAMA: Google ne döndüyse göster
-        if r.status_code >= 400:
-            body = (r.text or "")[:1200]
-            logger.error("GOOGLE_TRANSLATE_FAIL status=%s body=%s", r.status_code, body)
-            raise HTTPException(
-                status_code=502,
-                detail=f"google_translate_error status={r.status_code} body={body}"
-            )
-
-        data = r.json() or {}
-        tr = (((data.get("data") or {}).get("translations")) or [])
-        if not tr:
-            return TranslateResponse(ok=True, translated=text, detected_source=src)
-
-        first = tr[0] or {}
-        translated = str(first.get("translatedText") or "").strip() or text
-        detected = str(first.get("detectedSourceLanguage") or "").strip() or None
-
-        # Basit HTML entity temizliği
-        translated = (
-            translated
-            .replace("&amp;", "&")
-            .replace("&quot;", '"')
-            .replace("&#39;", "'")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-        )
-
-        return TranslateResponse(ok=True, translated=translated, detected_source=detected)
-
+        async with httpx.AsyncClient(timeout=25) as client:
+            r = await client.post(url, data=data)
+        if r.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"libre_error {r.status_code}: {r.text[:300]}")
+        j = r.json()
+        out = (j.get("translatedText") or "").strip()
+        return {"translated": out}
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("TRANSLATE_EXCEPTION %s", str(e))
-        raise HTTPException(500, "translate error")
-
-
-# -------------------------
-# ✅ GOOGLE TEXT-TO-SPEECH
-# POST /api/tts
-# -------------------------
-@router.post("/tts", response_model=TTSResponse)
-def api_tts(req: TTSRequest):
-    _ensure_key()
-
-    text = (req.text or "").strip()
-    if not text:
-        raise HTTPException(400, "empty text")
-
-    lang = _norm_lang(req.lang) or "en"
-
-    voice_map = {
-        "tr": {"languageCode": "tr-TR", "name": "tr-TR-Standard-A"},
-        "en": {"languageCode": "en-US", "name": "en-US-Standard-C"},
-        "de": {"languageCode": "de-DE", "name": "de-DE-Standard-A"},
-        "fr": {"languageCode": "fr-FR", "name": "fr-FR-Standard-A"},
-        "es": {"languageCode": "es-ES", "name": "es-ES-Standard-A"},
-        "ar": {"languageCode": "ar-XA", "name": "ar-XA-Standard-A"},
-        "ru": {"languageCode": "ru-RU", "name": "ru-RU-Standard-A"},
-    }
-    voice = voice_map.get(lang, {"languageCode": "en-US", "name": "en-US-Standard-C"})
-
-    url = f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_API_KEY}"
-    body = {
-        "input": {"text": text[:4500]},
-        "voice": {
-            "languageCode": voice["languageCode"],
-            "name": voice["name"],
-            "ssmlGender": str(req.gender or "FEMALE").upper(),
-        },
-        "audioConfig": {
-            "audioEncoding": "MP3",
-            "speakingRate": float(req.speaking_rate or 1.0),
-            "pitch": float(req.pitch or 0.0),
-        },
-    }
-
-    try:
-        r = requests.post(url, json=body, timeout=20)
-        if r.status_code >= 400:
-            body_txt = (r.text or "")[:1200]
-            logger.error("GOOGLE_TTS_FAIL status=%s body=%s", r.status_code, body_txt)
-            raise HTTPException(
-                status_code=502,
-                detail=f"google_tts_error status={r.status_code} body={body_txt}"
-            )
-
-        data = r.json() or {}
-        audio = str(data.get("audioContent") or "").strip()
-        if not audio:
-            raise HTTPException(502, "tts no audioContent")
-
-        return TTSResponse(ok=True, audio_base64=audio)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("TTS_EXCEPTION %s", str(e))
-        raise HTTPException(500, "tts error")
+        raise HTTPException(status_code=502, detail=f"libre_error: {str(e)}")
