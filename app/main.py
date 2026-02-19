@@ -18,6 +18,9 @@ from app.routers import tts_openai        # (mevcut)
 from app.routers import lang_pool         # (mevcut)
 from app.routers import teacher_chat      # ✅ (mevcut)
 
+# ✅ NEW: LibreTranslate dil listesini proxy
+from app.routers import translate_langs   # ✅ EKLENDİ
+
 # Optional voice router
 try:
     from app.routers import voice_openai
@@ -57,7 +60,6 @@ app.mount("/assets", StaticFiles(directory="static"), name="assets")
 # -------------------------------
 # CORS
 # -------------------------------
-# Not: Render domainini de eklersen front testlerinde rahat edersin.
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
@@ -67,8 +69,6 @@ ALLOWED_ORIGINS: List[str] = [
     "http://127.0.0.1:5500",
 ]
 
-# İstersen environment ile genişlet:
-# EXTRA_ORIGINS="https://italky-api.onrender.com,https://xyz.vercel.app"
 extra = os.getenv("EXTRA_ORIGINS", "").strip()
 if extra:
     for o in [x.strip() for x in extra.split(",") if x.strip()]:
@@ -86,9 +86,6 @@ app.add_middleware(
 # -------------------------------
 # ROUTER REGISTRATION
 # -------------------------------
-# ⚠️ Dışarıya “OpenAI/Gemini” etiketi göstermiyoruz.
-# Tag isimlerini italky Academy olarak tutuyoruz.
-
 app.include_router(chat.router, prefix="/api", tags=["Academy Chat"])
 app.include_router(chat_openai.router, prefix="/api", tags=["Academy Chat"])
 app.include_router(tts_openai.router, prefix="/api", tags=["Academy Voice"])
@@ -96,6 +93,9 @@ app.include_router(lang_pool.router, tags=["Academy Lang Pool"])
 
 # ✅ Real-time course teacher endpoint
 app.include_router(teacher_chat.router, prefix="/api", tags=["Academy Teacher"])
+
+# ✅ NEW: /api/translate/languages (LibreTranslate)
+app.include_router(translate_langs.router, tags=["Academy Translate"])  # ✅ EKLENDİ
 
 if has_voice_openai and voice_openai is not None:
     app.include_router(voice_openai.router, prefix="/api", tags=["Academy Voice"])
@@ -119,6 +119,7 @@ def root():
             "academy_teacher": True,
             "academy_voice": True,
             "lang_pool": True,
+            "translate_languages": True,  # ✅ EKLENDİ
             "voice_optional": bool(has_voice_openai),
             "legacy_modules": bool(has_legacy_modules),
         },
