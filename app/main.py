@@ -27,14 +27,6 @@ except Exception:
     voice_openai = None
     has_voice_openai = False
 
-# Optional legacy modules (eğer gerçekten kullanıyorsan kalsın)
-try:
-    from app.routers import tts
-    from app.routers import ocr
-    has_legacy_modules = True
-except ImportError:
-    has_legacy_modules = False
-
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.0").strip()
 
 app = FastAPI(
@@ -86,10 +78,6 @@ app.include_router(translate_langs.router, prefix="/api", tags=["Academy Transla
 if has_voice_openai and voice_openai is not None:
     app.include_router(voice_openai.router, prefix="/api", tags=["Academy Voice"])
 
-if has_legacy_modules:
-    app.include_router(tts.router, prefix="/api", tags=["Legacy TTS"])
-    app.include_router(ocr.router, prefix="/api", tags=["Legacy OCR"])
-
 # HEALTH & ROOT
 @app.get("/")
 def root():
@@ -105,7 +93,7 @@ def root():
             "translate_google": True,
             "translate_languages_google": True,
             "voice_optional": bool(has_voice_openai),
-            "legacy_modules": bool(has_legacy_modules),
+            "legacy_modules": False,  # ✅ kapattık
         },
     }
 
