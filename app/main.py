@@ -9,17 +9,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
+# ROUTERS
 from app.routers import admin
 from app.routers import chat
 from app.routers import chat_openai
 from app.routers import tts_openai
 from app.routers import lang_pool
 from app.routers import teacher_chat
-
-# ✅ Translate (Google)
 from app.routers import translate
 
-# Optional voice router
 try:
     from app.routers import voice_openai
     has_voice_openai = True
@@ -27,7 +25,6 @@ except Exception:
     voice_openai = None
     has_voice_openai = False
 
-# Optional legacy modules (kullanıyorsan kalsın)
 try:
     from app.routers import tts
     from app.routers import ocr
@@ -40,7 +37,6 @@ APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.0").strip()
 app = FastAPI(
     title="italky Academy API",
     version=APP_VERSION,
-    description="Backend service for italky Academy (Chat, Voice, Course, Lang Pool)",
     redirect_slashes=False,
 )
 
@@ -52,17 +48,8 @@ app.mount("/assets", StaticFiles(directory="static"), name="assets")
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
-    "https://italky-web.vercel.app",
     "http://localhost:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:5500",
 ]
-
-extra = os.getenv("EXTRA_ORIGINS", "").strip()
-if extra:
-    for o in [x.strip() for x in extra.split(",") if x.strip()]:
-        if o not in ALLOWED_ORIGINS:
-            ALLOWED_ORIGINS.append(o)
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,49 +59,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------------------------------
-# ROUTERS
-# -------------------------------
+# =========================
+# ROUTER REGISTRATION
+# =========================
 
-# ✅ ADMIN (BUNU EKLEMEDEN /api/admin/* ÇALIŞMAZ)
-app.include_router(admin.router, prefix="/api", tags=["Admin"])
+app.include_router(admin.router, prefix="/api", tags=["Admin"])   # ✅ BU EKSİKTİ
 
-app.include_router(chat.router, prefix="/api", tags=["Academy Chat"])
-app.include_router(chat_openai.router, prefix="/api", tags=["Academy Chat"])
-app.include_router(tts_openai.router, prefix="/api", tags=["Academy Voice"])
-app.include_router(lang_pool.router, tags=["Academy Lang Pool"])
-app.include_router(teacher_chat.router, prefix="/api", tags=["Academy Teacher"])
+app.include_router(chat.router, prefix="/api", tags=["Chat"])
+app.include_router(chat_openai.router, prefix="/api", tags=["Chat"])
+app.include_router(tts_openai.router, prefix="/api", tags=["Voice"])
+app.include_router(lang_pool.router, tags=["Lang Pool"])
+app.include_router(teacher_chat.router, prefix="/api", tags=["Teacher"])
+app.include_router(translate.router, prefix="/api", tags=["Translate"])
 
-# ✅ Google Translate
-app.include_router(translate.router, prefix="/api", tags=["Academy Translate"])
-
-if has_voice_openai and voice_openai is not None:
-    app.include_router(voice_openai.router, prefix="/api", tags=["Academy Voice"])
+if has_voice_openai:
+    app.include_router(voice_openai.router, prefix="/api", tags=["Voice"])
 
 if has_legacy_modules:
-    app.include_router(tts.router, prefix="/api", tags=["Legacy TTS"])
-    app.include_router(ocr.router, prefix="/api", tags=["Legacy OCR"])
+    app.include_router(tts.router, prefix="/api", tags=["Legacy"])
+    app.include_router(ocr.router, prefix="/api", tags=["Legacy"])
 
-# -------------------------------
-# HEALTH & ROOT
-# -------------------------------
+# =========================
+# ROOT
+# =========================
+
 @app.get("/")
 def root():
-    return {
-        "status": "online",
-        "service": "italky-academy-api",
-        "version": APP_VERSION,
-        "modules": {
-            "academy_chat": True,
-            "academy_teacher": True,
-            "academy_voice": True,
-            "lang_pool": True,
-            "translate_google": True,
-            "admin": True,
-            "voice_optional": bool(has_voice_openai),
-            "legacy_modules": bool(has_legacy_modules),
-        },
-    }
+    return {"status": "online", "version": APP_VERSION}
 
 @app.get("/healthz")
 def healthz():
@@ -123,7 +94,3 @@ def healthz():
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
