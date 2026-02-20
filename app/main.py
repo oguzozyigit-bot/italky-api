@@ -1,4 +1,4 @@
-# FILE: italky-api/app/main.py
+# italky-api/app/main.py
 from __future__ import annotations
 
 import os
@@ -17,7 +17,6 @@ from app.routers import teacher_chat
 
 # ✅ Translate (Google)
 from app.routers import translate
-from app.routers import translate_langs
 
 # Optional voice router
 try:
@@ -26,6 +25,14 @@ try:
 except Exception:
     voice_openai = None
     has_voice_openai = False
+
+# Optional legacy modules (kullanıyorsan kalsın)
+try:
+    from app.routers import tts
+    from app.routers import ocr
+    has_legacy_modules = True
+except ImportError:
+    has_legacy_modules = False
 
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.0").strip()
 
@@ -71,14 +78,16 @@ app.include_router(tts_openai.router, prefix="/api", tags=["Academy Voice"])
 app.include_router(lang_pool.router, tags=["Academy Lang Pool"])
 app.include_router(teacher_chat.router, prefix="/api", tags=["Academy Teacher"])
 
-# ✅ Google Translate endpoints
+# ✅ Google Translate
 app.include_router(translate.router, prefix="/api", tags=["Academy Translate"])
-app.include_router(translate_langs.router, prefix="/api", tags=["Academy Translate"])
 
 if has_voice_openai and voice_openai is not None:
     app.include_router(voice_openai.router, prefix="/api", tags=["Academy Voice"])
 
-# HEALTH & ROOT
+if has_legacy_modules:
+    app.include_router(tts.router, prefix="/api", tags=["Legacy TTS"])
+    app.include_router(ocr.router, prefix="/api", tags=["Legacy OCR"])
+
 @app.get("/")
 def root():
     return {
@@ -91,9 +100,8 @@ def root():
             "academy_voice": True,
             "lang_pool": True,
             "translate_google": True,
-            "translate_languages_google": True,
             "voice_optional": bool(has_voice_openai),
-            "legacy_modules": False,  # ✅ kapattık
+            "legacy_modules": bool(has_legacy_modules),
         },
     }
 
