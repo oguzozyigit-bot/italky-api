@@ -1,7 +1,8 @@
-# italky-api/app/routers/translate.py
+# FILE: italky-api/app/routers/translate.py
 from __future__ import annotations
 
 import os
+import html
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -61,15 +62,21 @@ async def translate(payload: TranslateIn):
             r = await client.post(GOOGLE_TRANSLATE_URL, params=params, json=body)
 
         if r.status_code != 200:
-            # Google hatasını kısa döndür
-            raise HTTPException(status_code=502, detail=f"google_translate_error {r.status_code}: {r.text[:300]}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"google_translate_error {r.status_code}: {r.text[:300]}",
+            )
 
         j = r.json() or {}
         data = (j.get("data") or {})
         translations = data.get("translations") or []
+
         translated = ""
         if translations and isinstance(translations, list):
             translated = (translations[0].get("translatedText") or "").strip()
+
+        # Google bazen HTML entity döndürür (&quot; vb.)
+        translated = html.unescape(translated)
 
         return {"translated": translated}
 
