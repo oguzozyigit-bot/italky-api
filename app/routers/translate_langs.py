@@ -1,34 +1,52 @@
+# FILE: italky-api/app/routers/translate_langs.py
 from __future__ import annotations
 
 import os
-from typing import Any, List, Dict
-
 import httpx
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 router = APIRouter()
 
-# LibreTranslate base (Render env’den yönet)
-LT_BASE = os.getenv("LT_BASE_URL", "https://italky-libretranslate.onrender.com").rstrip("/")
+GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
+GOOGLE_LANGS_URL = "https://translation.googleapis.com/language/translate/v2/languages"
 
-@router.get("/api/translate/languages")
-async def translate_languages() -> List[Dict[str, Any]]:
+
+class LangsOut(BaseModel):
+    languages: list[dict]
+
+
+@router.get("/translate/languages", response_model=LangsOut)
+async def translate_languages(target: str = "tr"):
     """
-    UI dil listesini dinamik tutmak için.
-    LibreTranslate /languages endpoint'ini proxyler.
+    Frontend dil seçimi için:
+    GET /api/translate/languages?target=tr
+    - target: dönen dil isimlerinin hangi dilde olacağı (tr/en vs)
     """
-    url = f"{LT_BASE}/languages"
+    if not GOOGLE_TRANSLATE_API_KEY:
+        raise HTTPException(status_code=500, detail="GOOGLE_TRANSLATE_API_KEY not set")
+
+    params = {"key": GOOGLE_TRANSLATE_API_KEY, "target": target}
+
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(url)
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(GOOGLE_LANGS_URL, params=params)
+
         if r.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"LT languages failed: HTTP {r.status_code}")
-        data = r.json()
-        # Beklenen format: [{"code":"en","name":"English"}, ...]
-        if not isinstance(data, list):
-            raise HTTPException(status_code=502, detail="LT languages invalid response")
-        return data
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=504, detail="LT languages timeout")
+            raise HTTPException(
+                status_code=502,
+                detail=f"google_languages_error {r.status_code}: {r.text[:300]}",
+            )
+
+        j = r.json() or {}
+        data = (j.get("data") or {})
+        langs = data.get("languages") or []
+
+        # Format: [{"language":"en","name":"İngilizce"}, ...]
+        out = [{"code": x.get("language"), "name": x.get("name")} for x in langs if x.get("language")]
+        return {"languages": out}
+
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"LT languages error: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"google_languages_error: {str(e)}")
