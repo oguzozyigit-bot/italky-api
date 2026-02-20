@@ -1,4 +1,4 @@
-# italky-api/app/main.py
+# FILE: italky-api/app/main.py
 from __future__ import annotations
 
 import os
@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+
 from app.routers import admin
 from app.routers import chat
 from app.routers import chat_openai
@@ -71,7 +72,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# -------------------------------
 # ROUTERS
+# -------------------------------
+
+# ✅ ADMIN (BUNU EKLEMEDEN /api/admin/* ÇALIŞMAZ)
+app.include_router(admin.router, prefix="/api", tags=["Admin"])
+
 app.include_router(chat.router, prefix="/api", tags=["Academy Chat"])
 app.include_router(chat_openai.router, prefix="/api", tags=["Academy Chat"])
 app.include_router(tts_openai.router, prefix="/api", tags=["Academy Voice"])
@@ -88,6 +95,9 @@ if has_legacy_modules:
     app.include_router(tts.router, prefix="/api", tags=["Legacy TTS"])
     app.include_router(ocr.router, prefix="/api", tags=["Legacy OCR"])
 
+# -------------------------------
+# HEALTH & ROOT
+# -------------------------------
 @app.get("/")
 def root():
     return {
@@ -100,6 +110,7 @@ def root():
             "academy_voice": True,
             "lang_pool": True,
             "translate_google": True,
+            "admin": True,
             "voice_optional": bool(has_voice_openai),
             "legacy_modules": bool(has_legacy_modules),
         },
