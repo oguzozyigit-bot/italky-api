@@ -15,4 +15,4 @@ Pillow
 gunicorn
 setuptools
 wheel
-supabase==2.4.1
+supabase==2.6.0
