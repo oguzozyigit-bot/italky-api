@@ -9,14 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-# ROUTERS
-from app.routers import admin
-from app.routers import chat
-from app.routers import chat_openai
-from app.routers import tts_openai
-from app.routers import lang_pool
-from app.routers import teacher_chat
+from app.routers import chat, chat_openai, tts_openai, lang_pool, teacher_chat
 from app.routers import translate
+from app.routers import admin  # ✅
 
 try:
     from app.routers import voice_openai
@@ -26,8 +21,7 @@ except Exception:
     has_voice_openai = False
 
 try:
-    from app.routers import tts
-    from app.routers import ocr
+    from app.routers import tts, ocr
     has_legacy_modules = True
 except ImportError:
     has_legacy_modules = False
@@ -37,19 +31,27 @@ APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.0").strip()
 app = FastAPI(
     title="italky Academy API",
     version=APP_VERSION,
+    description="Backend service for italky Academy",
     redirect_slashes=False,
 )
 
-# STATIC
 os.makedirs("static", exist_ok=True)
 app.mount("/assets", StaticFiles(directory="static"), name="assets")
 
-# CORS
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
+    "https://italky-web.vercel.app",
     "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5500",
 ]
+
+extra = os.getenv("EXTRA_ORIGINS", "").strip()
+if extra:
+    for o in [x.strip() for x in extra.split(",") if x.strip()]:
+        if o not in ALLOWED_ORIGINS:
+            ALLOWED_ORIGINS.append(o)
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,33 +61,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
-# ROUTER REGISTRATION
-# =========================
+# ROUTERS
+app.include_router(chat.router, prefix="/api", tags=["Academy Chat"])
+app.include_router(chat_openai.router, prefix="/api", tags=["Academy Chat"])
+app.include_router(tts_openai.router, prefix="/api", tags=["Academy Voice"])
+app.include_router(lang_pool.router, tags=["Academy Lang Pool"])
+app.include_router(teacher_chat.router, prefix="/api", tags=["Academy Teacher"])
 
-app.include_router(admin.router, prefix="/api", tags=["Admin"])   # ✅ BU EKSİKTİ
+app.include_router(translate.router, prefix="/api", tags=["Academy Translate"])
 
-app.include_router(chat.router, prefix="/api", tags=["Chat"])
-app.include_router(chat_openai.router, prefix="/api", tags=["Chat"])
-app.include_router(tts_openai.router, prefix="/api", tags=["Voice"])
-app.include_router(lang_pool.router, tags=["Lang Pool"])
-app.include_router(teacher_chat.router, prefix="/api", tags=["Teacher"])
-app.include_router(translate.router, prefix="/api", tags=["Translate"])
+# ✅ ADMIN API
+app.include_router(admin.router, prefix="/api")  # /api/admin/...
 
-if has_voice_openai:
-    app.include_router(voice_openai.router, prefix="/api", tags=["Voice"])
+if has_voice_openai and voice_openai is not None:
+    app.include_router(voice_openai.router, prefix="/api", tags=["Academy Voice"])
 
 if has_legacy_modules:
-    app.include_router(tts.router, prefix="/api", tags=["Legacy"])
-    app.include_router(ocr.router, prefix="/api", tags=["Legacy"])
-
-# =========================
-# ROOT
-# =========================
+    app.include_router(tts.router, prefix="/api", tags=["Legacy TTS"])
+    app.include_router(ocr.router, prefix="/api", tags=["Legacy OCR"])
 
 @app.get("/")
 def root():
-    return {"status": "online", "version": APP_VERSION}
+    return {"status": "online", "service": "italky-academy-api", "version": APP_VERSION}
 
 @app.get("/healthz")
 def healthz():
