@@ -1,27 +1,23 @@
-# FILE: italky-api/app/routers/translate.py
+# italky-api/app/routers/translate.py
 from __future__ import annotations
 
 import os
-import html
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 router = APIRouter()
 
-# Google Translate v2 (API key ile)
+# Google Translate v2 (API key)
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
 GOOGLE_TRANSLATE_URL = "https://translation.googleapis.com/language/translate/v2"
 
-
 class TranslateIn(BaseModel):
     text: str
-    # eski frontend uyumluluğu:
     source: str | None = None
     target: str | None = None
     from_lang: str | None = None
     to_lang: str | None = None
-
 
 def _canon(code: str | None) -> str:
     c = (code or "").strip().lower()
@@ -29,7 +25,6 @@ def _canon(code: str | None) -> str:
         return ""
     # pt-br / zh-tw gibi gelirse -> pt, zh
     return c.split("-")[0]
-
 
 @router.post("/translate")
 async def translate(payload: TranslateIn):
@@ -48,12 +43,13 @@ async def translate(payload: TranslateIn):
 
     params = {"key": GOOGLE_TRANSLATE_API_KEY}
 
-    body = {
+    body: dict = {
         "q": text,
         "target": dst,
         "format": "text",
     }
-    # Google v2: source="auto" gönderme; yoksa auto algılar
+
+    # Google v2: source="auto" gönderme; boş bırakırsan auto algılar
     if src and src != "auto":
         body["source"] = src
 
@@ -62,21 +58,14 @@ async def translate(payload: TranslateIn):
             r = await client.post(GOOGLE_TRANSLATE_URL, params=params, json=body)
 
         if r.status_code != 200:
-            raise HTTPException(
-                status_code=502,
-                detail=f"google_translate_error {r.status_code}: {r.text[:300]}",
-            )
+            raise HTTPException(status_code=502, detail=f"google_translate_error {r.status_code}: {r.text[:300]}")
 
         j = r.json() or {}
         data = (j.get("data") or {})
         translations = data.get("translations") or []
-
         translated = ""
         if translations and isinstance(translations, list):
             translated = (translations[0].get("translatedText") or "").strip()
-
-        # Google bazen HTML entity döndürür (&quot; vb.)
-        translated = html.unescape(translated)
 
         return {"translated": translated}
 
