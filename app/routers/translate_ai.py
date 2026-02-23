@@ -1,3 +1,4 @@
+# FILE: italky-api/app/routers/translate_ai.py
 from __future__ import annotations
 
 import os
@@ -7,13 +8,11 @@ import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-
 router = APIRouter(tags=["translate-ai"])
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 
-# Basit dil adları (prompt için)
 LANG_MAP = {
     "tr": "Turkish",
     "en": "English",
@@ -54,9 +53,7 @@ LANG_MAP = {
 
 
 def _canon_lang(code: str) -> str:
-    c = (code or "").strip().lower()
-    # frontend bazen "pt-br" gönderir; bazen "pt"
-    return c
+    return (code or "").strip().lower()
 
 
 def _lang_name(code: str) -> str:
@@ -68,11 +65,8 @@ class TranslateAIRequest(BaseModel):
     text: str = Field(..., min_length=1)
     from_lang: str = Field(..., min_length=1)
     to_lang: str = Field(..., min_length=1)
-
-    # fast: daha literal, chat: daha doğal konuşma
-    style: Optional[str] = Field(default="chat")
-    # ileride: "auto|openai|gemini" gibi
-    provider: Optional[str] = Field(default="openai")
+    style: Optional[str] = Field(default="chat")       # "fast" | "chat"
+    provider: Optional[str] = Field(default="openai")  # ileride: "auto"
 
 
 class TranslateAIResponse(BaseModel):
@@ -114,19 +108,14 @@ Rules:
 - Do NOT switch languages. Always respond in {dst}.
 """.strip()
 
-    payload = {
-    "model": "gpt-4o-mini",
-    "input": [
-        {
-            "role": "system",
-            "content": instructions
-        },
-        {
-            "role": "user",
-            "content": text
-        }
-    ]
-}
+    # ✅ Responses API payload (text.format yok)
+    payload: Dict[str, Any] = {
+        "model": "gpt-4o-mini",
+        "input": [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": text},
+        ],
+    }
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -136,10 +125,12 @@ Rules:
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(OPENAI_RESPONSES_URL, headers=headers, json=payload)
+
         if r.status_code >= 400:
             raise HTTPException(status_code=502, detail=r.text)
 
         data = r.json()
+
     except HTTPException:
         raise
     except Exception as e:
@@ -148,18 +139,20 @@ Rules:
     translated = (data.get("output_text") or "").strip()
 
     # yedek parse
-    translated = (data.get("output_text") or "").strip()
-
-if not translated:
-    out = data.get("output") or []
-    buf = []
-    for item in out:
-        for c in (item.get("content") or []):
-            if c.get("type") == "output_text":
-                buf.append(c.get("text", ""))
-    translated = "".join(buf).strip()
+    if not translated:
+        out = data.get("output") or []
+        buf = []
+        for item in out:
+            for c in (item.get("content") or []):
+                if c.get("type") == "output_text":
+                    buf.append(c.get("text", ""))
+        translated = "".join(buf).strip()
 
     usage = data.get("usage") or {}
     tokens_used = usage.get("total_tokens")
 
-    return TranslateAIResponse(translated=translated, provider_used="openai", tokens_used=tokens_used)
+    return TranslateAIResponse(
+        translated=translated,
+        provider_used="openai",
+        tokens_used=tokens_used,
+    )
