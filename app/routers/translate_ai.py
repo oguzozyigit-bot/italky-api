@@ -114,12 +114,19 @@ Rules:
 - Do NOT switch languages. Always respond in {dst}.
 """.strip()
 
-    payload: Dict[str, Any] = {
-        "model": "gpt-4o-mini",
-        "instructions": instructions,
-        "input": text,
-        "text": {"format": "text"},
-    }
+    payload = {
+    "model": "gpt-4o-mini",
+    "input": [
+        {
+            "role": "system",
+            "content": instructions
+        },
+        {
+            "role": "user",
+            "content": text
+        }
+    ]
+}
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -141,14 +148,16 @@ Rules:
     translated = (data.get("output_text") or "").strip()
 
     # yedek parse
-    if not translated:
-        out = data.get("output") or []
-        buf = []
-        for item in out:
-            for c in (item.get("content") or []):
-                if c.get("type") == "output_text":
-                    buf.append(c.get("text", ""))
-        translated = "".join(buf).strip()
+    translated = (data.get("output_text") or "").strip()
+
+if not translated:
+    out = data.get("output") or []
+    buf = []
+    for item in out:
+        for c in (item.get("content") or []):
+            if c.get("type") == "output_text":
+                buf.append(c.get("text", ""))
+    translated = "".join(buf).strip()
 
     usage = data.get("usage") or {}
     tokens_used = usage.get("total_tokens")
