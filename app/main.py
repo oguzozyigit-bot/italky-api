@@ -16,7 +16,8 @@ from app.routers import tts_openai
 from app.routers import lang_pool
 from app.routers import teacher_chat
 from app.routers import translate
-from app.routers import admin   # ✅ ADMIN
+from app.routers import translate_ai  # ✅ NEW
+from app.routers import admin
 
 try:
     from app.routers import voice_openai
@@ -69,6 +70,8 @@ app.include_router(tts_openai.router, prefix="/api")
 app.include_router(lang_pool.router)
 app.include_router(teacher_chat.router, prefix="/api")
 app.include_router(translate.router, prefix="/api")
+app.include_router(translate_ai.router, prefix="/api")  # ✅ NEW
+app.include_router(admin.router, prefix="/api")
 
 # ✅ ADMIN ROUTER
 app.include_router(admin.router, prefix="/api")
