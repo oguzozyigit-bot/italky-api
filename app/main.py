@@ -17,6 +17,7 @@ from app.routers import lang_pool
 from app.routers import teacher_chat
 from app.routers import translate
 from app.routers import translate_ai
+from app.routers import command_parse  # ✅ NEW: voice command language parser
 from app.routers import admin  # ✅ ADMIN
 
 try:
@@ -70,8 +71,9 @@ app.include_router(tts_openai.router, prefix="/api")
 app.include_router(lang_pool.router)
 app.include_router(teacher_chat.router, prefix="/api")
 app.include_router(translate.router, prefix="/api")
-app.include_router(translate_ai.router, prefix="/api")  # ✅ AI Translate (Gemini→OpenAI auto)
-app.include_router(admin.router, prefix="/api")          # ✅ Admin (tek kez)
+app.include_router(translate_ai.router, prefix="/api")     # ✅ AI Translate (Gemini→OpenAI auto)
+app.include_router(command_parse.router, prefix="/api")    # ✅ NEW: /api/command_parse
+app.include_router(admin.router, prefix="/api")            # ✅ Admin (tek kez)
 
 if has_voice_openai:
     app.include_router(voice_openai.router, prefix="/api")
