@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-
+from app.routers import f2f_ws
 # ROUTERS
 from app.routers import chat
 from app.routers import chat_openai
@@ -29,7 +29,7 @@ except Exception:
 
 try:
     from app.routers import tts
-    from app.routers import ocr
+    from app.s import ocr
     has_legacy_modules = True
 except ImportError:
     has_legacy_modules = False
@@ -64,7 +64,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ROUTER REGISTER
+#  REGISTER
 app.include_router(chat.router, prefix="/api")
 app.include_router(chat_openai.router, prefix="/api")
 app.include_router(tts_openai.router, prefix="/api")
@@ -74,7 +74,7 @@ app.include_router(translate.router, prefix="/api")
 app.include_router(translate_ai.router, prefix="/api")     # ✅ AI Translate (Gemini→OpenAI auto)
 app.include_router(command_parse.router, prefix="/api")    # ✅ NEW: /api/command_parse
 app.include_router(admin.router, prefix="/api")            # ✅ Admin (tek kez)
-
+app.include_router(f2f_ws.router, prefix="/api")
 if has_voice_openai:
     app.include_router(voice_openai.router, prefix="/api")
 
