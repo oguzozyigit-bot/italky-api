@@ -1,12 +1,13 @@
+# FILE: italky-api/app/routers/command_parse.py
 from __future__ import annotations
 
 import json
 import os
 import re
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 router = APIRouter(tags=["command-parse"])
@@ -28,7 +29,6 @@ SUPPORTED_LANGS = {
     "ka"  # ✅ Georgian
 }
 
-# Basit alias: bazı modeller pt-br yerine pt yazabilir.
 ALIAS = {
     "pt_br": "pt-br",
     "pt-br": "pt-br",
@@ -39,16 +39,75 @@ ALIAS = {
     "georgian": "ka",
     "ka-ge": "ka",
     "ka": "ka",
+    "turkish": "tr",
+    "english": "en",
+    "german": "de",
+    "french": "fr",
+    "italian": "it",
+    "spanish": "es",
 }
+
+# Basit dil adı sözlüğü (TR + EN) — hızlı yakalama için
+LANG_NAME_TO_CODE = {
+    # Turkish
+    "türkçe": "tr",
+    "turkce": "tr",
+    "ingilizce": "en",
+    "almanca": "de",
+    "fransızca": "fr",
+    "fransizca": "fr",
+    "italyanca": "it",
+    "ispanyolca": "es",
+    "portekizce": "pt",
+    "rusça": "ru",
+    "rusca": "ru",
+    "arapça": "ar",
+    "arapca": "ar",
+    "farsça": "fa",
+    "farsca": "fa",
+    "ibranice": "he",
+    "hintçe": "hi",
+    "hintce": "hi",
+    "gürcüce": "ka",
+    "gurcuce": "ka",
+    "japonca": "ja",
+    "çince": "zh",
+    "cince": "zh",
+    "korece": "ko",
+    # English
+    "turkish": "tr",
+    "english": "en",
+    "german": "de",
+    "french": "fr",
+    "italian": "it",
+    "spanish": "es",
+    "portuguese": "pt",
+    "russian": "ru",
+    "arabic": "ar",
+    "persian": "fa",
+    "hebrew": "he",
+    "hindi": "hi",
+    "georgian": "ka",
+    "japanese": "ja",
+    "chinese": "zh",
+    "korean": "ko",
+}
+
+# Komut niyeti için TR/EN hızlı kelimeler
+INTENT_KEYS = [
+    "dil değiştir", "dil degistir", "dili değiştir", "dili degistir",
+    "çevir", "cevir", "çevirir misin", "cevirir misin",
+    "translate to", "switch to", "change language", "language change", "target language"
+]
+
+CONF_THRESHOLD = 0.40  # ✅ daha toleranslı (kısa komutları kaçırmasın)
 
 def _canon_lang(code: str) -> Optional[str]:
     c = (code or "").strip().lower()
     c = c.replace("_", "-")
     c = ALIAS.get(c, c)
-    # sadece 2 harfli veya pt-br gibi
     if c in SUPPORTED_LANGS:
         return c
-    # bazıları "en-us" gibi gelebilir -> "en"
     if "-" in c:
         base = c.split("-")[0]
         base = ALIAS.get(base, base)
@@ -58,7 +117,6 @@ def _canon_lang(code: str) -> Optional[str]:
 
 class CommandParseRequest(BaseModel):
     text: str = Field(..., min_length=1)
-    # UI dili opsiyonel (komut ipuçları için)
     ui_lang: Optional[str] = Field(default=None)
 
 class CommandParseResponse(BaseModel):
@@ -69,23 +127,52 @@ class CommandParseResponse(BaseModel):
     provider_used: str = "none"
 
 def _extract_json_loose(s: str) -> Optional[Dict[str, Any]]:
-    """
-    Model bazen JSON'u ``` ile veya metinle birlikte döndürebilir.
-    İlk JSON objesini yakalamaya çalışır.
-    """
     if not s:
         return None
     s = s.strip()
-
-    # ```json ... ```
     m = re.search(r"\{[\s\S]*\}", s)
     if not m:
         return None
-    chunk = m.group(0)
     try:
-        return json.loads(chunk)
+        return json.loads(m.group(0))
     except Exception:
         return None
+
+def _quick_parse_local(text: str) -> Optional[CommandParseResponse]:
+    """
+    AI’ye gitmeden önce hızlı yakalama:
+    - Eğer cümlede niyet kelimesi + bir dil adı varsa komut say.
+    - source_lang: bilinmiyorsa None bırak (frontend konuşmacı dilini zaten seçiyor olabilir),
+      ama senin isteğine göre source’u "konuşulan dil" olarak AI’dan almak daha iyi.
+      Burada sadece target’ı garanti yakalıyoruz.
+    """
+    t = (text or "").strip().lower()
+    if not t:
+        return None
+
+    has_intent = any(k in t for k in INTENT_KEYS)
+    if not has_intent:
+        return None
+
+    # Dil adı yakala
+    found = None
+    # en uzun eşleşme önce gelsin diye
+    keys_sorted = sorted(LANG_NAME_TO_CODE.keys(), key=len, reverse=True)
+    for name in keys_sorted:
+        if name in t:
+            found = LANG_NAME_TO_CODE[name]
+            break
+
+    if not found:
+        return None
+
+    return CommandParseResponse(
+        is_command=True,
+        source_lang=None,
+        target_lang=found,
+        confidence=0.85,
+        provider_used="local"
+    )
 
 async def _call_gemini_parse(text: str, ui_lang: Optional[str]) -> Optional[CommandParseResponse]:
     if not GEMINI_API_KEY:
@@ -94,25 +181,15 @@ async def _call_gemini_parse(text: str, ui_lang: Optional[str]) -> Optional[Comm
     prompt = f"""
 You are a command parser for a multilingual translation app.
 
-Task:
-- Determine if the user utterance is a "change target language" command.
-- If YES:
-  - source_lang: the language the user is speaking in (ISO 639-1 code, e.g., "tr", "en", "ka")
-  - target_lang: the target language requested (ISO 639-1 code, e.g., "en", "de", "fr", "ka")
-  - confidence: 0.0 to 1.0
-- If NO:
-  - is_command=false, confidence low
+Goal:
+Decide whether the user utterance is a language switching command (change target language).
 
-Important:
-- Users may say it in ANY language (e.g., Turkish, Georgian, Russian).
-- Examples of command intent:
-  - "Dil değiştir İngilizce"
-  - "Translate to German"
-  - "Переведи на английский"
-  - "Cambiar idioma a francés"
-- Not a command if they are just speaking normally.
+IMPORTANT DECISION RULE (be strict and useful):
+- If the utterance contains an intent to change/translate AND contains a language name (English, German, Georgian, etc.),
+  then it IS a command.
+- Short commands like "Dil değiştir İngilizce" MUST be treated as a command.
 
-Output STRICT JSON ONLY:
+Return STRICT JSON ONLY:
 {{
   "is_command": true/false,
   "source_lang": "xx" or null,
@@ -120,20 +197,17 @@ Output STRICT JSON ONLY:
   "confidence": 0.0
 }}
 
-Supported language codes:
-{sorted(list(SUPPORTED_LANGS))}
-
-UI language hint (may be null): {ui_lang}
+Notes:
+- source_lang is the language the user is speaking in (ISO 639-1).
+- target_lang is the requested target (ISO 639-1).
+- Supported language codes: {sorted(list(SUPPORTED_LANGS))}
+- UI language hint: {ui_lang}
 
 Utterance:
 {text}
 """.strip()
 
-    payload = {
-        "contents": [
-            {"parts": [{"text": prompt}]}
-        ]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -162,14 +236,15 @@ Utterance:
         src = _canon_lang(obj.get("source_lang") or "")
         tgt = _canon_lang(obj.get("target_lang") or "")
 
-        # Eğer komut dedi ama diller boşsa -> güven düşür
-        if is_cmd and (not src or not tgt):
+        # eğer komut dedi ama target yoksa güveni düşür
+        if is_cmd and not tgt:
             conf = min(conf, 0.35)
 
+        ok = is_cmd and conf >= CONF_THRESHOLD and tgt is not None
         return CommandParseResponse(
-            is_command=is_cmd and conf >= 0.55,
-            source_lang=src if conf >= 0.55 else None,
-            target_lang=tgt if conf >= 0.55 else None,
+            is_command=ok,
+            source_lang=src if ok else None,
+            target_lang=tgt if ok else None,
             confidence=conf,
             provider_used="gemini",
         )
@@ -183,9 +258,14 @@ async def _call_openai_parse(text: str, ui_lang: Optional[str]) -> Optional[Comm
     instructions = f"""
 You are a command parser for a multilingual translation app.
 
-Return STRICT JSON ONLY. No markdown.
+Goal:
+Detect language switching commands.
 
-Schema:
+Decision rule:
+- If utterance contains intent to change/translate AND a language name, it IS a command.
+- Short commands like "Dil değiştir İngilizce" MUST be treated as a command.
+
+Return STRICT JSON ONLY (no markdown):
 {{
   "is_command": true/false,
   "source_lang": "xx" or null,
@@ -193,13 +273,8 @@ Schema:
   "confidence": 0.0
 }}
 
-Rules:
-- is_command is TRUE only if user intent is "change target language".
-- source_lang: language user is speaking in (ISO 639-1).
-- target_lang: requested target (ISO 639-1).
-- If uncertain, set is_command=false and low confidence.
-- Supported language codes: {sorted(list(SUPPORTED_LANGS))}
-- UI language hint: {ui_lang}
+Supported language codes: {sorted(list(SUPPORTED_LANGS))}
+UI language hint: {ui_lang}
 
 Utterance:
 {text}
@@ -228,7 +303,6 @@ Utterance:
         out = (data.get("output_text") or "").strip()
 
         if not out:
-            # yedek parse
             output = data.get("output") or []
             buf = []
             for item in output:
@@ -247,13 +321,14 @@ Utterance:
         src = _canon_lang(obj.get("source_lang") or "")
         tgt = _canon_lang(obj.get("target_lang") or "")
 
-        if is_cmd and (not src or not tgt):
+        if is_cmd and not tgt:
             conf = min(conf, 0.35)
 
+        ok = is_cmd and conf >= CONF_THRESHOLD and tgt is not None
         return CommandParseResponse(
-            is_command=is_cmd and conf >= 0.55,
-            source_lang=src if conf >= 0.55 else None,
-            target_lang=tgt if conf >= 0.55 else None,
+            is_command=ok,
+            source_lang=src if ok else None,
+            target_lang=tgt if ok else None,
             confidence=conf,
             provider_used="openai",
         )
@@ -268,14 +343,19 @@ async def command_parse(req: CommandParseRequest) -> CommandParseResponse:
 
     ui_lang = (req.ui_lang or "").strip().lower() or None
 
-    # ✅ Auto: Gemini first, then OpenAI
+    # ✅ 0) Önce local hızlı yakalama (Türkçe/İngilizce komutlar burada cuk oturur)
+    local = _quick_parse_local(text)
+    if local:
+        return local
+
+    # ✅ 1) Auto: Gemini first
     g = await _call_gemini_parse(text, ui_lang)
     if g and g.is_command:
         return g
 
+    # ✅ 2) OpenAI fallback
     o = await _call_openai_parse(text, ui_lang)
-    if o:
+    if o and o.is_command:
         return o
 
-    # hiçbir provider parse edemezse: komut değil say
-    return CommandParseResponse(is_command=False, confidence=0.0, provider_used="none")
+    return CommandParseResponse(is_command=False, confidence=0.0, provider_used=(o.provider_used if o else "none"))
