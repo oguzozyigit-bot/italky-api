@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from app.routers import f2f_ws
+
 # ROUTERS
 from app.routers import chat
 from app.routers import chat_openai
@@ -17,8 +17,10 @@ from app.routers import lang_pool
 from app.routers import teacher_chat
 from app.routers import translate
 from app.routers import translate_ai
-from app.routers import command_parse  # ✅ NEW: voice command language parser
-from app.routers import admin  # ✅ ADMIN
+from app.routers import command_parse
+from app.routers import admin
+from app.routers import f2f_ws
+from app.routers import tts  # ✅ /api/tts her zaman aktif (Google→OpenAI fallback)
 
 try:
     from app.routers import voice_openai
@@ -27,12 +29,13 @@ except Exception:
     voice_openai = None
     has_voice_openai = False
 
+# OCR modülü gerçekten varsa ekle (yoksa sorun çıkarmaz)
 try:
-    from app.routers import tts
-    from app.s import ocr
-    has_legacy_modules = True
-except ImportError:
-    has_legacy_modules = False
+    from app.routers import ocr
+    has_ocr = True
+except Exception:
+    ocr = None
+    has_ocr = False
 
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.0").strip()
 
@@ -64,22 +67,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-#  REGISTER
+# ROUTER REGISTER
 app.include_router(chat.router, prefix="/api")
 app.include_router(chat_openai.router, prefix="/api")
 app.include_router(tts_openai.router, prefix="/api")
-app.include_router(lang_pool.router)
+
+app.include_router(lang_pool.router)  # prefix kendi içinde olabilir
 app.include_router(teacher_chat.router, prefix="/api")
+
 app.include_router(translate.router, prefix="/api")
-app.include_router(translate_ai.router, prefix="/api")     # ✅ AI Translate (Gemini→OpenAI auto)
-app.include_router(command_parse.router, prefix="/api")    # ✅ NEW: /api/command_parse
-app.include_router(admin.router, prefix="/api")            # ✅ Admin (tek kez)
+app.include_router(translate_ai.router, prefix="/api")
+
+app.include_router(command_parse.router, prefix="/api")
+app.include_router(tts.router, prefix="/api")          # ✅ /api/tts burada kesin yüklenir
 app.include_router(f2f_ws.router, prefix="/api")
+
+app.include_router(admin.router, prefix="/api")
+
 if has_voice_openai:
     app.include_router(voice_openai.router, prefix="/api")
 
-if has_legacy_modules:
-    app.include_router(tts.router, prefix="/api")
+if has_ocr:
     app.include_router(ocr.router, prefix="/api")
 
 @app.get("/")
