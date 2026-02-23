@@ -21,7 +21,7 @@ from app.routers import command_parse
 from app.routers import admin
 from app.routers import f2f_ws
 from app.routers import tts  # ✅ /api/tts her zaman aktif (Google→OpenAI fallback)
-
+from app.routers import stt
 try:
     from app.routers import voice_openai
     has_voice_openai = True
@@ -81,7 +81,7 @@ app.include_router(translate_ai.router, prefix="/api")
 app.include_router(command_parse.router, prefix="/api")
 app.include_router(tts.router, prefix="/api")          # ✅ /api/tts burada kesin yüklenir
 app.include_router(f2f_ws.router, prefix="/api")
-
+app.include_router(stt.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
 if has_voice_openai:
