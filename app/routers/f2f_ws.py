@@ -2,37 +2,41 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Dict, Optional, Any
+from typing import Dict, Any, Optional, Set
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 router = APIRouter(tags=["f2f-ws"])
 
-# In-memory rooms (MVP)
-# room_id -> {
-#   "host": WebSocket|None,
-#   "guest": WebSocket|None,
-#   "lang": {"host_lang":"tr","guest_lang":"en"},
-#   "host_credits": int,
-#   "updated_at": float
-# }
+ROOM_TTL_SEC = 60 * 30  # 30 dk
 ROOMS: Dict[str, Dict[str, Any]] = {}
-
-DEFAULT_HOST_LANG = "tr"
-DEFAULT_GUEST_LANG = "en"
-DEFAULT_HOST_CREDITS = 999999  # MVP: sınırsız gibi davranır (sonra Supabase jetona bağlarız)
+# ROOMS[room_id] = {
+#   "created_at": float,
+#   "updated_at": float,
+#   "clients": set(WebSocket),
+#   "meta": { WebSocket: {"from","from_name","from_pic","me_lang"} }
+# }
 
 def now() -> float:
     return time.time()
 
-def room_init(room_id: str) -> Dict[str, Any]:
-    return {
-        "host": None,
-        "guest": None,
-        "lang": {"host_lang": DEFAULT_HOST_LANG, "guest_lang": DEFAULT_GUEST_LANG},
-        "host_credits": DEFAULT_HOST_CREDITS,
-        "updated_at": now(),
-    }
+def room_exists(room_id: str) -> bool:
+    r = ROOMS.get(room_id)
+    if not r:
+        return False
+    if (now() - float(r.get("created_at", 0))) > ROOM_TTL_SEC:
+        # expire
+        try:
+            del ROOMS[room_id]
+        except Exception:
+            pass
+        return False
+    return True
+
+def get_room(room_id: str) -> Optional[Dict[str, Any]]:
+    if not room_exists(room_id):
+        return None
+    return ROOMS.get(room_id)
 
 async def ws_send(ws: Optional[WebSocket], msg: Dict[str, Any]) -> None:
     if ws is None:
@@ -42,121 +46,191 @@ async def ws_send(ws: Optional[WebSocket], msg: Dict[str, Any]) -> None:
     except Exception:
         return
 
-async def broadcast_room(room_id: str, msg: Dict[str, Any]) -> None:
-    room = ROOMS.get(room_id)
-    if not room:
-        return
-    await ws_send(room.get("host"), msg)
-    await ws_send(room.get("guest"), msg)
+async def broadcast(room: Dict[str, Any], msg: Dict[str, Any], exclude: Optional[WebSocket] = None) -> None:
+    dead = []
+    for c in list(room["clients"]):
+        if exclude is not None and c is exclude:
+            continue
+        try:
+            await c.send_text(json.dumps(msg))
+        except Exception:
+            dead.append(c)
+    for d in dead:
+        try:
+            room["clients"].discard(d)
+            room["meta"].pop(d, None)
+        except Exception:
+            pass
 
-def deduct_host(room_id: str, cost: int = 1) -> int:
-    room = ROOMS.get(room_id)
-    if not room:
-        return 0
-    credits = int(room.get("host_credits") or 0)
-    credits = max(0, credits - int(cost))
-    room["host_credits"] = credits
-    room["updated_at"] = now()
-    return credits
+async def send_presence(room_id: str, room: Dict[str, Any]) -> None:
+    await broadcast(room, {"type": "presence", "count": len(room["clients"])})
+    # (İstersen burada liste de gönderebiliriz)
+
+def create_room(room_id: str) -> Dict[str, Any]:
+    r = {
+        "created_at": now(),
+        "updated_at": now(),
+        "clients": set(),     # type: ignore
+        "meta": {},           # type: ignore
+    }
+    ROOMS[room_id] = r
+    return r
+
+# ✅ ödeme hook’u (şimdilik boş)
+async def charge_sender_if_needed(sender_meta: Dict[str, Any], cost: int = 1) -> None:
+    """
+    Burada ileride Supabase RPC ile kullanıcı jeton düşeceksin.
+    Şimdilik NO-OP.
+    """
+    return
 
 @router.websocket("/f2f/ws/{room_id}")
 async def f2f_ws(ws: WebSocket, room_id: str):
+    room_id = (room_id or "").strip().upper()
     await ws.accept()
 
-    role: Optional[str] = None
-    room = ROOMS.setdefault(room_id, room_init(room_id))
+    joined_room: Optional[Dict[str, Any]] = None
+    my_meta: Dict[str, Any] = {}
 
     try:
         while True:
             raw = await ws.receive_text()
             msg = json.loads(raw or "{}")
-            mtype = msg.get("type")
+            mtype = str(msg.get("type") or "").strip()
 
-            # ---- HELLO ----
-            if mtype == "hello":
-                role = msg.get("role")
-                if role not in ("host", "guest"):
-                    await ws_send(ws, {"type":"info","message":"invalid role"})
+            # -------------------
+            # HOST creates room
+            # -------------------
+            if mtype == "create":
+                # only once
+                if joined_room is not None:
+                    await ws_send(ws, {"type":"error","message":"ALREADY_JOINED"})
                     continue
 
-                # only 1 host, 1 guest
-                if room.get(role) is not None:
-                    await ws_send(ws, {"type":"info","message":f"{role} already connected"})
-                    continue
+                # if already exists -> reuse (host can reopen same code)
+                room = get_room(room_id)
+                if room is None:
+                    room = create_room(room_id)
 
-                room[role] = ws
+                joined_room = room
+
+                my_meta = {
+                    "from": msg.get("from"),
+                    "from_name": msg.get("from_name"),
+                    "from_pic": msg.get("from_pic"),
+                    "me_lang": (msg.get("me_lang") or "").strip().lower() or "tr",
+                    "role": "host",
+                }
+
+                room["clients"].add(ws)
+                room["meta"][ws] = my_meta
                 room["updated_at"] = now()
 
-                await ws_send(ws, {"type":"info","message":f"connected as {role}"})
-
-                # send current language state + credits to both
-                await broadcast_room(room_id, {
-                    "type":"lang_state",
-                    "host_lang": room["lang"]["host_lang"],
-                    "guest_lang": room["lang"]["guest_lang"],
-                })
-                await ws_send(room.get("host"), {
-                    "type":"host_credits",
-                    "credits": room.get("host_credits", 0)
-                })
-
-                # notify host when guest joins
-                if role == "guest" and room.get("host") is not None:
-                    await ws_send(room.get("host"), {"type":"peer_joined"})
+                await ws_send(ws, {"type":"room_created","room": room_id, "ttl_sec": ROOM_TTL_SEC})
+                await send_presence(room_id, room)
                 continue
 
-            # ---- HOST SET LANG (sync) ----
-            if mtype == "set_lang":
-                # Only host can set languages in MVP
-                if role != "host":
-                    await ws_send(ws, {"type":"info","message":"only host can set languages"})
+            # -------------------
+            # GUEST joins room (must exist)
+            # -------------------
+            if mtype == "join":
+                if joined_room is not None:
+                    await ws_send(ws, {"type":"error","message":"ALREADY_JOINED"})
                     continue
 
-                host_lang = (msg.get("host_lang") or "").strip().lower()
-                guest_lang = (msg.get("guest_lang") or "").strip().lower()
-                if not host_lang or not guest_lang:
-                    await ws_send(ws, {"type":"info","message":"missing host_lang/guest_lang"})
-                    continue
+                room = get_room(room_id)
+                if room is None:
+                    await ws_send(ws, {"type":"room_not_found", "message":"Kod hatalı olabilir veya sohbet odası kapanmış olabilir."})
+                    # join başarısız → kapat
+                    await ws.close()
+                    return
 
-                room["lang"]["host_lang"] = host_lang
-                room["lang"]["guest_lang"] = guest_lang
+                joined_room = room
+
+                my_meta = {
+                    "from": msg.get("from"),
+                    "from_name": msg.get("from_name"),
+                    "from_pic": msg.get("from_pic"),
+                    "me_lang": (msg.get("me_lang") or "").strip().lower() or "tr",
+                    "role": "guest",
+                }
+
+                room["clients"].add(ws)
+                room["meta"][ws] = my_meta
                 room["updated_at"] = now()
 
-                await broadcast_room(room_id, {
-                    "type":"lang_state",
-                    "host_lang": host_lang,
-                    "guest_lang": guest_lang
-                })
+                await ws_send(ws, {"type":"room_joined","room": room_id, "ttl_sec": ROOM_TTL_SEC})
+                await send_presence(room_id, room)
                 continue
 
-            # ---- TRANSLATED MESSAGE ----
-            if mtype == "translated":
-                # Host pays for every translated turn (both directions)
-                # MVP: in-memory credits; later wire Supabase RPC here
-                remaining = deduct_host(room_id, cost=1)
-                await ws_send(room.get("host"), {"type":"host_credits","credits": remaining})
+            # -------------------
+            # Join check (no auto create)
+            # -------------------
+            if mtype == "join_check":
+                room = get_room(room_id)
+                if room is None:
+                    await ws_send(ws, {"type":"room_not_found"})
+                else:
+                    await ws_send(ws, {"type":"room_ok"})
+                continue
 
-                # Pass-through to peer
-                target = "guest" if role == "host" else "host"
-                peer = room.get(target)
-                if peer is None:
-                    await ws_send(ws, {"type":"info","message":"peer not connected yet"})
+            # -------------------
+            # MESSAGE relay ONLY (NO AI, NO translate)
+            # -------------------
+            if mtype == "message":
+                if joined_room is None:
+                    await ws_send(ws, {"type":"error","message":"NOT_IN_ROOM"})
                     continue
 
-                await ws_send(peer, msg)
+                text = str(msg.get("text") or "").strip()
+                if not text:
+                    continue
+
+                # herkes kendi ödesin (ileride)
+                await charge_sender_if_needed(my_meta, cost=1)
+
+                payload = {
+                    "type": "message",
+                    "from": my_meta.get("from"),
+                    "from_name": my_meta.get("from_name"),
+                    "from_pic": my_meta.get("from_pic"),
+                    "lang": my_meta.get("me_lang"),
+                    "text": text,          # ✅ ham metin
+                    "ts": int(now()*1000),
+                }
+
+                # ✅ gönderen hariç herkese
+                await broadcast(joined_room, payload, exclude=ws)
                 continue
 
-            await ws_send(ws, {"type":"info","message":"unknown message type"})
+            await ws_send(ws, {"type":"error","message":"UNKNOWN_TYPE"})
 
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
-        # cleanup
-        if role in ("host","guest") and room.get(role) is ws:
-            room[role] = None
+        if joined_room is not None:
+            try:
+                joined_room["clients"].discard(ws)
+                joined_room["meta"].pop(ws, None)
+                joined_room["updated_at"] = now()
 
-        # remove empty room
-        if room.get("host") is None and room.get("guest") is None:
-            ROOMS.pop(room_id, None)
+                # presence
+                try:
+                    await send_presence(room_id, joined_room)
+                except Exception:
+                    pass
+
+                # oda boşsa sil
+                if len(joined_room["clients"]) == 0:
+                    try:
+                        del ROOMS[room_id]
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        try:
+            await ws.close()
+        except Exception:
+            pass
