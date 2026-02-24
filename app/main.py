@@ -9,10 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-# ROUTERS
 from app.routers import chat
 from app.routers import chat_openai
-from app.routers import tts_openai
 from app.routers import lang_pool
 from app.routers import teacher_chat
 from app.routers import translate
@@ -20,8 +18,9 @@ from app.routers import translate_ai
 from app.routers import command_parse
 from app.routers import admin
 from app.routers import f2f_ws
-from app.routers import tts  # ✅ /api/tts her zaman aktif (Google→OpenAI fallback)
+from app.routers import tts          # ✅ tek TTS
 from app.routers import stt
+
 try:
     from app.routers import voice_openai
     has_voice_openai = True
@@ -29,7 +28,6 @@ except Exception:
     voice_openai = None
     has_voice_openai = False
 
-# OCR modülü gerçekten varsa ekle (yoksa sorun çıkarmaz)
 try:
     from app.routers import ocr
     has_ocr = True
@@ -46,11 +44,9 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-# STATIC
 os.makedirs("static", exist_ok=True)
 app.mount("/assets", StaticFiles(directory="static"), name="assets")
 
-# CORS
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
@@ -67,21 +63,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ROUTER REGISTER
+# ROUTERS
 app.include_router(chat.router, prefix="/api")
 app.include_router(chat_openai.router, prefix="/api")
-app.include_router(tts_openai.router, prefix="/api")
 
-app.include_router(lang_pool.router)  # prefix kendi içinde olabilir
+app.include_router(lang_pool.router, prefix="/api")        # ✅ net
 app.include_router(teacher_chat.router, prefix="/api")
 
 app.include_router(translate.router, prefix="/api")
 app.include_router(translate_ai.router, prefix="/api")
-
 app.include_router(command_parse.router, prefix="/api")
-app.include_router(tts.router, prefix="/api")          # ✅ /api/tts burada kesin yüklenir
-app.include_router(f2f_ws.router, prefix="/api")
-app.include_router(stt.router, prefix="/api")
+
+app.include_router(tts.router, prefix="/api")              # ✅ /api/tts
+app.include_router(stt.router, prefix="/api")              # ✅ /api/stt
+app.include_router(f2f_ws.router, prefix="/api")           # ✅ /api/f2f/ws/...
 app.include_router(admin.router, prefix="/api")
 
 if has_voice_openai:
