@@ -14,29 +14,37 @@ ROOMS: Dict[str, Dict[str, Any]] = {}
 #   "created_at": float,
 #   "updated_at": float,
 #   "clients": set(WebSocket),
-#   "meta": { WebSocket: {"from","from_name","from_pic","me_lang"} }
+#   "meta": { WebSocket: {"from","from_name","from_pic","me_lang","role"} }
 # }
 
 def now() -> float:
     return time.time()
 
-def room_exists(room_id: str) -> bool:
+def room_expired(room: Dict[str, Any]) -> bool:
+    return (now() - float(room.get("created_at", 0))) > ROOM_TTL_SEC
+
+def get_room(room_id: str) -> Optional[Dict[str, Any]]:
+    room_id = (room_id or "").strip().upper()
     r = ROOMS.get(room_id)
     if not r:
-        return False
-    if (now() - float(r.get("created_at", 0))) > ROOM_TTL_SEC:
-        # expire
+        return None
+    if room_expired(r):
         try:
             del ROOMS[room_id]
         except Exception:
             pass
-        return False
-    return True
-
-def get_room(room_id: str) -> Optional[Dict[str, Any]]:
-    if not room_exists(room_id):
         return None
-    return ROOMS.get(room_id)
+    return r
+
+def create_room(room_id: str) -> Dict[str, Any]:
+    r = {
+        "created_at": now(),
+        "updated_at": now(),
+        "clients": set(),  # type: ignore
+        "meta": {},        # type: ignore
+    }
+    ROOMS[room_id] = r
+    return r
 
 async def ws_send(ws: Optional[WebSocket], msg: Dict[str, Any]) -> None:
     if ws is None:
@@ -62,27 +70,8 @@ async def broadcast(room: Dict[str, Any], msg: Dict[str, Any], exclude: Optional
         except Exception:
             pass
 
-async def send_presence(room_id: str, room: Dict[str, Any]) -> None:
+async def send_presence(room: Dict[str, Any]) -> None:
     await broadcast(room, {"type": "presence", "count": len(room["clients"])})
-    # (İstersen burada liste de gönderebiliriz)
-
-def create_room(room_id: str) -> Dict[str, Any]:
-    r = {
-        "created_at": now(),
-        "updated_at": now(),
-        "clients": set(),     # type: ignore
-        "meta": {},           # type: ignore
-    }
-    ROOMS[room_id] = r
-    return r
-
-# ✅ ödeme hook’u (şimdilik boş)
-async def charge_sender_if_needed(sender_meta: Dict[str, Any], cost: int = 1) -> None:
-    """
-    Burada ileride Supabase RPC ile kullanıcı jeton düşeceksin.
-    Şimdilik NO-OP.
-    """
-    return
 
 @router.websocket("/f2f/ws/{room_id}")
 async def f2f_ws(ws: WebSocket, room_id: str):
@@ -98,85 +87,67 @@ async def f2f_ws(ws: WebSocket, room_id: str):
             msg = json.loads(raw or "{}")
             mtype = str(msg.get("type") or "").strip()
 
-            # -------------------
-            # HOST creates room
-            # -------------------
+            # ✅ ROOM CHECK (JOIN ekranı için)
+            if mtype == "join_check":
+                r = get_room(room_id)
+                await ws_send(ws, {"type": "room_ok" if r else "room_not_found"})
+                continue
+
+            # ✅ HOST creates room
             if mtype == "create":
-                # only once
                 if joined_room is not None:
                     await ws_send(ws, {"type":"error","message":"ALREADY_JOINED"})
                     continue
 
-                # if already exists -> reuse (host can reopen same code)
-                room = get_room(room_id)
-                if room is None:
-                    room = create_room(room_id)
+                r = get_room(room_id)
+                if r is None:
+                    r = create_room(room_id)
 
-                joined_room = room
-
+                joined_room = r
                 my_meta = {
                     "from": msg.get("from"),
                     "from_name": msg.get("from_name"),
                     "from_pic": msg.get("from_pic"),
-                    "me_lang": (msg.get("me_lang") or "").strip().lower() or "tr",
+                    "me_lang": (msg.get("me_lang") or "tr").strip().lower(),
                     "role": "host",
                 }
-
-                room["clients"].add(ws)
-                room["meta"][ws] = my_meta
-                room["updated_at"] = now()
+                r["clients"].add(ws)
+                r["meta"][ws] = my_meta
+                r["updated_at"] = now()
 
                 await ws_send(ws, {"type":"room_created","room": room_id, "ttl_sec": ROOM_TTL_SEC})
-                await send_presence(room_id, room)
+                await send_presence(r)
                 continue
 
-            # -------------------
-            # GUEST joins room (must exist)
-            # -------------------
+            # ✅ GUEST joins existing room (NO AUTO CREATE!)
             if mtype == "join":
                 if joined_room is not None:
                     await ws_send(ws, {"type":"error","message":"ALREADY_JOINED"})
                     continue
 
-                room = get_room(room_id)
-                if room is None:
+                r = get_room(room_id)
+                if r is None:
                     await ws_send(ws, {"type":"room_not_found", "message":"Kod hatalı olabilir veya sohbet odası kapanmış olabilir."})
-                    # join başarısız → kapat
                     await ws.close()
                     return
 
-                joined_room = room
-
+                joined_room = r
                 my_meta = {
                     "from": msg.get("from"),
                     "from_name": msg.get("from_name"),
                     "from_pic": msg.get("from_pic"),
-                    "me_lang": (msg.get("me_lang") or "").strip().lower() or "tr",
+                    "me_lang": (msg.get("me_lang") or "tr").strip().lower(),
                     "role": "guest",
                 }
-
-                room["clients"].add(ws)
-                room["meta"][ws] = my_meta
-                room["updated_at"] = now()
+                r["clients"].add(ws)
+                r["meta"][ws] = my_meta
+                r["updated_at"] = now()
 
                 await ws_send(ws, {"type":"room_joined","room": room_id, "ttl_sec": ROOM_TTL_SEC})
-                await send_presence(room_id, room)
+                await send_presence(r)
                 continue
 
-            # -------------------
-            # Join check (no auto create)
-            # -------------------
-            if mtype == "join_check":
-                room = get_room(room_id)
-                if room is None:
-                    await ws_send(ws, {"type":"room_not_found"})
-                else:
-                    await ws_send(ws, {"type":"room_ok"})
-                continue
-
-            # -------------------
-            # MESSAGE relay ONLY (NO AI, NO translate)
-            # -------------------
+            # ✅ MESSAGE relay ONLY (NO AI, NO translate)
             if mtype == "message":
                 if joined_room is None:
                     await ws_send(ws, {"type":"error","message":"NOT_IN_ROOM"})
@@ -186,19 +157,15 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                 if not text:
                     continue
 
-                # herkes kendi ödesin (ileride)
-                await charge_sender_if_needed(my_meta, cost=1)
-
                 payload = {
                     "type": "message",
                     "from": my_meta.get("from"),
                     "from_name": my_meta.get("from_name"),
                     "from_pic": my_meta.get("from_pic"),
                     "lang": my_meta.get("me_lang"),
-                    "text": text,          # ✅ ham metin
+                    "text": text,
                     "ts": int(now()*1000),
                 }
-
                 # ✅ gönderen hariç herkese
                 await broadcast(joined_room, payload, exclude=ws)
                 continue
@@ -215,14 +182,10 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                 joined_room["clients"].discard(ws)
                 joined_room["meta"].pop(ws, None)
                 joined_room["updated_at"] = now()
-
-                # presence
                 try:
-                    await send_presence(room_id, joined_room)
+                    await send_presence(joined_room)
                 except Exception:
                     pass
-
-                # oda boşsa sil
                 if len(joined_room["clients"]) == 0:
                     try:
                         del ROOMS[room_id]
