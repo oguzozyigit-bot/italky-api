@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -70,8 +70,30 @@ async def broadcast(room: Dict[str, Any], msg: Dict[str, Any], exclude: Optional
         except Exception:
             pass
 
+def build_roster(room: Dict[str, Any]) -> list:
+    roster = []
+    meta = room.get("meta") or {}
+    for _ws, m in meta.items():
+        try:
+            roster.append({
+                "from": m.get("from") or "",
+                "from_name": m.get("from_name") or "User",
+                "from_pic": m.get("from_pic") or "",
+                "me_lang": (m.get("me_lang") or "tr"),
+                "role": m.get("role") or "guest",
+            })
+        except Exception:
+            continue
+    return roster
+
 async def send_presence(room: Dict[str, Any]) -> None:
-    await broadcast(room, {"type": "presence", "count": len(room["clients"])})
+    # ✅ count + roster (client isterse avatarları hemen basar)
+    await broadcast(room, {
+        "type": "presence",
+        "count": len(room["clients"]),
+        "roster": build_roster(room),
+        "ttl_sec": ROOM_TTL_SEC,
+    })
 
 @router.websocket("/f2f/ws/{room_id}")
 async def f2f_ws(ws: WebSocket, room_id: str):
@@ -157,17 +179,20 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                 if not text:
                     continue
 
+                # Dikkat: lang'i client gönderiyorsa onu al, yoksa my_meta
+                lang = str(msg.get("lang") or my_meta.get("me_lang") or "tr").strip().lower()
+
                 payload = {
                     "type": "message",
                     "from": my_meta.get("from"),
                     "from_name": my_meta.get("from_name"),
                     "from_pic": my_meta.get("from_pic"),
-                    "lang": my_meta.get("me_lang"),
+                    "lang": lang,
                     "text": text,
                     "ts": int(now()*1000),
                 }
-                # ✅ gönderen hariç herkese
                 await broadcast(joined_room, payload, exclude=ws)
+                joined_room["updated_at"] = now()
                 continue
 
             await ws_send(ws, {"type":"error","message":"UNKNOWN_TYPE"})
