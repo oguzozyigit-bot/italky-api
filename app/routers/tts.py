@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import base64
 import logging
 from typing import Optional, Dict, Any
 
@@ -11,17 +10,12 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 
 logger = logging.getLogger("uvicorn.error")
-router = APIRouter()
+router = APIRouter(tags=["tts"])
 
 # =========================
-# ENV
+# ENV (GOOGLE ONLY)
 # =========================
 GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
-
-OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
-OPENAI_AUDIO_SPEECH_URL = "https://api.openai.com/v1/audio/speech"
-OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts") or "").strip()
-OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "alloy") or "").strip()
 
 # Google Cloud TTS endpoint
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
@@ -69,13 +63,11 @@ LANG_BCP47 = {
 def canon_lang(code: str) -> str:
     c = (code or "tr").strip().lower()
     c = c.replace("_", "-")
-    # "tr-TR" gibi gelirse base'e düşürme: direkt kullan
+    # "tr-TR" gibi gelirse direkt kullan
     if "-" in c and len(c) >= 4:
-        # "tr-tr" -> "tr-TR" şeklini normalize et
         base = c.split("-")[0]
         region = c.split("-")[1].upper()
         return f"{base}-{region}"
-    # "pt-br" destek
     if c == "pt-br":
         return "pt-br"
     return c
@@ -106,7 +98,7 @@ class TTSResponse(FlexibleModel):
     error: Optional[str] = None
 
 # =========================
-# PROVIDERS
+# PROVIDER (GOOGLE ONLY)
 # =========================
 async def google_tts(text: str, lang: str, voice: Optional[str], speaking_rate: float, pitch: float) -> Optional[str]:
     """
@@ -128,7 +120,6 @@ async def google_tts(text: str, lang: str, voice: Optional[str], speaking_rate: 
         },
     }
 
-    # voice name verilmişse ekle
     if voice:
         payload["voice"]["name"] = voice
 
@@ -152,42 +143,8 @@ async def google_tts(text: str, lang: str, voice: Optional[str], speaking_rate: 
         logger.exception("TTS_GOOGLE_EXCEPTION: %s", e)
         return None
 
-async def openai_tts(text: str) -> Optional[str]:
-    """
-    Returns audio_base64 on success, None on failure.
-    """
-    if not OPENAI_API_KEY:
-        logger.error("TTS_OPENAI: OPENAI_API_KEY missing")
-        return None
-
-    payload: Dict[str, Any] = {
-        "model": OPENAI_TTS_MODEL,
-        "voice": OPENAI_TTS_VOICE,
-        "input": text,
-        "format": "mp3",
-    }
-
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(OPENAI_AUDIO_SPEECH_URL, headers=headers, json=payload)
-
-        if r.status_code >= 400:
-            logger.error("TTS_FAIL_OPENAI %s %s", r.status_code, r.text[:500])
-            return None
-
-        return base64.b64encode(r.content).decode("utf-8")
-
-    except Exception as e:
-        logger.exception("TTS_OPENAI_EXCEPTION: %s", e)
-        return None
-
 # =========================
-# ROUTE
+# ROUTE (NO OPENAI FALLBACK)
 # =========================
 @router.post("/tts", response_model=TTSResponse)
 async def tts(req: TTSRequest) -> TTSResponse:
@@ -195,15 +152,10 @@ async def tts(req: TTSRequest) -> TTSResponse:
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
-    # 1) Google first
     g = await google_tts(text, req.lang, req.voice, req.speaking_rate, req.pitch)
     if g:
         return TTSResponse(ok=True, audio_base64=g, provider_used="google")
 
-    # 2) Fallback OpenAI
-    o = await openai_tts(text)
-    if o:
-        return TTSResponse(ok=True, audio_base64=o, provider_used="openai")
-
-    # both failed
-    raise HTTPException(status_code=502, detail="tts failed (google+openai)")
+    # ✅ Kural: asla OpenAI TTS fallback yok
+    # Frontend bozulmasın diye 200 + ok:false dönüyoruz
+    return TTSResponse(ok=False, provider_used="google", error="TTS_UNAVAILABLE")
