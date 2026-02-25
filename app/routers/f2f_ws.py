@@ -1,3 +1,4 @@
+# FILE: italky-api/app/routers/f2f_ws.py
 from __future__ import annotations
 
 import json
@@ -9,19 +10,24 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 router = APIRouter(tags=["f2f-ws"])
 
 ROOM_TTL_SEC = 60 * 30  # 30 dk
-ROOMS: Dict[str, Dict[str, Any]] = {}
+
 # ROOMS[room_id] = {
 #   "created_at": float,
 #   "updated_at": float,
 #   "clients": set(WebSocket),
 #   "meta": { WebSocket: {"from","from_name","from_pic","me_lang","role"} }
 # }
+ROOMS: Dict[str, Dict[str, Any]] = {}
+
 
 def now() -> float:
     return time.time()
 
+
 def room_expired(room: Dict[str, Any]) -> bool:
+    # TTL created_at bazlı (istersen updated_at bazlıya çevirebiliriz)
     return (now() - float(room.get("created_at", 0))) > ROOM_TTL_SEC
+
 
 def get_room(room_id: str) -> Optional[Dict[str, Any]]:
     room_id = (room_id or "").strip().upper()
@@ -36,33 +42,38 @@ def get_room(room_id: str) -> Optional[Dict[str, Any]]:
         return None
     return r
 
+
 def create_room(room_id: str) -> Dict[str, Any]:
-    r = {
+    r: Dict[str, Any] = {
         "created_at": now(),
         "updated_at": now(),
-        "clients": set(),  # type: ignore
-        "meta": {},        # type: ignore
+        "clients": set(),
+        "meta": {},
     }
     ROOMS[room_id] = r
     return r
+
 
 async def ws_send(ws: Optional[WebSocket], msg: Dict[str, Any]) -> None:
     if ws is None:
         return
     try:
-        await ws.send_text(json.dumps(msg))
+        await ws.send_text(json.dumps(msg, ensure_ascii=False))
     except Exception:
         return
 
+
 async def broadcast(room: Dict[str, Any], msg: Dict[str, Any], exclude: Optional[WebSocket] = None) -> None:
     dead = []
-    for c in list(room["clients"]):
+    for c in list(room.get("clients") or []):
         if exclude is not None and c is exclude:
             continue
         try:
-            await c.send_text(json.dumps(msg))
+            await c.send_text(json.dumps(msg, ensure_ascii=False))
         except Exception:
             dead.append(c)
+
+    # temizle
     for d in dead:
         try:
             room["clients"].discard(d)
@@ -70,30 +81,38 @@ async def broadcast(room: Dict[str, Any], msg: Dict[str, Any], exclude: Optional
         except Exception:
             pass
 
+
 def build_roster(room: Dict[str, Any]) -> list:
     roster = []
     meta = room.get("meta") or {}
     for _ws, m in meta.items():
         try:
-            roster.append({
-                "from": m.get("from") or "",
-                "from_name": m.get("from_name") or "User",
-                "from_pic": m.get("from_pic") or "",
-                "me_lang": (m.get("me_lang") or "tr"),
-                "role": m.get("role") or "guest",
-            })
+            roster.append(
+                {
+                    "from": (m.get("from") or ""),
+                    "from_name": (m.get("from_name") or "User"),
+                    "from_pic": (m.get("from_pic") or ""),
+                    "me_lang": (m.get("me_lang") or "tr"),
+                    "role": (m.get("role") or "guest"),
+                }
+            )
         except Exception:
             continue
     return roster
 
+
 async def send_presence(room: Dict[str, Any]) -> None:
-    # ✅ count + roster (client isterse avatarları hemen basar)
-    await broadcast(room, {
-        "type": "presence",
-        "count": len(room["clients"]),
-        "roster": build_roster(room),
-        "ttl_sec": ROOM_TTL_SEC,
-    })
+    # ✅ count + roster + ttl
+    await broadcast(
+        room,
+        {
+            "type": "presence",
+            "count": len(room.get("clients") or []),
+            "roster": build_roster(room),
+            "ttl_sec": ROOM_TTL_SEC,
+        },
+    )
+
 
 @router.websocket("/f2f/ws/{room_id}")
 async def f2f_ws(ws: WebSocket, room_id: str):
@@ -109,7 +128,7 @@ async def f2f_ws(ws: WebSocket, room_id: str):
             msg = json.loads(raw or "{}")
             mtype = str(msg.get("type") or "").strip()
 
-            # ✅ ROOM CHECK (JOIN ekranı için)
+            # ✅ JOIN ekranı oda kontrolü
             if mtype == "join_check":
                 r = get_room(room_id)
                 await ws_send(ws, {"type": "room_ok" if r else "room_not_found"})
@@ -118,7 +137,7 @@ async def f2f_ws(ws: WebSocket, room_id: str):
             # ✅ HOST creates room
             if mtype == "create":
                 if joined_room is not None:
-                    await ws_send(ws, {"type":"error","message":"ALREADY_JOINED"})
+                    await ws_send(ws, {"type": "error", "message": "ALREADY_JOINED"})
                     continue
 
                 r = get_room(room_id)
@@ -133,24 +152,31 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                     "me_lang": (msg.get("me_lang") or "tr").strip().lower(),
                     "role": "host",
                 }
+
                 r["clients"].add(ws)
                 r["meta"][ws] = my_meta
                 r["updated_at"] = now()
 
-                await ws_send(ws, {"type":"room_created","room": room_id, "ttl_sec": ROOM_TTL_SEC})
+                await ws_send(ws, {"type": "room_created", "room": room_id, "ttl_sec": ROOM_TTL_SEC})
                 await send_presence(r)
                 continue
 
             # ✅ GUEST joins existing room (NO AUTO CREATE!)
             if mtype == "join":
                 if joined_room is not None:
-                    await ws_send(ws, {"type":"error","message":"ALREADY_JOINED"})
+                    await ws_send(ws, {"type": "error", "message": "ALREADY_JOINED"})
                     continue
 
                 r = get_room(room_id)
                 if r is None:
-                    await ws_send(ws, {"type":"room_not_found", "message":"Kod hatalı olabilir veya sohbet odası kapanmış olabilir."})
-                    await ws.close()
+                    await ws_send(
+                        ws,
+                        {"type": "room_not_found", "message": "Kod hatalı olabilir veya sohbet odası kapanmış olabilir."},
+                    )
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
                     return
 
                 joined_room = r
@@ -161,25 +187,26 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                     "me_lang": (msg.get("me_lang") or "tr").strip().lower(),
                     "role": "guest",
                 }
+
                 r["clients"].add(ws)
                 r["meta"][ws] = my_meta
                 r["updated_at"] = now()
 
-                await ws_send(ws, {"type":"room_joined","room": room_id, "ttl_sec": ROOM_TTL_SEC})
+                await ws_send(ws, {"type": "room_joined", "room": room_id, "ttl_sec": ROOM_TTL_SEC})
                 await send_presence(r)
                 continue
 
             # ✅ MESSAGE relay ONLY (NO AI, NO translate)
             if mtype == "message":
                 if joined_room is None:
-                    await ws_send(ws, {"type":"error","message":"NOT_IN_ROOM"})
+                    await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
                     continue
 
                 text = str(msg.get("text") or "").strip()
                 if not text:
                     continue
 
-                # Dikkat: lang'i client gönderiyorsa onu al, yoksa my_meta
+                # lang'i client yollarsa onu al, yoksa my_meta
                 lang = str(msg.get("lang") or my_meta.get("me_lang") or "tr").strip().lower()
 
                 payload = {
@@ -189,19 +216,22 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                     "from_pic": my_meta.get("from_pic"),
                     "lang": lang,
                     "text": text,
-                    "ts": int(now()*1000),
+                    "ts": int(now() * 1000),
                 }
+
+                # ✅ gönderen hariç herkese
                 await broadcast(joined_room, payload, exclude=ws)
                 joined_room["updated_at"] = now()
                 continue
 
-            await ws_send(ws, {"type":"error","message":"UNKNOWN_TYPE"})
+            await ws_send(ws, {"type": "error", "message": "UNKNOWN_TYPE"})
 
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
+        # ✅ bağlantıyı odadan çıkar ama ODAYI SİLME (TTL çözer)
         if joined_room is not None:
             try:
                 joined_room["clients"].discard(ws)
@@ -211,4 +241,10 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                     await send_presence(joined_room)
                 except Exception:
                     pass
-                joined_room["updated_at"] = now()
+            except Exception:
+                pass
+
+        try:
+            await ws.close()
+        except Exception:
+            pass
