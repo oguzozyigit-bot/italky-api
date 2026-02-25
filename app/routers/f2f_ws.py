@@ -241,15 +241,6 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                 except Exception:
                     pass
 
-                # delete empty room
-                if len(joined_room["clients"]) == 0:
-                    try:
-                        del ROOMS[room_id]
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
         try:
             await ws.close()
         except Exception:
