@@ -1,25 +1,28 @@
+# FILE: italky-api/app/routers/level_test.py
+
 from __future__ import annotations
-
-import os
-import json
-import re
-import logging
-from typing import Any, Dict, Optional, List
-
-import httpx
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-
+from pydantic import BaseModel
+import os, json, re
 from supabase import create_client
 
-logger = logging.getLogger("uvicorn.error")
 router = APIRouter(tags=["level-test"])
 
-# -------------------------
-# ENV
-# -------------------------
-SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or "").strip()
-SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+# ✅ Sadece boş mu kontrol ediyoruz (JWT format zorlamıyoruz)
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL missing")
+
+if not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY missing")
+
+# ✅ Artık eyJ kontrolü yok
+try:
+    sb_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+except Exception as e:
+    raise RuntimeError(f"supabase init failed: {str(e)}")
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
 OPENAI_MODEL = (os.getenv("OPENAI_MODEL", "gpt-4o-mini") or "").strip()
