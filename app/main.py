@@ -1,3 +1,4 @@
+# FILE: italky-api/app/main.py
 from __future__ import annotations
 
 import os
@@ -8,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
-# ROUTERS
 from app.routers import chat
 from app.routers import chat_openai
 from app.routers import lang_pool
@@ -20,7 +20,9 @@ from app.routers import admin
 from app.routers import f2f_ws
 from app.routers import tts
 from app.routers import stt
-from app.routers import level_test   # ✅ YENİ EKLENDİ
+
+# ✅ LEVEL TEST ROUTER
+from app.routers import level_test
 
 try:
     from app.routers import voice_openai
@@ -36,8 +38,7 @@ except Exception:
     ocr = None
     has_ocr = False
 
-
-APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.1").strip()
+APP_VERSION = (os.getenv("APP_VERSION", "italky-api-v3.0") or "").strip()
 
 app = FastAPI(
     title="italky Academy API",
@@ -46,11 +47,12 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-# STATIC
 os.makedirs("static", exist_ok=True)
 app.mount("/assets", StaticFiles(directory="static"), name="assets")
 
-# CORS
+# ✅ CORS: Regex ile (italky.ai + www + preview subdomain vs.)
+# - allow_credentials True kalsın (auth cookie kullanan endpointler olabilir)
+# - regex, listeye göre daha az sürpriz çıkarır
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
@@ -62,15 +64,15 @@ ALLOWED_ORIGINS: List[str] = [
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https:\/\/([a-z0-9-]+\.)*italky\.ai$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
 )
 
-# =========================
-# ROUTER REGISTRATION
-# =========================
-
+# ROUTERS
 app.include_router(chat.router, prefix="/api")
 app.include_router(chat_openai.router, prefix="/api")
 
@@ -86,7 +88,7 @@ app.include_router(stt.router, prefix="/api")
 app.include_router(f2f_ws.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
-# ✅ SEVİYE TESPİT ROUTER
+# ✅ level test endpoints: /api/level_test/...
 app.include_router(level_test.router, prefix="/api")
 
 if has_voice_openai:
@@ -94,10 +96,6 @@ if has_voice_openai:
 
 if has_ocr:
     app.include_router(ocr.router, prefix="/api")
-
-# =========================
-# HEALTH & ROOT
-# =========================
 
 @app.get("/")
 def root():
