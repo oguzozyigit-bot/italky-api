@@ -49,7 +49,7 @@ app = FastAPI(
     title="italky Academy API",
     version=APP_VERSION,
     description="Backend service for italky Academy",
-    redirect_slashes=False,  # sende zaten böyle
+    redirect_slashes=False,
 )
 
 # ✅ STATIC
@@ -65,10 +65,6 @@ ALLOWED_ORIGINS: List[str] = [
     "http://localhost:3000",
 ]
 
-# ✅ CORS Middleware
-# Not:
-# - allow_credentials=True iken allow_origins="*" OLMAZ.
-# - allow_headers="*" preflight’ı rahatlatır (Content-Type, Authorization vs)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -105,16 +101,13 @@ if has_voice_openai:
 if has_ocr:
     app.include_router(ocr.router, prefix="/api")
 
-
 @app.get("/")
 def root():
     return {"status": "online", "service": "italky-academy-api", "version": APP_VERSION}
 
-
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
-
 
 @app.get("/favicon.ico")
 async def favicon():
