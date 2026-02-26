@@ -1,44 +1,66 @@
 # FILE: app/routers/level_test.py
-
 from __future__ import annotations
 
 import os
 import json
 import re
-from typing import Optional
+from typing import Optional, Tuple, Any, Dict
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+
 from supabase import create_client
 from supabase.lib.client_options import ClientOptions
 
 router = APIRouter(tags=["level-test"])
 
-# =========================================================
-# 🔐 ENV SAFE LOAD
-# =========================================================
-
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-
-if not SUPABASE_URL:
-    raise RuntimeError("SUPABASE_URL missing in environment")
-
-if not SUPABASE_SERVICE_ROLE_KEY:
-    raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY missing in environment")
-
-try:
-    sb_admin = create_client(
-        SUPABASE_URL,
-        SUPABASE_SERVICE_ROLE_KEY,
-        options=ClientOptions(auto_refresh_token=False, persist_session=False)
-    )
-except Exception as e:
-    raise RuntimeError(f"Supabase init failed: {str(e)}")
-
 
 # =========================================================
-# 📦 REQUEST MODEL
+# ✅ Lazy Supabase Admin Client (deploy çökmesin)
+# =========================================================
+
+_sb_admin = None
+_sb_err: Optional[str] = None
+
+def _init_supabase_admin() -> Tuple[Optional[Any], Optional[str]]:
+    """
+    Returns (client, error). Never raises (so app can boot).
+    """
+    global _sb_admin, _sb_err
+
+    if _sb_admin is not None:
+        return _sb_admin, None
+
+    if _sb_err is not None:
+        return None, _sb_err
+
+    url = (os.getenv("SUPABASE_URL", "") or "").strip()
+    key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
+
+    if not url:
+        _sb_err = "SUPABASE_URL missing"
+        return None, _sb_err
+
+    if not key:
+        _sb_err = "SUPABASE_SERVICE_ROLE_KEY missing"
+        return None, _sb_err
+
+    # ✅ Supabase new keys: MUST be sb_secret_... for service/admin
+    # (publishable key burada çalışmaz)
+    try:
+        _sb_admin = create_client(
+            url,
+            key,
+            options=ClientOptions(auto_refresh_token=False, persist_session=False),
+        )
+        return _sb_admin, None
+    except Exception as e:
+        _sb_err = f"Supabase init failed: {str(e)}"
+        return None, _sb_err
+
+
+# =========================================================
+# 📦 Request Model
 # =========================================================
 
 class GenReq(BaseModel):
@@ -47,7 +69,7 @@ class GenReq(BaseModel):
 
 
 # =========================================================
-# 🧠 PROMPT BUILDER
+# 🧠 Prompt
 # =========================================================
 
 def build_prompt(lang: str) -> str:
@@ -74,54 +96,55 @@ Rules:
 - Mix levels roughly: A1 10, A2 10, B1 10, B2 10, C1 10.
 - Questions must be in the target language.
 - Options must be plausible.
-"""
+""".strip()
+
+
+def extract_json(text: str) -> dict:
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise ValueError("JSON not found")
+    return json.loads(m.group(0))
 
 
 # =========================================================
-# 🤖 MODEL CALL PLACEHOLDERS
+# 🤖 Provider placeholders (senin mevcut çağrı kodun ile dolduracaksın)
 # =========================================================
 
 async def call_gemini(prompt: str) -> Optional[dict]:
-    key = os.getenv("GEMINI_API_KEY", "").strip()
+    key = (os.getenv("GEMINI_API_KEY", "") or "").strip()
     if not key:
         return None
-    # Buraya gerçek Gemini çağrını koy
+    # TODO: mevcut gemini çağrın
     return None
 
 
 async def call_openai(prompt: str) -> Optional[dict]:
-    key = os.getenv("OPENAI_API_KEY", "").strip()
+    key = (os.getenv("OPENAI_API_KEY", "") or "").strip()
     if not key:
         return None
-    # Buraya gerçek OpenAI çağrını koy
+    # TODO: mevcut openai çağrın
     return None
 
 
 # =========================================================
-# 🧹 JSON CLEANER
-# =========================================================
-
-def extract_json(text: str) -> dict:
-    match = re.search(r"\{.*\}", text, re.S)
-    if not match:
-        raise ValueError("JSON not found in model response")
-    return json.loads(match.group(0))
-
-
-# =========================================================
-# 🚀 GENERATE ENDPOINT
+# 🚀 Route
 # =========================================================
 
 @router.post("/level_test/generate")
 async def generate_level_test(req: GenReq):
+    sb_admin, err = _init_supabase_admin()
+    if err or sb_admin is None:
+        raise HTTPException(status_code=503, detail=f"supabase_admin_unavailable: {err}")
 
-    test_id = req.test_id.strip()
+    test_id = (req.test_id or "").strip()
     lang = (req.lang or "en").strip().lower()
 
-    # 1️⃣ Test var mı?
+    if not test_id:
+        raise HTTPException(status_code=422, detail="test_id required")
+
+    # 1) test var mı?
     row = (
-        sb_admin
-        .table("level_tests")
+        sb_admin.table("level_tests")
         .select("id,status,questions")
         .eq("id", test_id)
         .maybe_single()
@@ -131,13 +154,12 @@ async def generate_level_test(req: GenReq):
     if not row.data:
         raise HTTPException(status_code=404, detail="test not found")
 
-    # Zaten questions varsa tekrar üretme
     if row.data.get("questions"):
         return {"ok": True, "status": row.data.get("status", "ready")}
 
     prompt = build_prompt(lang)
 
-    # 2️⃣ Gemini → OpenAI fallback
+    # 2) Gemini -> OpenAI fallback
     data = await call_gemini(prompt)
     if data is None:
         data = await call_openai(prompt)
@@ -146,15 +168,14 @@ async def generate_level_test(req: GenReq):
         raise HTTPException(status_code=502, detail="No provider available")
 
     questions = data.get("questions") if isinstance(data, dict) else None
-
     if not isinstance(questions, list) or len(questions) != 50:
-        raise HTTPException(status_code=500, detail="Invalid questions payload")
+        raise HTTPException(status_code=500, detail="invalid questions payload")
 
-    # 3️⃣ DB update
+    # 3) DB’ye yaz
     try:
         sb_admin.table("level_tests").update({
             "questions": {"questions": questions},
-            "status": "ready"
+            "status": "ready",
         }).eq("id", test_id).execute()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB update failed: {str(e)}")
