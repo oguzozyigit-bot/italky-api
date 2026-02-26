@@ -16,28 +16,14 @@ logger = logging.getLogger("uvicorn.error")
 router = APIRouter(tags=["level-test"])
 
 # -------------------------
-# ENV (lazy validate)
+# ENV
 # -------------------------
 SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or "").strip()
 SUPABASE_SERVICE_ROLE_KEY = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
 
-GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY", "") or "").strip()
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
-
-# Gemini model candidates (404 olursa sıradakini dener)
-GEMINI_MODELS = [
-    (os.getenv("GEMINI_MODEL", "") or "").strip(),
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash-002",
-    "gemini-1.5-pro-latest",
-    "gemini-1.5-pro-002",
-]
-GEMINI_MODELS = [m for m in GEMINI_MODELS if m]
-
-# OpenAI model
 OPENAI_MODEL = (os.getenv("OPENAI_MODEL", "gpt-4o-mini") or "").strip()
 
-# timeouts
 HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=75.0, write=20.0, pool=10.0)
 
 # -------------------------
@@ -53,7 +39,6 @@ class GenReq(BaseModel):
 def sb_admin():
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
         raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
-    # key gerçekten JWT gibi mi? (çok temel kontrol)
     if not SUPABASE_SERVICE_ROLE_KEY.startswith("eyJ"):
         raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY must start with 'eyJ' (JWT)")
     return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -81,7 +66,7 @@ Rules:
 - Total exactly 50 questions.
 - Mix levels roughly: A1 10, A2 10, B1 10, B2 10, C1 10.
 - Questions and options MUST be in the target language.
-- Each question should be realistic for standardized placement tests.
+- Options must be plausible.
 - correct_index must be 0..3
 """.strip()
 
@@ -89,10 +74,8 @@ def extract_json_from_text(text: str) -> Dict[str, Any]:
     t = (text or "").strip()
     if not t:
         raise ValueError("empty text")
-    # Direkt JSON ise
     if t.startswith("{") and t.endswith("}"):
         return json.loads(t)
-    # Araya metin girerse JSON bloğunu çek
     m = re.search(r"\{.*\}", t, re.S)
     if not m:
         raise ValueError("JSON not found in model output")
@@ -121,64 +104,8 @@ def validate_questions(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return qs
 
 # -------------------------
-# Providers
+# OpenAI only
 # -------------------------
-async def call_gemini(prompt: str) -> Optional[Dict[str, Any]]:
-    if not GEMINI_API_KEY:
-        return None
-
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        for model in GEMINI_MODELS:
-            try:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-                r = await client.post(
-                    url,
-                    params={"key": GEMINI_API_KEY},
-                    json={
-                        "contents": [
-                            {"role": "user", "parts": [{"text": prompt}]}
-                        ],
-                        "generationConfig": {
-                            "temperature": 0.2,
-                            "maxOutputTokens": 8192,
-                        },
-                    },
-                    headers={"Content-Type": "application/json"},
-                )
-
-                if r.status_code >= 400:
-                    logger.error("GEMINI_FAIL %s %s", r.status_code, r.text[:800])
-                    # 404 model not found -> next model
-                    continue
-
-                j = r.json()
-                # Gemini response parse
-                text = ""
-                try:
-                    cand0 = (j.get("candidates") or [])[0]
-                    content = cand0.get("content") or {}
-                    parts = content.get("parts") or []
-                    if parts and isinstance(parts[0], dict):
-                        text = parts[0].get("text") or ""
-                except Exception:
-                    text = ""
-
-                if not text:
-                    logger.error("GEMINI_EMPTY_TEXT %s", str(j)[:800])
-                    continue
-
-                payload = extract_json_from_text(text)
-                return payload
-
-            except httpx.ReadTimeout:
-                logger.error("GEMINI_TIMEOUT model=%s", model)
-                continue
-            except Exception as e:
-                logger.exception("GEMINI_EXCEPTION model=%s err=%s", model, e)
-                continue
-
-    return None
-
 async def call_openai(prompt: str) -> Optional[Dict[str, Any]]:
     if not OPENAI_API_KEY:
         return None
@@ -197,7 +124,6 @@ async def call_openai(prompt: str) -> Optional[Dict[str, Any]]:
                     {"role": "system", "content": "You must output ONLY valid JSON."},
                     {"role": "user", "content": prompt},
                 ],
-                # JSON garanti (model destekliyorsa)
                 "response_format": {"type": "json_object"},
             }
 
@@ -234,7 +160,7 @@ async def generate_level_test(req: GenReq):
     test_id = req.test_id.strip()
     lang = (req.lang or "en").strip().lower()
 
-    # 1) supabase admin
+    # 1) supabase admin (request-time)
     try:
         sb = sb_admin()
     except Exception as e:
@@ -255,24 +181,21 @@ async def generate_level_test(req: GenReq):
     if row.data.get("questions"):
         return {"ok": True, "status": row.data.get("status", "ready")}
 
+    # 3) OpenAI only
     prompt = build_prompt(lang)
-
-    # 3) Gemini -> OpenAI fallback
-    data = await call_gemini(prompt)
-    if data is None:
-        data = await call_openai(prompt)
+    data = await call_openai(prompt)
 
     if data is None:
-        raise HTTPException(status_code=502, detail="No provider available (gemini+openai)")
+        raise HTTPException(status_code=502, detail="OpenAI not available or failed (no questions generated)")
 
-    # 4) validate questions
+    # 4) validate
     try:
         questions = validate_questions(data)
     except Exception as e:
         logger.error("QUESTIONS_INVALID %s payload=%s", e, str(data)[:800])
         raise HTTPException(status_code=500, detail=f"invalid questions payload: {str(e)}")
 
-    # 5) DB’ye yaz
+    # 5) write DB
     try:
         sb.table("level_tests").update({
             "questions": {"questions": questions},
