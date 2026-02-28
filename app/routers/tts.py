@@ -1,161 +1,96 @@
 # FILE: italky-api/app/routers/tts.py
 from __future__ import annotations
 
-import os
+import hashlib
 import logging
-from typing import Optional, Dict, Any
+from pathlib import Path
+from typing import Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field
+import edge_tts
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter(tags=["tts"])
 
-# =========================
-# ENV (GOOGLE ONLY)
-# =========================
-GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
+# Disk cache (Render'da /tmp güvenli)
+CACHE_DIR = Path("/tmp/italky_tts_cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Google Cloud TTS endpoint
-GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
-
-# Basit dil->BCP47 map (Google voice languageCode için)
-LANG_BCP47 = {
-    "tr": "tr-TR",
-    "en": "en-US",
-    "de": "de-DE",
-    "fr": "fr-FR",
-    "it": "it-IT",
-    "es": "es-ES",
-    "pt": "pt-PT",
-    "pt-br": "pt-BR",
-    "nl": "nl-NL",
-    "sv": "sv-SE",
-    "no": "nb-NO",
-    "da": "da-DK",
-    "fi": "fi-FI",
-    "pl": "pl-PL",
-    "cs": "cs-CZ",
-    "sk": "sk-SK",
-    "hu": "hu-HU",
-    "ro": "ro-RO",
-    "bg": "bg-BG",
-    "el": "el-GR",
-    "uk": "uk-UA",
-    "ru": "ru-RU",
-    "ar": "ar-XA",   # Google genelde ar-XA kullanır
-    "he": "he-IL",
-    "fa": "fa-IR",
-    "ur": "ur-PK",
-    "hi": "hi-IN",
-    "bn": "bn-BD",
-    "id": "id-ID",
-    "ms": "ms-MY",
-    "vi": "vi-VN",
-    "th": "th-TH",
-    "zh": "zh-CN",
-    "ja": "ja-JP",
-    "ko": "ko-KR",
-    "ka": "ka-GE",
+# 6 dil için voice seçimi (istersen artırırız)
+VOICE_MAP = {
+    "en": "en-US-JennyNeural",
+    "de": "de-DE-KatjaNeural",
+    "fr": "fr-FR-DeniseNeural",
+    "it": "it-IT-ElsaNeural",
+    "es": "es-ES-ElviraNeural",
+    "ru": "ru-RU-SvetlanaNeural",
+    "tr": "tr-TR-EmelNeural",
 }
 
-def canon_lang(code: str) -> str:
-    c = (code or "tr").strip().lower()
-    c = c.replace("_", "-")
-    # "tr-TR" gibi gelirse direkt kullan
-    if "-" in c and len(c) >= 4:
-        base = c.split("-")[0]
-        region = c.split("-")[1].upper()
-        return f"{base}-{region}"
-    if c == "pt-br":
-        return "pt-br"
-    return c
-
-def lang_to_bcp47(code: str) -> str:
-    c = canon_lang(code)
-    if "-" in c:
-        return c
-    return LANG_BCP47.get(c, "en-US")
-
-# =========================
-# SCHEMAS
-# =========================
+# ---------- Schemas ----------
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 class TTSRequest(FlexibleModel):
-    text: str
-    lang: str = "tr"
+    # frontend bazı yerde text, bazı yerde input yolluyor
+    text: Optional[str] = None
+    input: Optional[str] = None
+
+    lang: str = Field("en", min_length=2, max_length=16)
+
+    # opsiyonel override (istersen query ile açarız)
     voice: Optional[str] = None
+
+    # Edge TTS rate/volume/pitch SSML şeklinde; şimdilik sabit tutuyoruz.
+    # speaking_rate, pitch alanlarını yok etmiyoruz ki eski client kırılmasın.
     speaking_rate: float = 1.0
     pitch: float = 0.0
 
-class TTSResponse(FlexibleModel):
-    ok: bool
-    audio_base64: Optional[str] = None
-    provider_used: Optional[str] = None
-    error: Optional[str] = None
+def canon_lang(code: str) -> str:
+    c = (code or "en").strip().lower().replace("_", "-")
+    # en-us gibi gelirse en'e indir
+    if "-" in c:
+        c = c.split("-")[0]
+    return c
 
-# =========================
-# PROVIDER (GOOGLE ONLY)
-# =========================
-async def google_tts(text: str, lang: str, voice: Optional[str], speaking_rate: float, pitch: float) -> Optional[str]:
-    """
-    Returns audio_base64 on success, None on failure.
-    """
-    if not GOOGLE_API_KEY:
-        logger.warning("TTS_GOOGLE: GOOGLE_API_KEY missing -> skip")
-        return None
+def pick_voice(lang: str, voice_override: Optional[str]) -> str:
+    if voice_override:
+        return voice_override.strip()
+    return VOICE_MAP.get(canon_lang(lang), VOICE_MAP["en"])
 
-    bcp47 = lang_to_bcp47(lang)
+def cache_path(voice: str, text: str) -> Path:
+    h = hashlib.sha1(f"{voice}|{text}".encode("utf-8")).hexdigest()
+    return CACHE_DIR / f"{h}.mp3"
 
-    payload: Dict[str, Any] = {
-        "input": {"text": text},
-        "voice": {"languageCode": bcp47},
-        "audioConfig": {
-            "audioEncoding": "MP3",
-            "speakingRate": float(speaking_rate or 1.0),
-            "pitch": float(pitch or 0.0),
-        },
-    }
+async def edge_tts_mp3(text: str, lang: str, voice_override: Optional[str]) -> Path:
+    voice = pick_voice(lang, voice_override)
+    out_path = cache_path(voice, text)
 
-    if voice:
-        payload["voice"]["name"] = voice
+    if out_path.exists() and out_path.stat().st_size > 0:
+        return out_path
+
+    # Edge TTS üret
+    communicate = edge_tts.Communicate(text=text, voice=voice)
+    await communicate.save(str(out_path))
+    return out_path
+
+@router.post("/tts")
+async def tts(req: TTSRequest):
+    text = (req.text or req.input or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text (or input) is required")
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(
-                f"{GOOGLE_TTS_URL}?key={GOOGLE_API_KEY}",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
-
-        if r.status_code >= 400:
-            logger.error("TTS_FAIL_GOOGLE %s %s", r.status_code, r.text[:500])
-            return None
-
-        data = r.json()
-        audio_b64 = (data.get("audioContent") or "").strip()
-        return audio_b64 or None
-
+        mp3_path = await edge_tts_mp3(text=text, lang=req.lang, voice_override=req.voice)
+        return FileResponse(
+            path=str(mp3_path),
+            media_type="audio/mpeg",
+            filename="tts.mp3",
+            headers={"Cache-Control": "no-store"},
+        )
     except Exception as e:
-        logger.exception("TTS_GOOGLE_EXCEPTION: %s", e)
-        return None
-
-# =========================
-# ROUTE (NO OPENAI FALLBACK)
-# =========================
-@router.post("/tts", response_model=TTSResponse)
-async def tts(req: TTSRequest) -> TTSResponse:
-    text = (req.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="text is required")
-
-    g = await google_tts(text, req.lang, req.voice, req.speaking_rate, req.pitch)
-    if g:
-        return TTSResponse(ok=True, audio_base64=g, provider_used="google")
-
-    # ✅ Kural: asla OpenAI TTS fallback yok
-    # Frontend bozulmasın diye 200 + ok:false dönüyoruz
-    return TTSResponse(ok=False, provider_used="google", error="TTS_UNAVAILABLE")
+        logger.exception("TTS_EDGE_EXCEPTION: %s", e)
+        # frontend bozulmasın diye 500 dönelim
+        raise HTTPException(status_code=500, detail="TTS_UNAVAILABLE")
