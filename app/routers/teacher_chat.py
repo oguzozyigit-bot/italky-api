@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import os
+import json
+import re
 from typing import Optional, Dict, Any
 
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel, Field
 
-router = APIRouter()
+router = APIRouter(tags=["teacher-chat"])
 
 # ✅ Basit güvenlik (Supabase Edge Function -> Render)
 RENDER_TOKEN = (os.getenv("ITALKY_RENDER_TOKEN") or "").strip()
@@ -16,19 +18,21 @@ RENDER_TOKEN = (os.getenv("ITALKY_RENDER_TOKEN") or "").strip()
 LLM_API_KEY = (os.getenv("OPENAI_API_KEY") or os.getenv("ITALKY_LLM_API_KEY") or "").strip()
 LLM_MODEL = (os.getenv("ITALKY_LLM_MODEL") or "gpt-4o-mini").strip()
 
+# OpenAI timeout
+OPENAI_TIMEOUT_SEC = float(os.getenv("ITALKY_LLM_TIMEOUT_SEC") or "25")
+
 
 class TeacherChatIn(BaseModel):
     teacher_id: str = Field(..., max_length=32)
-    teacher_name: str = Field(..., max_length=32)   # kullanıcı verdiği isim
+    teacher_name: str = Field(..., max_length=32)
     role: str = Field(..., max_length=64)           # English / Deutsch / ...
     level: str = Field(..., max_length=8)           # A0/A1/A2/B1...
     student_name: str = Field(..., max_length=64)
     user_text: str = Field(..., max_length=2000)
 
-    # ✅ yeni: persona
-    coach_gender: Optional[str] = Field(default="female", max_length=16)   # male/female
-    coach_style: Optional[str] = Field(default="friendly", max_length=16)  # friendly/cheerful/disciplined/expert
-    coach_voice: Optional[str] = Field(default="voice_1", max_length=16)   # voice_1..voice_4 (şimdilik metadata)
+    coach_gender: Optional[str] = Field(default="female", max_length=16)
+    coach_style: Optional[str] = Field(default="friendly", max_length=16)
+    coach_voice: Optional[str] = Field(default="voice_1", max_length=16)
 
 
 class TeacherChatOut(BaseModel):
@@ -39,6 +43,7 @@ class TeacherChatOut(BaseModel):
 
 
 def _require_token(authorization: Optional[str]):
+    # Token tanımlı değilse (dev/test) kapatma
     if not RENDER_TOKEN:
         return
     if not authorization:
@@ -68,7 +73,6 @@ def _style_rules(style: str) -> str:
             "- Explain briefly why something is wrong (in Turkish section only).\n"
             "- Provide higher-quality vocabulary and natural phrasing.\n"
         )
-    # friendly
     return (
         "- Be warm and friendly.\n"
         "- Encourage the student.\n"
@@ -77,7 +81,6 @@ def _style_rules(style: str) -> str:
 
 
 def _gender_voice_hint(gender: str, voice: str) -> str:
-    # UI’da motor adı yok; sadece persona ipucu.
     g = (gender or "female").strip().lower()
     v = (voice or "voice_1").strip().lower()
     gtxt = "female" if g == "female" else "male"
@@ -85,7 +88,6 @@ def _gender_voice_hint(gender: str, voice: str) -> str:
 
 
 def _build_system_prompt(tname: str, role: str, level: str, sname: str, style: str, gender: str, voice: str) -> str:
-    # ✅ Önemli: öğretmen hedef dilde konuşacak, TR açıklama ayrı alanda
     return f"""
 You are a language teacher created by italky Academy.
 Your name is: {tname}
@@ -101,7 +103,6 @@ Rules for "teacher":
 - Write ONLY in the TARGET LANGUAGE ({role}).
 - Do NOT use Turkish in "teacher".
 - Be natural, level-appropriate, and helpful.
-- Use the teacher name "{tname}" naturally when appropriate (e.g., greetings).
 
 Rules for "tr":
 - Provide Turkish translation/explanation of the teacher message.
@@ -118,6 +119,19 @@ Teacher style rules:
 
 Never mention any external provider names. Always act as italky Academy.
 """.strip()
+
+
+def _extract_json(content: str) -> Dict[str, Any]:
+    s = (content or "").strip()
+    if not s:
+        raise ValueError("empty content")
+    if s.startswith("{") and s.endswith("}"):
+        return json.loads(s)
+
+    m = re.search(r"\{.*\}", s, re.S)
+    if not m:
+        raise ValueError("JSON not found in content")
+    return json.loads(m.group(0))
 
 
 @router.post("/teacher-chat", response_model=TeacherChatOut)
@@ -142,8 +156,7 @@ async def teacher_chat(payload: TeacherChatIn, authorization: Optional[str] = He
     system = _build_system_prompt(tname, role, level, sname, style, gender, voice)
 
     try:
-        # Backend içi LLM çağrısı (UI’da adı geçmez)
-        from openai import AsyncOpenAI  # zaten projede kullanıyorsun
+        from openai import AsyncOpenAI
         client = AsyncOpenAI(api_key=LLM_API_KEY)
 
         resp = await client.chat.completions.create(
@@ -151,17 +164,14 @@ async def teacher_chat(payload: TeacherChatIn, authorization: Optional[str] = He
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system},
-                {"role": "user", "content": user_text}
+                {"role": "user", "content": user_text},
             ],
             temperature=0.7,
+            timeout=OPENAI_TIMEOUT_SEC,
         )
 
         content = (resp.choices[0].message.content or "").strip()
-        if not content:
-            raise RuntimeError("empty model output")
-
-        import json
-        data: Dict[str, Any] = json.loads(content)
+        data = _extract_json(content)
 
         teacher = str(data.get("teacher", "")).strip()
         tr = str(data.get("tr", "")).strip()
@@ -169,9 +179,8 @@ async def teacher_chat(payload: TeacherChatIn, authorization: Optional[str] = He
         task_tr = str(data.get("task_tr", "")).strip()
 
         if not teacher or not tr:
-            # fallback
             return TeacherChatOut(
-                teacher=f"Hello {sname}! I'm {tname}. Write one sentence about your day.",
+                teacher=f"Hello {sname}! I’m {tname}. Write one sentence about your day.",
                 tr=f"Merhaba {sname}! Ben {tname}. Günün hakkında bir cümle yaz.",
                 task="Write one sentence about your day.",
                 task_tr="Günün hakkında bir cümle yaz."
