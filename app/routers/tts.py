@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import os
 import logging
-import base64
 from typing import Optional, Dict, Any
 
 import httpx
@@ -19,14 +18,13 @@ router = APIRouter(tags=["tts"])
 GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
-OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts") or "").strip()
-OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "alloy") or "").strip()  # alloy / nova / shimmer / ...
-OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
+# Ucuz ve stabil seçenek: tts-1. Alternatif: gpt-4o-mini-tts 1
+OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL", "tts-1") or "").strip()
+OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "alloy") or "").strip()
 
-# Google Cloud TTS endpoint
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"  # 2
 
-# Basit dil->BCP47 map (Google voice languageCode için)
 LANG_BCP47 = {
     "tr": "tr-TR",
     "en": "en-US",
@@ -94,10 +92,6 @@ class TTSRequest(FlexibleModel):
     voice: Optional[str] = None
     speaking_rate: float = 1.0
     pitch: float = 0.0
-    # OpenAI speed (0.25..4) ile uyum için:
-    speed: Optional[float] = None
-    # çıktı formatı (mp3/wav/opus...)
-    response_format: Optional[str] = None
 
 class TTSResponse(FlexibleModel):
     ok: bool
@@ -106,10 +100,9 @@ class TTSResponse(FlexibleModel):
     error: Optional[str] = None
 
 # =========================
-# PROVIDER: GOOGLE
+# GOOGLE
 # =========================
 async def google_tts(text: str, lang: str, voice: Optional[str], speaking_rate: float, pitch: float) -> Optional[str]:
-    """Returns audio_base64 on success, None on failure."""
     if not GOOGLE_API_KEY:
         logger.warning("TTS_GOOGLE: GOOGLE_API_KEY missing -> skip")
         return None
@@ -135,7 +128,6 @@ async def google_tts(text: str, lang: str, voice: Optional[str], speaking_rate: 
                 json=payload,
                 headers={"Content-Type": "application/json"},
             )
-
         if r.status_code >= 400:
             logger.error("TTS_FAIL_GOOGLE %s %s", r.status_code, r.text[:500])
             return None
@@ -143,62 +135,60 @@ async def google_tts(text: str, lang: str, voice: Optional[str], speaking_rate: 
         data = r.json()
         audio_b64 = (data.get("audioContent") or "").strip()
         return audio_b64 or None
-
     except Exception as e:
         logger.exception("TTS_GOOGLE_EXCEPTION: %s", e)
         return None
 
 # =========================
-# PROVIDER: OPENAI (fallback)
+# OPENAI FALLBACK
 # =========================
-async def openai_tts(text: str, lang: str, voice: Optional[str], speed: Optional[float], response_format: Optional[str]) -> Optional[str]:
+async def openai_tts(text: str, lang: str, voice: Optional[str]) -> Optional[str]:
     """
-    OpenAI /v1/audio/speech returns binary audio.
-    We base64 encode it for frontend compatibility.
+    OpenAI audio/speech -> returns base64 mp3
     """
     if not OPENAI_API_KEY:
         logger.warning("TTS_OPENAI: OPENAI_API_KEY missing -> skip")
         return None
 
     v = (voice or OPENAI_TTS_VOICE or "alloy").strip()
-    fmt = (response_format or "mp3").strip().lower()
-    spd = float(speed) if (speed is not None) else 1.0
+    model = OPENAI_TTS_MODEL or "tts-1"
 
-    # Model + input + voice + response_format + speed  1
-    payload: Dict[str, Any] = {
-        "model": OPENAI_TTS_MODEL,
-        "input": text,
+    payload = {
+        "model": model,
         "voice": v,
-        "response_format": fmt,
-        "speed": spd,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
+        "input": text,
+        "format": "mp3",
     }
 
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            r = await client.post(OPENAI_TTS_URL, headers=headers, json=payload)
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            r = await client.post(
+                OPENAI_TTS_URL,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
 
         if r.status_code >= 400:
-            logger.error("TTS_FAIL_OPENAI %s %s", r.status_code, r.text[:500])
+            logger.error("TTS_FAIL_OPENAI %s %s", r.status_code, r.text[:800])
             return None
 
-        audio_bytes = r.content or b""
-        if not audio_bytes:
+        # endpoint audio bytes döndürür 3
+        b = r.content or b""
+        if not b:
             logger.error("TTS_OPENAI_EMPTY")
             return None
 
-        return base64.b64encode(audio_bytes).decode("utf-8")
-
+        import base64
+        return base64.b64encode(b).decode("utf-8")
     except Exception as e:
         logger.exception("TTS_OPENAI_EXCEPTION: %s", e)
         return None
 
 # =========================
-# ROUTE (Google -> OpenAI fallback)
+# ROUTE (GOOGLE -> OPENAI)
 # =========================
 @router.post("/tts", response_model=TTSResponse)
 async def tts(req: TTSRequest) -> TTSResponse:
@@ -206,15 +196,15 @@ async def tts(req: TTSRequest) -> TTSResponse:
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
-    # 1) Google first
+    # 1) Google
     g = await google_tts(text, req.lang, req.voice, req.speaking_rate, req.pitch)
     if g:
         return TTSResponse(ok=True, audio_base64=g, provider_used="google")
 
     # 2) OpenAI fallback
-    o = await openai_tts(text, req.lang, req.voice, req.speed, req.response_format)
+    o = await openai_tts(text, req.lang, req.voice)
     if o:
         return TTSResponse(ok=True, audio_base64=o, provider_used="openai")
 
-    # 3) none
-    return TTSResponse(ok=False, provider_used="google->openai", error="TTS_UNAVAILABLE")
+    # 3) None
+    return TTSResponse(ok=False, provider_used="none", error="TTS_UNAVAILABLE")
