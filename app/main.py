@@ -54,7 +54,17 @@ try:
 except Exception:
     ocr = None
     has_ocr = False
+# ✅ OFFLINE ROUTER
+try:
+    from app.routers import offline
+    has_offline = True
+except Exception:
+    offline = None
+    has_offline = False
 
+# ... aşağıda OPTIONAL ROUTERS bölümünde:
+if has_offline:
+    app.include_router(offline.router, prefix="/api")
 
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.1").strip()
 
