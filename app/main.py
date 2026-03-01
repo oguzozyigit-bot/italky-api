@@ -21,15 +21,7 @@ from app.routers import f2f_ws
 from app.routers import tts
 from app.routers import stt
 
-# ✅ EXAM ROUTER (basic)
-try:
-    from app.routers import exam
-    has_exam = True
-except Exception:
-    exam = None
-    has_exam = False
-
-# ✅ EXAM PRO ROUTER (advanced real exam engine)
+# ✅ EXAM PRO ROUTER (Foto çek çöz / solve_text / deneme motoru)
 try:
     from app.routers import exam_pro
     has_exam_pro = True
@@ -45,7 +37,7 @@ except Exception:
     level_test = None
     has_level_test = False
 
-# ✅ OPENAI VOICE ROUTER
+# ✅ OPENAI VOICE ROUTER (varsa)
 try:
     from app.routers import voice_openai
     has_voice_openai = True
@@ -53,7 +45,7 @@ except Exception:
     voice_openai = None
     has_voice_openai = False
 
-# ✅ OCR ROUTER
+# ✅ OCR ROUTER (varsa)
 try:
     from app.routers import ocr
     has_ocr = True
@@ -121,30 +113,27 @@ app.include_router(admin.router, prefix="/api")
 # OPTIONAL ROUTERS
 # ===============================
 
-# Basic exam router
-if has_exam:
-    app.include_router(exam.router, prefix="/api")  # /api/exam/...
-
-# PRO exam engine
+# ✅ PRO exam engine
+# exam_pro.py içinde route: @router.post("/exam/solve_text")
+# Bu yüzden final endpoint: /api/exam/solve_text
 if has_exam_pro:
-    app.include_router(exam_pro.router, prefix="/api")  # /api/exam_pro/...
+    app.include_router(exam_pro.router, prefix="/api")
 
-# Level test
+# ✅ Level test
 if has_level_test:
     app.include_router(level_test.router, prefix="/api")
 
-# Voice OpenAI
+# ✅ Voice OpenAI
 if has_voice_openai:
     app.include_router(voice_openai.router, prefix="/api")
 
-# OCR
+# ✅ OCR
 if has_ocr:
     app.include_router(ocr.router, prefix="/api")
 
 # ===============================
 # HEALTH
 # ===============================
-
 @app.get("/")
 def root():
     return {
