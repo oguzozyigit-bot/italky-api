@@ -21,6 +21,14 @@ from app.routers import f2f_ws
 from app.routers import tts
 from app.routers import stt
 
+# ✅ EXAM ROUTER (varsa)  <-- (scan_solve / deneme / solve_text için)
+try:
+    from app.routers import exam
+    has_exam = True
+except Exception:
+    exam = None
+    has_exam = False
+
 # ✅ LEVEL TEST ROUTER (varsa)
 try:
     from app.routers import level_test
@@ -92,6 +100,11 @@ app.include_router(stt.router, prefix="/api")
 app.include_router(f2f_ws.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
+# ✅ exam router (deneme + solve_text)
+if has_exam:
+    app.include_router(exam.router, prefix="/api")  # ✅ /api/exam/...
+
+# ✅ level test router
 if has_level_test:
     app.include_router(level_test.router, prefix="/api")  # ✅ /api/level_test/...
 
@@ -101,13 +114,16 @@ if has_voice_openai:
 if has_ocr:
     app.include_router(ocr.router, prefix="/api")
 
+
 @app.get("/")
 def root():
     return {"status": "online", "service": "italky-academy-api", "version": APP_VERSION}
 
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
+
 
 @app.get("/favicon.ico")
 async def favicon():
