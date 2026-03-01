@@ -1,15 +1,12 @@
-# FILE: italky-api/app/routers/offline.py
 from __future__ import annotations
 
 import os
 import time
-from typing import Optional, Any, Dict
+from typing import Optional, Dict, Any
 
-from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel, Field
 from supabase import create_client, Client
-import jwt
 
 router = APIRouter(tags=["offline"])
 
@@ -18,251 +15,160 @@ router = APIRouter(tags=["offline"])
 # =============================
 SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
 SUPABASE_SERVICE_ROLE = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-SUPABASE_JWT_SECRET = (os.getenv("SUPABASE_JWT_SECRET") or "").strip()
 
+# NOTE:
+# - Token doğrulaması için manuel jwt decode yerine Supabase Auth get_user kullanıyoruz.
+# - Service role ile auth admin endpoint'e gidebilir.
 STORAGE_BUCKET = "offline"
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
     raise RuntimeError("Supabase ENV eksik: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY")
-if not SUPABASE_JWT_SECRET:
-    raise RuntimeError("Supabase ENV eksik: SUPABASE_JWT_SECRET")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE)
+sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE)
 
 # =============================
-# SCHEMAS
+# SCHEMA
 # =============================
 class OfflineLinkReq(BaseModel):
-    base_lang: str
-    target_lang: str
-
+    base_lang: str = Field(..., min_length=2, max_length=16)
+    target_lang: str = Field(..., min_length=2, max_length=16)
 
 class OfflineLinkResp(BaseModel):
     ok: bool
-    url: str
-
-
-class FirstInstallReq(BaseModel):
-    # İlk kurulumda kullanıcı ana dili seçebilir; şu an sadece TR için trial veriyoruz
-    base_lang: str = Field(default="tr", max_length=8)
-    target_lang: str = Field(default="en", max_length=8)
-
-
-class PurchasePairReq(BaseModel):
-    base_lang: str
-    target_lang: str
-    days: int = 365
-    fee: int = 50  # jeton
-
-
-class GenericResp(BaseModel):
-    ok: bool
-    detail: str = ""
-    expires_at: Optional[str] = None  # ISO
-
+    pair_1: str
+    pair_2: str
+    url_1: str
+    url_2: str
 
 # =============================
 # HELPERS
 # =============================
-def get_user_from_token(auth_header: Optional[str]) -> str:
-    if not auth_header or not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authorization missing")
+def _norm(code: str) -> str:
+    return (code or "").strip().lower().replace("_", "-")
 
-    token = auth_header.replace("Bearer ", "").strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Authorization missing")
-
-    try:
-        payload = jwt.decode(
-            token,
-            SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
-            options={"verify_aud": False},
-        )
-        sub = payload.get("sub")
-        if not sub:
-            raise HTTPException(status_code=401, detail="Invalid token (no sub)")
-        return str(sub)
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-
-def _to_epoch_seconds(expires_at: Any) -> int:
-    if expires_at is None:
+def _parse_expires_at(v: Any) -> int:
+    """
+    Supabase'den gelen expires_at:
+    - datetime olabilir
+    - ISO string olabilir
+    - None olabilir
+    Dönen: epoch seconds (0 if invalid)
+    """
+    if v is None:
         return 0
-    if isinstance(expires_at, (int, float)):
-        return int(expires_at)
-    if isinstance(expires_at, datetime):
-        dt = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
-        return int(dt.timestamp())
-    if isinstance(expires_at, str):
-        s = expires_at.strip()
+    try:
+        # datetime
+        if hasattr(v, "timestamp"):
+            return int(v.timestamp())
+    except Exception:
+        pass
+    try:
+        s = str(v).strip()
         if not s:
             return 0
-        if s.isdigit():
-            return int(s)
+        # ör: 2026-03-02T12:34:56+00:00 / 2026-03-02 12:34:56+00
+        s = s.replace(" ", "T")
+        # Python 3.11+ fromisoformat supports offsets
+        import datetime as dt
+        return int(dt.datetime.fromisoformat(s).timestamp())
+    except Exception:
+        return 0
+
+def _require_bearer(authorization: Optional[str]) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authorization missing")
+    return authorization.replace("Bearer ", "").strip()
+
+async def _get_user_id_from_access_token(access_token: str) -> str:
+    """
+    access_token Supabase JWT'dir. Supabase Auth endpoint üzerinden doğrulayıp user alır.
+    """
+    try:
+        user = sb.auth.get_user(access_token)
+        uid = getattr(user, "user", None)
+        # supabase-py bazen dict benzeri döner
+        if uid and getattr(uid, "id", None):
+            return str(uid.id)
+        if isinstance(user, dict):
+            # eski/alternatif shape
+            return str(((user.get("user") or {}).get("id")) or "")
+        # fallback: object attribute search
         try:
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp())
+            return str(user.user.id)
         except Exception:
-            return 0
-    return 0
+            return ""
+    except Exception:
+        return ""
 
+def _storage_path(pair_code: str) -> str:
+    # offline/langpacks/en-tr/model.zip  (bucket=offline)
+    return f"langpacks/{pair_code}/model.zip"
 
-def _norm_lang(x: str) -> str:
-    return (x or "").strip().lower().replace("_", "-")
+def _signed_url(path: str) -> str:
+    # 60 sn geçerli signed url
+    signed = sb.storage.from_(STORAGE_BUCKET).create_signed_url(path, 60)
+    if not signed:
+        return ""
+    # supabase-py dönüşlerinde anahtar değişebiliyor:
+    # {"signedURL": "..."} veya {"signedUrl": "..."} vb.
+    return (
+        signed.get("signedURL")
+        or signed.get("signedUrl")
+        or signed.get("signed_url")
+        or signed.get("url")
+        or ""
+    )
 
-def _pair(a: str, b: str) -> str:
-    return f"{_norm_lang(a)}-{_norm_lang(b)}"
+# =============================
+# ROUTE
+# =============================
+@router.post("/offline/get_links", response_model=OfflineLinkResp)
+async def get_offline_links(req: OfflineLinkReq, authorization: Optional[str] = Header(None)):
+    token = _require_bearer(authorization)
+    user_id = await _get_user_id_from_access_token(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
+    base = _norm(req.base_lang)
+    target = _norm(req.target_lang)
 
-def _has_valid_pack(user_id: str, pair1: str, pair2: str) -> bool:
+    if not base or not target or base == target:
+        raise HTTPException(status_code=400, detail="Dil parametresi hatalı")
+
+    pair_1 = f"{base}-{target}"
+    pair_2 = f"{target}-{base}"
+
     now_ts = int(time.time())
+
+    # 1) Kullanıcı paketi var mı?
     packs = (
-        supabase
-        .table("offline_packs")
+        sb.table("offline_packs")
         .select("lang_code, expires_at")
         .eq("user_id", user_id)
-        .in_("lang_code", [pair1, pair2])
+        .in_("lang_code", [pair_1, pair_2])
         .execute()
     )
-    if not packs.data:
-        return False
 
+    if not packs.data or len(packs.data) < 2:
+        raise HTTPException(status_code=403, detail="Offline paket yok (2 yön gerekli)")
+
+    # 2) expiry kontrol (ikisi de aktif olmalı)
+    exp_map: Dict[str, int] = {}
     for p in packs.data:
-        exp = _to_epoch_seconds(p.get("expires_at"))
-        if exp > now_ts:
-            return True
-    return False
+        code = str(p.get("lang_code") or "").strip().lower()
+        exp_map[code] = _parse_expires_at(p.get("expires_at"))
 
+    if exp_map.get(pair_1, 0) <= now_ts or exp_map.get(pair_2, 0) <= now_ts:
+        raise HTTPException(status_code=403, detail="Offline paketin süresi dolmuş")
 
-def _signed_url(storage_path: str, ttl_sec: int = 60) -> str:
-    signed = supabase.storage.from_(STORAGE_BUCKET).create_signed_url(storage_path, expires_in=ttl_sec)
-    if not isinstance(signed, dict):
-        return ""
-    return (signed.get("signedURL") or signed.get("signedUrl") or "").strip()
+    # 3) Signed URL (iki zip)
+    p1 = _storage_path(pair_1)
+    p2 = _storage_path(pair_2)
 
+    url1 = _signed_url(p1)
+    url2 = _signed_url(p2)
 
-# =============================
-# ROUTES
-# =============================
+    if not url1 or not url2:
+        raise HTTPException(status_code=404, detail="Dosya bulunamadı (storage path yanlış olabilir)")
 
-@router.post("/offline/get_link", response_model=OfflineLinkResp)
-async def get_offline_link(req: OfflineLinkReq, authorization: Optional[str] = Header(None)):
-    user_id = get_user_from_token(authorization)
-
-    base = _norm_lang(req.base_lang)
-    target = _norm_lang(req.target_lang)
-    if not base or not target or base == target:
-        raise HTTPException(status_code=400, detail="Dil parametresi hatalı")
-
-    pair_code_1 = _pair(base, target)
-    pair_code_2 = _pair(target, base)
-
-    if not _has_valid_pack(user_id, pair_code_1, pair_code_2):
-        raise HTTPException(status_code=403, detail="Offline paket yok / süresi dolmuş")
-
-    # ✅ istenen yön indirilecek
-    storage_path = f"langpacks/{pair_code_1}/model.zip"
-
-    url = _signed_url(storage_path, ttl_sec=60)
-    if not url:
-        raise HTTPException(status_code=404, detail="Dosya bulunamadı (storage_path yanlış olabilir)")
-
-    return OfflineLinkResp(ok=True, url=url)
-
-
-@router.post("/offline/first_install", response_model=GenericResp)
-async def first_install(req: FirstInstallReq, authorization: Optional[str] = Header(None)):
-    """
-    İlk kurulum denemesi:
-    - Sadece 1 kez verilir (profiles.offline_trial_used = true)
-    - Şu an: TR ↔ EN 30 gün
-    """
-    user_id = get_user_from_token(authorization)
-
-    base = _norm_lang(req.base_lang or "tr")
-    target = _norm_lang(req.target_lang or "en")
-
-    if base != "tr" or target != "en":
-        # şu an MVP: sadece TR-EN trial
-        base = "tr"
-        target = "en"
-
-    # 1) trial kullanılmış mı?
-    prof = supabase.table("profiles").select("offline_trial_used").eq("id", user_id).maybe_single().execute()
-    used = bool((prof.data or {}).get("offline_trial_used"))
-    if used:
-        return GenericResp(ok=True, detail="trial_already_used")
-
-    # 2) paketi yaz (TR-EN ve EN-TR)
-    days = 30
-    expires = datetime.now(timezone.utc).timestamp() + (days * 86400)
-    expires_iso = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()
-
-    p1 = _pair(base, target)  # tr-en
-    p2 = _pair(target, base)  # en-tr
-
-    # upsert
-    for code in (p1, p2):
-        supabase.table("offline_packs").upsert({
-            "user_id": user_id,
-            "lang_code": code,
-            "expires_at": expires_iso,
-            "source": "trial"
-        }, on_conflict="user_id,lang_code").execute()
-
-    # 3) flag set
-    supabase.table("profiles").update({"offline_trial_used": True}).eq("id", user_id).execute()
-
-    return GenericResp(ok=True, detail="trial_granted", expires_at=expires_iso)
-
-
-@router.post("/offline/purchase_pair", response_model=GenericResp)
-async def purchase_pair(req: PurchasePairReq, authorization: Optional[str] = Header(None)):
-    """
-    Ücretli satın alma:
-    - fee jeton düşer
-    - çift yön kaydedilir
-    """
-    user_id = get_user_from_token(authorization)
-
-    base = _norm_lang(req.base_lang)
-    target = _norm_lang(req.target_lang)
-    if not base or not target or base == target:
-        raise HTTPException(status_code=400, detail="Dil parametresi hatalı")
-
-    fee = int(req.fee or 50)
-    days = int(req.days or 365)
-    if fee < 0 or days <= 0:
-        raise HTTPException(status_code=400, detail="fee/days hatalı")
-
-    # 1) tokens lock + read
-    prof = supabase.table("profiles").select("tokens").eq("id", user_id).maybe_single().execute()
-    tokens = int((prof.data or {}).get("tokens") or 0)
-    if tokens < fee:
-        raise HTTPException(status_code=402, detail="Not enough tokens")
-
-    # 2) düş
-    supabase.table("profiles").update({"tokens": tokens - fee}).eq("id", user_id).execute()
-
-    # 3) packs upsert (çift yön)
-    expires = datetime.now(timezone.utc).timestamp() + (days * 86400)
-    expires_iso = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()
-
-    p1 = _pair(base, target)
-    p2 = _pair(target, base)
-
-    for code in (p1, p2):
-        supabase.table("offline_packs").upsert({
-            "user_id": user_id,
-            "lang_code": code,
-            "expires_at": expires_iso,
-            "source": "paid"
-        }, on_conflict="user_id,lang_code").execute()
-
-    return GenericResp(ok=True, detail="purchase_ok", expires_at=expires_iso)
+    return OfflineLinkResp(ok=True, pair_1=pair_1, pair_2=pair_2, url_1=url1, url_2=url2)
