@@ -1,0 +1,256 @@
+# FILE: italky-api/app/routers/exam_pro.py
+from __future__ import annotations
+
+import os
+import re
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger("exam-pro")
+router = APIRouter(tags=["exam-pro"])
+
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+OPENAI_MODEL = (os.getenv("EXAM_OPENAI_MODEL") or "gpt-4o-mini").strip()
+
+if not OPENAI_API_KEY:
+    logger.warning("EXAM_PRO: OPENAI_API_KEY missing (router will 500 on requests)")
+
+# -----------------------------
+# Schemas
+# -----------------------------
+class SolveTextReq(BaseModel):
+    text: str = Field(..., min_length=5, max_length=20000)
+    grade: str = Field(default="lise", max_length=32)  # "ortaokul" | "lise"
+    locale: str = Field(default="tr", max_length=8)
+    student_answer: Optional[str] = Field(default=None, max_length=2000)  # opsiyonel
+    mode: str = Field(default="auto", max_length=16)  # "auto" | "single" | "multi"
+
+
+class SolvedOne(BaseModel):
+    q_no: int
+    question: str
+    choices: Optional[List[str]] = None
+    topic: str
+    subtopic: str
+    difficulty: str
+    steps: List[str]
+    final_answer: str
+    explanation_short: str
+    student_correct: Optional[bool] = None
+    why_wrong: Optional[str] = None
+    step_by_step_fix: Optional[List[str]] = None
+    offer: str
+
+
+class SolveTextResp(BaseModel):
+    ok: bool
+    detected_count: int
+    questions: List[SolvedOne]
+
+
+# -----------------------------
+# Helpers: split multi-question text
+# -----------------------------
+_NUM_SPLIT = re.compile(r"(?m)^\s*(\d{1,2})\s*[\)\.\-:]\s+")
+_BULLET_SPLIT = re.compile(r"(?m)^\s*[-•]\s+")
+
+def _normalize_text(t: str) -> str:
+    t = (t or "").replace("\r\n", "\n").replace("\r", "\n")
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return t
+
+def split_questions(raw: str, mode: str = "auto") -> List[Dict[str, Any]]:
+    """
+    Returns list of {"q_no": int, "text": str}
+    """
+    text = _normalize_text(raw)
+
+    if mode == "single":
+        return [{"q_no": 1, "text": text}]
+
+    # 1) Numbered questions: 1) 2) 3.
+    hits = list(_NUM_SPLIT.finditer(text))
+    if hits:
+        parts: List[Dict[str, Any]] = []
+        for i, m in enumerate(hits):
+            start = m.start()
+            end = hits[i + 1].start() if i + 1 < len(hits) else len(text)
+            q_no = int(m.group(1))
+            block = text[start:end].strip()
+            parts.append({"q_no": q_no, "text": block})
+        # filter tiny
+        parts = [p for p in parts if len(p["text"]) >= 20]
+        if parts:
+            return parts
+
+    # 2) Bullet-style (rare for exams) – fallback
+    if mode in ("auto", "multi") and _BULLET_SPLIT.search(text):
+        chunks = re.split(_BULLET_SPLIT, text)
+        chunks = [c.strip() for c in chunks if c.strip()]
+        if len(chunks) >= 2:
+            out = []
+            for i, c in enumerate(chunks[:20], start=1):
+                out.append({"q_no": i, "text": c})
+            return out
+
+    # 3) fallback single
+    return [{"q_no": 1, "text": text}]
+
+
+# -----------------------------
+# OpenAI call
+# -----------------------------
+def build_system_prompt(grade: str, locale: str) -> str:
+    # Grade-aware strictness
+    g = (grade or "lise").lower().strip()
+    audience = "Türkiye lise (9-12) düzeyi" if g == "lise" else "Türkiye ortaokul (5-8) düzeyi"
+
+    return f"""
+Sen italky'nin PRO Sınav Çözüm Motorusun.
+Hedef: {audience}.
+
+ÇIKTI KURALI:
+- SADECE geçerli JSON döndür. Markdown yok, açıklama yok.
+- Her soru için adım adım çözüm üret.
+- Matematikte işlem adımlarını açık yaz.
+- Sonuç kesin olsun.
+
+JSON ŞEMASI:
+{{
+  "topic": "string",
+  "subtopic": "string",
+  "difficulty": "Kolay|Orta|Zor",
+  "final_answer": "string",
+  "steps": ["string", "..."],
+  "explanation_short": "string",
+  "choices": ["A) ...","B) ...","C) ...","D) ..."]  // yoksa null
+}}
+
+EK KURAL:
+- Eğer metinde şıklar varsa choices dolu gelsin. Yoksa null.
+- final_answer içinde sadece sonuç (ör: x=2, x=-3 / 24 / 5√2 / B şıkkı).
+- steps içinde 4–10 madde arası.
+""".strip()
+
+
+def build_user_prompt(q_text: str, student_answer: Optional[str]) -> str:
+    sa = (student_answer or "").strip()
+    sa_block = f'\nÖĞRENCİ CEVABI: "{sa}"\n- Öğrenci cevabı doğru mu? Yanlışsa neden yanlış ve doğruya götüren düzeltme adımları ver.\n' if sa else ""
+    return f"""
+SORU METNİ:
+{q_text}
+{sa_block}
+""".strip()
+
+
+async def solve_with_openai(system: str, user: str) -> Dict[str, Any]:
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+        resp = await client.chat.completions.create(
+            model=OPENAI_MODEL,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            raise RuntimeError("empty model output")
+        return json.loads(content)
+    except Exception as e:
+        logger.exception("OPENAI_SOLVE_FAIL: %s", e)
+        raise
+
+
+def make_offer(topic: str, grade: str) -> str:
+    # kısa, satışa uygun
+    g = (grade or "lise").lower().strip()
+    if g == "ortaokul":
+        return f'Bu konu (**{topic}**) için 15 dakikalık mini ders ister misin?'
+    return f'Bu konu (**{topic}**) için 15 dakikalık PRO özel ders ister misin?'
+
+
+# -----------------------------
+# Route
+# -----------------------------
+@router.post("/exam/solve_text", response_model=SolveTextResp)
+async def exam_solve_text(req: SolveTextReq) -> SolveTextResp:
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY missing on server")
+
+    blocks = split_questions(req.text, mode=req.mode)
+    # PRO: bir sayfada çok soru olabilir, 1–8 arası ile sınırlayalım
+    blocks = blocks[:8]
+
+    system = build_system_prompt(req.grade, req.locale)
+
+    solved: List[SolvedOne] = []
+
+    for b in blocks:
+        q_no = int(b["q_no"])
+        q_text = str(b["text"])
+
+        user_prompt = build_user_prompt(q_text, req.student_answer)
+
+        data = await solve_with_openai(system, user_prompt)
+
+        # normalize fields
+        topic = str(data.get("topic") or "Konu").strip()
+        subtopic = str(data.get("subtopic") or "Alt konu").strip()
+        difficulty = str(data.get("difficulty") or "Orta").strip()
+        final_answer = str(data.get("final_answer") or "").strip()
+        explanation_short = str(data.get("explanation_short") or "").strip()
+
+        steps = data.get("steps") if isinstance(data.get("steps"), list) else []
+        steps = [str(x).strip() for x in steps if str(x).strip()]
+
+        choices = data.get("choices")
+        if not (isinstance(choices, list) and len(choices) >= 2):
+            choices = None
+        else:
+            choices = [str(x).strip() for x in choices if str(x).strip()]
+
+        # student eval (optional)
+        student_correct = None
+        why_wrong = None
+        step_by_step_fix = None
+        if req.student_answer:
+            # modelden gelirse al, gelmezse basit eşleştirme yapma (matematikte riskli)
+            student_correct = data.get("student_correct")
+            if isinstance(student_correct, bool):
+                pass
+            else:
+                student_correct = None
+            why_wrong = str(data.get("why_wrong") or "").strip() or None
+            sfix = data.get("step_by_step_fix")
+            if isinstance(sfix, list):
+                step_by_step_fix = [str(x).strip() for x in sfix if str(x).strip()]
+            else:
+                step_by_step_fix = None
+
+        solved.append(SolvedOne(
+            q_no=q_no,
+            question=q_text,
+            choices=choices,
+            topic=topic,
+            subtopic=subtopic,
+            difficulty=difficulty,
+            steps=steps,
+            final_answer=final_answer,
+            explanation_short=explanation_short,
+            student_correct=student_correct,
+            why_wrong=why_wrong,
+            step_by_step_fix=step_by_step_fix,
+            offer=make_offer(topic, req.grade),
+        ))
+
+    return SolveTextResp(ok=True, detected_count=len(solved), questions=solved)
