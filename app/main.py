@@ -21,6 +21,7 @@ from app.routers import f2f_ws
 from app.routers import tts
 from app.routers import stt
 from app.routers import ocr_translate
+from app.routers import offline
 
 # ✅ EXAM PRO ROUTER (Foto çek çöz / solve_text / deneme motoru)
 try:
@@ -110,7 +111,7 @@ app.include_router(stt.router, prefix="/api")
 app.include_router(f2f_ws.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(ocr_translate.router, prefix="/api")
-
+app.include_router(offline.router, prefix="/api")
 # ===============================
 # OPTIONAL ROUTERS
 # ===============================
