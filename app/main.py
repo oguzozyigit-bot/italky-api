@@ -21,7 +21,7 @@ from app.routers import f2f_ws
 from app.routers import tts
 from app.routers import stt
 
-# ✅ EXAM ROUTER (varsa)  <-- (scan_solve / deneme / solve_text için)
+# ✅ EXAM ROUTER (basic)
 try:
     from app.routers import exam
     has_exam = True
@@ -29,7 +29,15 @@ except Exception:
     exam = None
     has_exam = False
 
-# ✅ LEVEL TEST ROUTER (varsa)
+# ✅ EXAM PRO ROUTER (advanced real exam engine)
+try:
+    from app.routers import exam_pro
+    has_exam_pro = True
+except Exception:
+    exam_pro = None
+    has_exam_pro = False
+
+# ✅ LEVEL TEST ROUTER
 try:
     from app.routers import level_test
     has_level_test = True
@@ -37,6 +45,7 @@ except Exception:
     level_test = None
     has_level_test = False
 
+# ✅ OPENAI VOICE ROUTER
 try:
     from app.routers import voice_openai
     has_voice_openai = True
@@ -44,6 +53,7 @@ except Exception:
     voice_openai = None
     has_voice_openai = False
 
+# ✅ OCR ROUTER
 try:
     from app.routers import ocr
     has_ocr = True
@@ -51,7 +61,8 @@ except Exception:
     ocr = None
     has_ocr = False
 
-APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.0").strip()
+
+APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.1").strip()
 
 app = FastAPI(
     title="italky Academy API",
@@ -60,11 +71,15 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-# ✅ STATIC
+# ===============================
+# STATIC
+# ===============================
 os.makedirs("static", exist_ok=True)
 app.mount("/assets", StaticFiles(directory="static"), name="assets")
 
-# ✅ CORS (KATI ORIGIN LIST — slash yok!)
+# ===============================
+# CORS
+# ===============================
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
@@ -84,7 +99,9 @@ app.add_middleware(
     max_age=86400,
 )
 
-# ROUTERS
+# ===============================
+# CORE ROUTERS
+# ===============================
 app.include_router(chat.router, prefix="/api")
 app.include_router(chat_openai.router, prefix="/api")
 
@@ -100,30 +117,45 @@ app.include_router(stt.router, prefix="/api")
 app.include_router(f2f_ws.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
-# ✅ exam router (deneme + solve_text)
+# ===============================
+# OPTIONAL ROUTERS
+# ===============================
+
+# Basic exam router
 if has_exam:
-    app.include_router(exam.router, prefix="/api")  # ✅ /api/exam/...
+    app.include_router(exam.router, prefix="/api")  # /api/exam/...
 
-# ✅ level test router
+# PRO exam engine
+if has_exam_pro:
+    app.include_router(exam_pro.router, prefix="/api")  # /api/exam_pro/...
+
+# Level test
 if has_level_test:
-    app.include_router(level_test.router, prefix="/api")  # ✅ /api/level_test/...
+    app.include_router(level_test.router, prefix="/api")
 
+# Voice OpenAI
 if has_voice_openai:
     app.include_router(voice_openai.router, prefix="/api")
 
+# OCR
 if has_ocr:
     app.include_router(ocr.router, prefix="/api")
 
+# ===============================
+# HEALTH
+# ===============================
 
 @app.get("/")
 def root():
-    return {"status": "online", "service": "italky-academy-api", "version": APP_VERSION}
-
+    return {
+        "status": "online",
+        "service": "italky-academy-api",
+        "version": APP_VERSION
+    }
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
-
 
 @app.get("/favicon.ico")
 async def favicon():
