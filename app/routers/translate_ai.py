@@ -1,228 +1,140 @@
-# FILE: italky-api/app/routers/translate_ai.py
 from __future__ import annotations
 
 import os
-from typing import Optional, Dict, Any, Tuple
+import logging
+from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
+logger = logging.getLogger("translate-ai")
 router = APIRouter(tags=["translate-ai"])
 
-# --- KEYS / ENDPOINTS ---
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+# ENV
+GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY") or "").strip()
+OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
+OPENAI_MODEL = (os.getenv("TRANSLATE_OPENAI_MODEL") or "gpt-4o-mini").strip()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
-# Gemini endpoint (1.5 flash hızlı/ucuz)
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent"
+GOOGLE_URL = "https://translation.googleapis.com/language/translate/v2"
 
-# --- Language map (prompt için) ---
-LANG_MAP = {
-    "tr": "Turkish",
-    "en": "English",
-    "de": "German",
-    "fr": "French",
-    "it": "Italian",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "pt-br": "Brazilian Portuguese",
-    "nl": "Dutch",
-    "sv": "Swedish",
-    "no": "Norwegian",
-    "da": "Danish",
-    "fi": "Finnish",
-    "pl": "Polish",
-    "cs": "Czech",
-    "sk": "Slovak",
-    "hu": "Hungarian",
-    "ro": "Romanian",
-    "bg": "Bulgarian",
-    "el": "Greek",
-    "uk": "Ukrainian",
-    "ru": "Russian",
-    "ar": "Arabic",
-    "he": "Hebrew",
-    "fa": "Persian",
-    "ur": "Urdu",
-    "hi": "Hindi",
-    "bn": "Bengali",
-    "id": "Indonesian",
-    "ms": "Malay",
-    "vi": "Vietnamese",
-    "th": "Thai",
-    "zh": "Chinese (Simplified)",
-    "ja": "Japanese",
-    "ko": "Korean",
-}
 
-def _canon_lang(code: str) -> str:
-    return (code or "").strip().lower()
+# =========================
+# SCHEMA
+# =========================
+class TranslateReq(BaseModel):
+    text: str
+    from_lang: Optional[str] = "auto"
+    to_lang: str = "tr"
 
-def _lang_name(code: str) -> str:
-    c = _canon_lang(code)
-    return LANG_MAP.get(c, c or "English")
 
-# --- Schemas ---
-class TranslateAIRequest(BaseModel):
-    text: str = Field(..., min_length=1)
-    from_lang: str = Field(..., min_length=1)
-    to_lang: str = Field(..., min_length=1)
-
-    # fast: literal / chat: daha doğal
-    style: Optional[str] = Field(default="chat")
-
-    # "auto" => önce Gemini sonra OpenAI
-    # "gemini" => sadece Gemini (fail olursa 502)
-    # "openai" => sadece OpenAI (fail olursa 502)
-    provider: Optional[str] = Field(default="auto")
-
-class TranslateAIResponse(BaseModel):
+class TranslateResp(BaseModel):
+    ok: bool
+    provider: str
     translated: str
-    provider_used: str
-    tokens_used: Optional[int] = None
 
-# --- Provider calls ---
-async def _call_gemini(text: str, instructions: str) -> Optional[str]:
-    if not GEMINI_API_KEY:
+
+# =========================
+# GOOGLE TRANSLATE
+# =========================
+async def google_translate(text: str, source: str, target: str) -> Optional[str]:
+    if not GOOGLE_API_KEY:
+        logger.warning("GOOGLE_API_KEY missing")
         return None
 
-    # Gemini tarafında “sadece çeviri” disiplinini korumak için prompt’u tek parçada veriyoruz
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": instructions + "\n\nUser text:\n" + text}
-                ]
-            }
-        ]
+        "q": text,
+        "target": target,
+        "format": "text",
     }
 
+    if source and source != "auto":
+        payload["source"] = source
+
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post(
-                f"{GEMINI_URL}?key={GEMINI_API_KEY}",
-                json=payload,
-                headers={"Content-Type": "application/json"},
+                f"{GOOGLE_URL}?key={GOOGLE_API_KEY}",
+                data=payload,
             )
+
         if r.status_code >= 400:
+            logger.error("GOOGLE FAIL %s %s", r.status_code, r.text[:400])
             return None
 
         data = r.json()
-        # candidates[0].content.parts[0].text
-        out = (
-            data.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
+        return (
+            data.get("data", {})
+            .get("translations", [{}])[0]
+            .get("translatedText")
         )
-        out = (out or "").strip()
-        return out or None
-    except Exception:
+
+    except Exception as e:
+        logger.exception("GOOGLE EXCEPTION: %s", e)
         return None
 
-async def _call_openai(text: str, instructions: str) -> Tuple[Optional[str], Optional[int]]:
+
+# =========================
+# OPENAI FALLBACK
+# =========================
+async def openai_translate(text: str, source: str, target: str) -> Optional[str]:
     if not OPENAI_API_KEY:
-        return None, None
+        logger.warning("OPENAI_API_KEY missing")
+        return None
 
-    payload: Dict[str, Any] = {
-        "model": "gpt-4o-mini",
-        "input": [
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": text},
-        ],
-    }
+    prompt = f"""
+Translate the following text strictly.
+Source language: {source}
+Target language: {target}
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
+Return ONLY the translated text.
+
+TEXT:
+{text}
+"""
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(OPENAI_RESPONSES_URL, headers=headers, json=payload)
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-        if r.status_code >= 400:
-            return None, None
+        resp = await client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": "You are a professional translator."},
+                {"role": "user", "content": prompt},
+            ],
+        )
 
-        data = r.json()
+        return (resp.choices[0].message.content or "").strip()
 
-        translated = (data.get("output_text") or "").strip()
+    except Exception as e:
+        logger.exception("OPENAI EXCEPTION: %s", e)
+        return None
 
-        if not translated:
-            out = data.get("output") or []
-            buf = []
-            for item in out:
-                for c in (item.get("content") or []):
-                    if c.get("type") == "output_text":
-                        buf.append(c.get("text", ""))
-            translated = "".join(buf).strip()
 
-        usage = data.get("usage") or {}
-        tokens_used = usage.get("total_tokens")
+# =========================
+# ROUTE
+# =========================
+@router.post("/translate_ai", response_model=TranslateResp)
+async def translate_ai(req: TranslateReq):
 
-        return (translated or None), tokens_used
-    except Exception:
-        return None, None
-
-# --- Main endpoint ---
-@router.post("/translate_ai", response_model=TranslateAIResponse)
-async def translate_ai(req: TranslateAIRequest) -> TranslateAIResponse:
     text = (req.text or "").strip()
     if not text:
-        return TranslateAIResponse(translated="", provider_used="none", tokens_used=None)
+        raise HTTPException(status_code=422, detail="text is required")
 
-    src = _lang_name(req.from_lang)
-    dst = _lang_name(req.to_lang)
+    source = (req.from_lang or "auto").strip()
+    target = (req.to_lang or "tr").strip()
 
-    style = (req.style or "chat").strip().lower()
-    tone_line = (
-        "Keep it natural, like real spoken dialogue. Avoid overly formal wording."
-        if style == "chat"
-        else "Keep it direct and faithful. Prefer literal translation when possible."
-    )
+    # 1️⃣ Google
+    g = await google_translate(text, source, target)
+    if g:
+        return TranslateResp(ok=True, provider="google", translated=g)
 
-    instructions = f"""
-You are a real-time translation engine for a face-to-face interpreter app.
+    # 2️⃣ OpenAI fallback
+    o = await openai_translate(text, source, target)
+    if o:
+        return TranslateResp(ok=True, provider="openai", translated=o)
 
-Source language: {src}
-Target language: {dst}
-
-Rules:
-- Output ONLY the translated text in the target language.
-- No explanations, no notes, no extra commentary.
-- Preserve meaning, politeness level, and emojis.
-- {tone_line}
-- Do NOT switch languages. Always respond in {dst}.
-""".strip()
-
-    provider = (req.provider or "auto").strip().lower()
-
-    # --- AUTO: first Gemini then OpenAI ---
-    if provider == "auto":
-        g = await _call_gemini(text, instructions)
-        if g:
-            return TranslateAIResponse(translated=g, provider_used="gemini", tokens_used=None)
-
-        o, tok = await _call_openai(text, instructions)
-        if o:
-            return TranslateAIResponse(translated=o, provider_used="openai", tokens_used=tok)
-
-        raise HTTPException(status_code=502, detail="All AI providers failed (gemini->openai)")
-
-    # --- Force Gemini only ---
-    if provider == "gemini":
-        g = await _call_gemini(text, instructions)
-        if g:
-            return TranslateAIResponse(translated=g, provider_used="gemini", tokens_used=None)
-        raise HTTPException(status_code=502, detail="Gemini failed")
-
-    # --- Force OpenAI only ---
-    if provider == "openai":
-        o, tok = await _call_openai(text, instructions)
-        if o:
-            return TranslateAIResponse(translated=o, provider_used="openai", tokens_used=tok)
-        raise HTTPException(status_code=502, detail="OpenAI failed")
-
-    raise HTTPException(status_code=400, detail="Invalid provider. Use: auto | gemini | openai")
+    # 3️⃣ FAIL
+    raise HTTPException(status_code=500, detail="Translation unavailable")
