@@ -10,7 +10,6 @@ from fastapi.staticfiles import StaticFiles
 
 import requests
 
-from app.routers import chat, chat_openai, lang_pool, teacher_chat
 from app.routers import translate, translate_ai, command_parse
 from app.routers import admin, f2f_ws, tts, stt, ocr_translate
 
@@ -28,13 +27,6 @@ try:
 except Exception:
     level_test = None
     has_level_test = False
-
-try:
-    from app.routers import voice_openai
-    has_voice_openai = True
-except Exception:
-    voice_openai = None
-    has_voice_openai = False
 
 try:
     from app.routers import ocr
