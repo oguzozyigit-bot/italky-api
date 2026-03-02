@@ -10,12 +10,19 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 router = APIRouter(tags=["f2f-ws"])
 
 ROOM_TTL_SEC = 60 * 30  # 30 dk
+FLOOR_TTL_SEC = 15      # ✅ konuşma hakkı max 15 sn (basılı tut için güvenlik)
 
 # ROOMS[room_id] = {
 #   "created_at": float,
 #   "updated_at": float,
 #   "clients": set(WebSocket),
-#   "meta": { WebSocket: {"from","from_name","from_pic","me_lang","role"} }
+#   "meta": { WebSocket: {"from","from_name","from_pic","me_lang","role"} },
+#   "floor": {
+#       "holder_ws": Optional[WebSocket],
+#       "holder_id": str,
+#       "holder_name": str,
+#       "until": float
+#   }
 # }
 ROOMS: Dict[str, Dict[str, Any]] = {}
 
@@ -25,7 +32,6 @@ def now() -> float:
 
 
 def norm_room_id(room_id: str) -> str:
-    # 33JQWQ gibi üst-case, sadece A-Z0-9
     s = (room_id or "").strip().upper()
     s = "".join([ch for ch in s if ch.isalnum()])
     return s[:8]
@@ -54,8 +60,14 @@ def create_room(room_id: str) -> Dict[str, Any]:
     r = {
         "created_at": now(),
         "updated_at": now(),
-        "clients": set(),  # type: ignore
-        "meta": {},        # type: ignore
+        "clients": set(),   # type: ignore
+        "meta": {},         # type: ignore
+        "floor": {          # ✅ floor init
+            "holder_ws": None,
+            "holder_id": "",
+            "holder_name": "",
+            "until": 0.0,
+        }
     }
     ROOMS[rid] = r
     return r
@@ -105,6 +117,30 @@ def build_roster(room: Dict[str, Any]) -> List[Dict[str, Any]]:
     return roster
 
 
+def get_floor_state(room: Dict[str, Any]) -> Dict[str, Any]:
+    f = room.get("floor") or {}
+    holder_id = str(f.get("holder_id") or "")
+    holder_name = str(f.get("holder_name") or "")
+    until = float(f.get("until") or 0.0)
+    active = bool(holder_id) and (until > now())
+    if not active:
+        # expire cleanup
+        f["holder_ws"] = None
+        f["holder_id"] = ""
+        f["holder_name"] = ""
+        f["until"] = 0.0
+        holder_id = ""
+        holder_name = ""
+        until = 0.0
+    return {
+        "active": bool(holder_id),
+        "holder_id": holder_id,
+        "holder_name": holder_name,
+        "until_ms": int(until * 1000) if until else 0,
+        "ttl_sec": FLOOR_TTL_SEC
+    }
+
+
 async def send_presence(room: Dict[str, Any]) -> None:
     await broadcast(room, {
         "type": "presence",
@@ -112,6 +148,47 @@ async def send_presence(room: Dict[str, Any]) -> None:
         "roster": build_roster(room),
         "ttl_sec": ROOM_TTL_SEC,
     })
+
+
+async def broadcast_floor(room: Dict[str, Any]) -> None:
+    await broadcast(room, {
+        "type": "floor_state",
+        **get_floor_state(room),
+    })
+
+
+def try_acquire_floor(room: Dict[str, Any], ws: WebSocket, holder_id: str, holder_name: str) -> bool:
+    f = room.get("floor") or {}
+    # expire old if needed
+    _ = get_floor_state(room)
+    if f.get("holder_ws") is None and not f.get("holder_id"):
+        f["holder_ws"] = ws
+        f["holder_id"] = holder_id
+        f["holder_name"] = holder_name
+        f["until"] = now() + FLOOR_TTL_SEC
+        room["floor"] = f
+        return True
+    # if same holder, extend TTL
+    if f.get("holder_ws") is ws or str(f.get("holder_id") or "") == holder_id:
+        f["holder_ws"] = ws
+        f["holder_id"] = holder_id
+        f["holder_name"] = holder_name
+        f["until"] = now() + FLOOR_TTL_SEC
+        room["floor"] = f
+        return True
+    return False
+
+
+def release_floor_if_holder(room: Dict[str, Any], ws: WebSocket, holder_id: str) -> bool:
+    f = room.get("floor") or {}
+    if f.get("holder_ws") is ws or str(f.get("holder_id") or "") == holder_id:
+        f["holder_ws"] = None
+        f["holder_id"] = ""
+        f["holder_name"] = ""
+        f["until"] = 0.0
+        room["floor"] = f
+        return True
+    return False
 
 
 @router.websocket("/f2f/ws/{room_id}")
@@ -134,7 +211,7 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                 await ws_send(ws, {"type": "room_ok" if r else "room_not_found"})
                 continue
 
-            # ✅ HOST creates room (oda yoksa oluşturur; varsa dokunmaz)
+            # ✅ HOST creates room
             if mtype == "create":
                 if joined_room is not None:
                     await ws_send(ws, {"type": "error", "message": "ALREADY_JOINED"})
@@ -159,6 +236,7 @@ async def f2f_ws(ws: WebSocket, room_id: str):
 
                 await ws_send(ws, {"type": "room_created", "room": rid, "ttl_sec": ROOM_TTL_SEC})
                 await send_presence(r)
+                await broadcast_floor(r)  # ✅ initial floor state
                 continue
 
             # ✅ GUEST joins existing room (ASLA oda oluşturmaz)
@@ -191,6 +269,38 @@ async def f2f_ws(ws: WebSocket, room_id: str):
 
                 await ws_send(ws, {"type": "room_joined", "room": rid, "ttl_sec": ROOM_TTL_SEC})
                 await send_presence(r)
+                await broadcast_floor(r)  # ✅ send state to everyone
+                continue
+
+            # ✅ FLOOR REQUEST
+            if mtype == "floor_request":
+                if joined_room is None:
+                    await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
+                    continue
+
+                holder_id = str(my_meta.get("from") or msg.get("from") or "")
+                holder_name = str(my_meta.get("from_name") or msg.get("from_name") or "User")
+
+                ok = try_acquire_floor(joined_room, ws, holder_id, holder_name)
+                if ok:
+                    await ws_send(ws, {"type": "floor_granted"})
+                    await broadcast_floor(joined_room)
+                else:
+                    state = get_floor_state(joined_room)
+                    await ws_send(ws, {"type": "floor_busy", **state})
+                joined_room["updated_at"] = now()
+                continue
+
+            # ✅ FLOOR RELEASE
+            if mtype == "floor_release":
+                if joined_room is None:
+                    await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
+                    continue
+                holder_id = str(my_meta.get("from") or msg.get("from") or "")
+                changed = release_floor_if_holder(joined_room, ws, holder_id)
+                if changed:
+                    await broadcast_floor(joined_room)
+                joined_room["updated_at"] = now()
                 continue
 
             # ✅ MESSAGE relay ONLY (NO AI, NO translate)
@@ -199,11 +309,13 @@ async def f2f_ws(ws: WebSocket, room_id: str):
                     await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
                     continue
 
+                # floor expire cleanup
+                _ = get_floor_state(joined_room)
+
                 text = str(msg.get("text") or "").strip()
                 if not text:
                     continue
 
-                # client lang gönderirse onu al; yoksa my_meta
                 lang = str(msg.get("lang") or my_meta.get("me_lang") or "tr").strip().lower()
 
                 payload = {
@@ -229,10 +341,19 @@ async def f2f_ws(ws: WebSocket, room_id: str):
     finally:
         if joined_room is not None:
             try:
+                # if leaver is floor holder, release
+                try:
+                    holder_ws = (joined_room.get("floor") or {}).get("holder_ws")
+                    if holder_ws is ws:
+                        release_floor_if_holder(joined_room, ws, str(my_meta.get("from") or ""))
+                        await broadcast_floor(joined_room)
+                except Exception:
+                    pass
+
                 joined_room["clients"].discard(ws)
                 joined_room["meta"].pop(ws, None)
                 joined_room["updated_at"] = now()
-                # ✅ oda boşalsa bile SİLMEYİP TTL'e bırakıyoruz (kod “hemen bozulmasın” diye)
+
                 try:
                     await send_presence(joined_room)
                 except Exception:
