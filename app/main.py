@@ -10,10 +10,11 @@ from fastapi.staticfiles import StaticFiles
 
 import requests
 
+# ✅ CORE ROUTERS (OpenAI yok)
 from app.routers import translate, translate_ai, command_parse
 from app.routers import admin, f2f_ws, tts, stt, ocr_translate
 
-# ✅ OPTIONAL ROUTERS
+# ✅ OPTIONAL ROUTERS (OpenAI yok)
 try:
     from app.routers import exam_pro
     has_exam_pro = True
@@ -82,12 +83,8 @@ app.add_middleware(
 # ===============================
 # CORE ROUTERS
 # ===============================
-app.include_router(chat.router, prefix="/api")
-app.include_router(chat_openai.router, prefix="/api")
-app.include_router(lang_pool.router, prefix="/api")
-app.include_router(teacher_chat.router, prefix="/api")
 app.include_router(translate.router, prefix="/api")
-app.include_router(translate_ai.router, prefix="/api")
+app.include_router(translate_ai.router, prefix="/api")  # ✅ (adı translate_ai ama artık Google v3)
 app.include_router(command_parse.router, prefix="/api")
 app.include_router(tts.router, prefix="/api")
 app.include_router(stt.router, prefix="/api")
@@ -106,9 +103,6 @@ if has_exam_pro:
 
 if has_level_test:
     app.include_router(level_test.router, prefix="/api")
-
-if has_voice_openai:
-    app.include_router(voice_openai.router, prefix="/api")
 
 if has_ocr:
     app.include_router(ocr.router, prefix="/api")
@@ -130,9 +124,6 @@ async def favicon():
 
 # ===============================
 # HARD ACCOUNT DELETE (PRODUCTION SAFE)
-# - Frontend Bearer access_token gönderir
-# - Supabase /auth/v1/user ile token doğrulanır
-# - Admin endpoint ile user silinir (auth)
 # ===============================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -181,10 +172,6 @@ def delete_account(authorization: str | None = Header(default=None)):
     user_id = user_data.get("id")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found in session")
-
-    # (Optional) Delete from your public tables here if needed:
-    # headers_admin = {"Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}", "apikey": SUPABASE_SERVICE_ROLE}
-    # requests.delete(f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}", headers=headers_admin, timeout=20)
 
     # 2) Admin delete user (hard delete)
     try:
