@@ -8,28 +8,21 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from google.oauth2 import service_account
-from google.cloud import translate_v2 as translate
+from google.cloud import translate as translate_v3  # ✅ v3 client
 
 router = APIRouter()
 
-# =========================
-# CONFIG
-# =========================
 GOOGLE_CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID", "").strip()  # optional
+GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID", "").strip()  # opsiyonel ama öneririm
 
-_translate_client: Optional[translate.Client] = None
+_client: Optional[translate_v3.TranslationServiceClient] = None
 
 
-def get_translate_client() -> translate.Client:
-    """
-    Force Service Account credentials (no API key).
-    Uses GOOGLE_APPLICATION_CREDENTIALS file path.
-    """
-    global _translate_client
+def get_client() -> translate_v3.TranslationServiceClient:
+    global _client
 
-    if _translate_client is not None:
-        return _translate_client
+    if _client is not None:
+        return _client
 
     if not GOOGLE_CREDS_PATH:
         raise RuntimeError("Missing GOOGLE_APPLICATION_CREDENTIALS env var")
@@ -38,17 +31,29 @@ def get_translate_client() -> translate.Client:
         raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
 
     creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
+    _client = translate_v3.TranslationServiceClient(credentials=creds)
+    return _client
 
-    # project_id optional; client can infer from creds
-    _translate_client = translate.Client(credentials=creds, project=GOOGLE_PROJECT_ID or None)
-    return _translate_client
+
+def infer_project_id_from_creds() -> str:
+    # GOOGLE_PROJECT_ID yoksa creds içinden okumayı dener
+    if GOOGLE_PROJECT_ID:
+        return GOOGLE_PROJECT_ID
+    try:
+        creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
+        pid = getattr(creds, "project_id", "") or ""
+        if pid:
+            return pid
+    except Exception:
+        pass
+    return ""
 
 
 class TranslateIn(BaseModel):
     text: str
-    source: Optional[str] = None   # e.g. "tr"
-    target: str                    # e.g. "en"
-    format: str = "text"           # "text" or "html"
+    source: Optional[str] = None  # "tr"
+    target: str                   # "en"
+    mime_type: str = "text/plain" # "text/plain" or "text/html"
 
 
 class TranslateOut(BaseModel):
@@ -67,27 +72,36 @@ def translate_text(payload: TranslateIn):
         raise HTTPException(status_code=400, detail="target is required")
 
     source = (payload.source or "").strip() or None
-    fmt = (payload.format or "text").strip()
+    mime_type = (payload.mime_type or "text/plain").strip()
 
     try:
-        client = get_translate_client()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Google credentials error: {e}")
+        client = get_client()
+        project_id = infer_project_id_from_creds()
+        if not project_id:
+            raise RuntimeError("Missing GOOGLE_PROJECT_ID (and could not infer from credentials)")
 
-    try:
-        # translate_v2 returns dict with translatedText, detectedSourceLanguage, etc.
-        res = client.translate(
-            text,
-            target_language=target,
-            source_language=source,   # None => auto detect
-            format_=fmt
-        )
+        parent = f"projects/{project_id}/locations/global"
 
-        translated = res.get("translatedText", "")
-        detected = res.get("detectedSourceLanguage")
+        req = {
+            "parent": parent,
+            "contents": [text],
+            "target_language_code": target,
+            "mime_type": mime_type,
+        }
+        if source:
+            req["source_language_code"] = source
+
+        resp = client.translate_text(request=req)
+
+        translated = ""
+        detected = None
+        if resp.translations:
+            translated = resp.translations[0].translated_text or ""
+            detected = resp.translations[0].detected_language_code or None
 
         return TranslateOut(translated=translated, detected_source=detected)
 
+    except HTTPException:
+        raise
     except Exception as e:
-        # This is where you previously got: "TranslateText are blocked"
-        raise HTTPException(status_code=502, detail=f"Google Translate failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Google Translate v3 failed: {e}")
