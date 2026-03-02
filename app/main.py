@@ -3,10 +3,12 @@ from __future__ import annotations
 import os
 from typing import List
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+
+import requests
 
 from app.routers import chat, chat_openai, lang_pool, teacher_chat
 from app.routers import translate, translate_ai, command_parse
@@ -133,3 +135,84 @@ def healthz():
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
+
+# ===============================
+# HARD ACCOUNT DELETE (PRODUCTION SAFE)
+# - Frontend Bearer access_token gönderir
+# - Supabase /auth/v1/user ile token doğrulanır
+# - Admin endpoint ile user silinir (auth)
+# ===============================
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
+def _get_bearer(auth_header: str | None) -> str:
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    parts = auth_header.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Invalid Authorization header")
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Empty token")
+    return token
+
+@app.post("/api/account/delete")
+def delete_account(authorization: str | None = Header(default=None)):
+
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
+        raise HTTPException(status_code=500, detail="Supabase not configured (missing env)")
+
+    access_token = _get_bearer(authorization)
+
+    # 1) Verify session + get user id
+    try:
+        user_resp = requests.get(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "apikey": SUPABASE_SERVICE_ROLE,
+            },
+            timeout=20,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supabase auth check failed: {e}")
+
+    if user_resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid or expired session")
+
+    try:
+        user_data = user_resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Supabase returned invalid JSON")
+
+    user_id = user_data.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User ID not found in session")
+
+    # (Optional) Delete from your public tables here if needed:
+    # headers_admin = {"Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}", "apikey": SUPABASE_SERVICE_ROLE}
+    # requests.delete(f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}", headers=headers_admin, timeout=20)
+
+    # 2) Admin delete user (hard delete)
+    try:
+        del_resp = requests.delete(
+            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+            headers={
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Content-Type": "application/json",
+            },
+            timeout=20,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Supabase delete failed: {e}")
+
+    if del_resp.status_code not in (200, 204):
+        try:
+            err = del_resp.json()
+        except Exception:
+            err = {"error": del_resp.text}
+        raise HTTPException(status_code=500, detail=f"Delete failed: {err}")
+
+    return {"ok": True}
