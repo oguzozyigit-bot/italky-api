@@ -366,7 +366,8 @@ async def solve_v4_with_openai_from_image(image_dataurl: str, locale: str, grade
 # =============================
 async def google_vision_ocr_text(image_base64_noheader: str) -> str:
     """
-    Returns extracted full text. Requires GOOGLE_VISION_API_KEY.
+    Google Vision OCR (PRIMARY).
+    Ödeme / quota / auth sorunu varsa ASLA sistemi bozmaz, sadece "" döner.
     """
     if not GOOGLE_VISION_API_KEY:
         return ""
@@ -382,11 +383,18 @@ async def google_vision_ocr_text(image_base64_noheader: str) -> str:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(url, json=payload)
+
+            # ödeme / yetki / kota / faturalama kapalı gibi durumlar
+            if r.status_code in (401, 403, 429):
+                logger.warning("GOOGLE_VISION_DISABLED status=%s body=%s", r.status_code, r.text[:300])
+                return ""
+
             if r.status_code != 200:
                 logger.warning("GOOGLE_VISION_OCR_FAIL status=%s body=%s", r.status_code, r.text[:300])
                 return ""
+
             data = r.json()
     except Exception as e:
         logger.warning("GOOGLE_VISION_OCR_EXC %s", e)
@@ -394,22 +402,18 @@ async def google_vision_ocr_text(image_base64_noheader: str) -> str:
 
     try:
         resp0 = (data.get("responses") or [{}])[0]
-        # fullTextAnnotation > text is best
         fta = resp0.get("fullTextAnnotation") or {}
         txt = (fta.get("text") or "").strip()
         if txt:
             return txt
 
-        # fallback: first textAnnotation
         anns = resp0.get("textAnnotations") or []
         if anns and isinstance(anns, list):
-            t0 = (anns[0].get("description") or "").strip()
-            return t0
+            return (anns[0].get("description") or "").strip()
     except Exception:
         return ""
 
     return ""
-
 
 # =============================
 # Optional: Google Custom Search snippets (still PRIMARY-side)
