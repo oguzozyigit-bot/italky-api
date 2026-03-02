@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import os
-import io
-import json
 from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
@@ -17,19 +15,21 @@ GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 
 _client: Optional[speech.SpeechClient] = None
 
-def get_speech_client() -> speech.SpeechClient:
+
+def get_client() -> speech.SpeechClient:
     global _client
 
+    if _client:
+        return _client
+
     if not GOOGLE_CREDS_PATH:
-        raise RuntimeError("Missing GOOGLE_APPLICATION_CREDENTIALS")
+        raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS missing")
 
     if not os.path.exists(GOOGLE_CREDS_PATH):
-        raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
+        raise RuntimeError(f"Credential file not found: {GOOGLE_CREDS_PATH}")
 
-    if _client is None:
-        creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
-        _client = speech.SpeechClient(credentials=creds)
-
+    creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
+    _client = speech.SpeechClient(credentials=creds)
     return _client
 
 
@@ -48,13 +48,12 @@ async def stt(
         raise HTTPException(status_code=422, detail="Empty audio")
 
     try:
-        client = get_speech_client()
+        client = get_client()
 
         audio = speech.RecognitionAudio(content=audio_bytes)
 
+        # Encoding zorlamıyoruz → Google otomatik algılasın
         config = speech.RecognitionConfig(
-            encoding=speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
-            sample_rate_hertz=48000,
             language_code=lang or "tr-TR",
         )
 
