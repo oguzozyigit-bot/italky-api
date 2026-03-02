@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -13,16 +14,22 @@ from google.cloud import translate as translate_v3  # ✅ v3 client
 router = APIRouter()
 
 GOOGLE_CREDS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-GOOGLE_PROJECT_ID = os.getenv("GOOGLE_PROJECT_ID", "").strip()  # opsiyonel ama öneririm
 
 _client: Optional[translate_v3.TranslationServiceClient] = None
+_project_id: Optional[str] = None
 
 
-def get_client() -> translate_v3.TranslationServiceClient:
-    global _client
+def _load_project_id_from_file(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("project_id") or "").strip()
+    except Exception:
+        return ""
 
-    if _client is not None:
-        return _client
+
+def get_client_and_project():
+    global _client, _project_id
 
     if not GOOGLE_CREDS_PATH:
         raise RuntimeError("Missing GOOGLE_APPLICATION_CREDENTIALS env var")
@@ -30,23 +37,16 @@ def get_client() -> translate_v3.TranslationServiceClient:
     if not os.path.exists(GOOGLE_CREDS_PATH):
         raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
 
-    creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
-    _client = translate_v3.TranslationServiceClient(credentials=creds)
-    return _client
-
-
-def infer_project_id_from_creds() -> str:
-    # GOOGLE_PROJECT_ID yoksa creds içinden okumayı dener
-    if GOOGLE_PROJECT_ID:
-        return GOOGLE_PROJECT_ID
-    try:
+    if _client is None:
         creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
-        pid = getattr(creds, "project_id", "") or ""
-        if pid:
-            return pid
-    except Exception:
-        pass
-    return ""
+        _client = translate_v3.TranslationServiceClient(credentials=creds)
+
+    if not _project_id:
+        _project_id = _load_project_id_from_file(GOOGLE_CREDS_PATH)
+        if not _project_id:
+            raise RuntimeError("Could not read project_id from service account JSON")
+
+    return _client, _project_id
 
 
 class TranslateIn(BaseModel):
@@ -75,11 +75,7 @@ def translate_text(payload: TranslateIn):
     mime_type = (payload.mime_type or "text/plain").strip()
 
     try:
-        client = get_client()
-        project_id = infer_project_id_from_creds()
-        if not project_id:
-            raise RuntimeError("Missing GOOGLE_PROJECT_ID (and could not infer from credentials)")
-
+        client, project_id = get_client_and_project()
         parent = f"projects/{project_id}/locations/global"
 
         req = {
