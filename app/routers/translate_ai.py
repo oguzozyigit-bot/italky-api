@@ -1,137 +1,68 @@
+# FILE: app/routers/translate_ai.py
 from __future__ import annotations
 
 import os
+import json
 import logging
-import html
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-try:
-    from openai import AsyncOpenAI
-except Exception:
-    AsyncOpenAI = None  # type: ignore
+from google.oauth2 import service_account
+from google.cloud import translate as translate_v3
 
-logger = logging.getLogger("italky-translate-ai")
+logger = logging.getLogger("italky-translate")
 router = APIRouter(tags=["translate-ai"])
 
-# =========================
-# ENV
-# =========================
-GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY") or "").strip()
-OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
-OPENAI_MODEL = (os.getenv("TRANSLATE_OPENAI_MODEL") or "gpt-4o-mini").strip()
+GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 
-GOOGLE_URL = "https://translation.googleapis.com/language/translate/v2"
+_client: Optional[translate_v3.TranslationServiceClient] = None
+_project_id: Optional[str] = None
 
-# =========================
-# GLOBAL CLIENTS (PERF)
-# =========================
-HTTP_TIMEOUT = httpx.Timeout(connect=8.0, read=20.0, write=20.0, pool=8.0)
-http_client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
 
-openai_client = None
-if OPENAI_API_KEY and AsyncOpenAI is not None:
-    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+def _load_project_id_from_file(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return str(data.get("project_id") or "").strip()
+    except Exception:
+        return ""
 
-# =========================
-# SCHEMAS
-# =========================
+
+def _get_client_and_project():
+    global _client, _project_id
+
+    if not GOOGLE_CREDS_PATH:
+        raise RuntimeError("Missing GOOGLE_APPLICATION_CREDENTIALS")
+
+    if not os.path.exists(GOOGLE_CREDS_PATH):
+        raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
+
+    if _client is None:
+        creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
+        _client = translate_v3.TranslationServiceClient(credentials=creds)
+
+    if not _project_id:
+        _project_id = _load_project_id_from_file(GOOGLE_CREDS_PATH)
+        if not _project_id:
+            raise RuntimeError("Could not read project_id from service account JSON")
+
+    return _client, _project_id
+
+
 class TranslateReq(BaseModel):
     text: str
     from_lang: Optional[str] = "auto"
     to_lang: str = "tr"
+
 
 class TranslateResp(BaseModel):
     ok: bool
     provider: str
     translated: str
 
-# =========================
-# GOOGLE TRANSLATE
-# =========================
-async def google_translate(text: str, source: str, target: str) -> Optional[str]:
-    if not GOOGLE_API_KEY:
-        logger.warning("GOOGLE_API_KEY missing -> skip google")
-        return None
 
-    params = {
-        "key": GOOGLE_API_KEY,
-        "q": text,
-        "target": target,
-        "format": "text",
-    }
-    if source and source != "auto":
-        params["source"] = source
-
-    try:
-        r = await http_client.post(GOOGLE_URL, params=params)
-        if r.status_code != 200:
-            logger.error("GOOGLE_FAIL %s %s", r.status_code, r.text[:300])
-            return None
-
-        data = r.json()
-        out = (
-            data.get("data", {})
-            .get("translations", [{}])[0]
-            .get("translatedText")
-        )
-        if not out:
-            return None
-
-        # Google bazen HTML escaped döndürür: &#39; vb.
-        return html.unescape(str(out)).strip() or None
-
-    except Exception as e:
-        logger.exception("GOOGLE_EXCEPTION %s", e)
-        return None
-
-# =========================
-# OPENAI TRANSLATE (FALLBACK)
-# =========================
-async def openai_translate(text: str, source: str, target: str) -> Optional[str]:
-    if not openai_client:
-        logger.warning("OPENAI client missing -> skip openai")
-        return None
-
-    # source auto ise algılasın
-    lang_info = (
-        f"Source language: {source}"
-        if source and source != "auto"
-        else "Detect the source language automatically."
-    )
-
-    prompt = f"""Task: Professional Translation
-{lang_info}
-Target language: {target}
-Strict Rule: Return ONLY the translated text. No explanations. No quotes.
-
-TEXT:
-{text}
-"""
-
-    try:
-        resp = await openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": "You are a neutral professional translation system for italkyAI."},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=2000,
-        )
-        out = (resp.choices[0].message.content or "").strip()
-        return out or None
-
-    except Exception as e:
-        logger.exception("OPENAI_EXCEPTION %s", e)
-        return None
-
-# =========================
-# ROUTE
-# =========================
 @router.post("/translate_ai", response_model=TranslateResp)
 async def translate_ai(req: TranslateReq):
     text = (req.text or "").strip()
@@ -141,14 +72,31 @@ async def translate_ai(req: TranslateReq):
     source = (req.from_lang or "auto").strip().lower()
     target = (req.to_lang or "tr").strip().lower()
 
-    # 1) Google
-    g = await google_translate(text, source, target)
-    if g:
-        return TranslateResp(ok=True, provider="google", translated=g)
+    try:
+        client, project_id = _get_client_and_project()
+        parent = f"projects/{project_id}/locations/global"
 
-    # 2) OpenAI fallback
-    o = await openai_translate(text, source, target)
-    if o:
-        return TranslateResp(ok=True, provider="openai", translated=o)
+        request = {
+            "parent": parent,
+            "contents": [text],
+            "target_language_code": target,
+            "mime_type": "text/plain",
+        }
+        if source and source != "auto":
+            request["source_language_code"] = source
 
-    raise HTTPException(status_code=500, detail="Translation unavailable (google+openai failed)")
+        resp = client.translate_text(request=request)
+        out = ""
+        if resp.translations:
+            out = (resp.translations[0].translated_text or "").strip()
+
+        if not out:
+            raise HTTPException(status_code=502, detail="Google Translate returned empty response")
+
+        return TranslateResp(ok=True, provider="google", translated=out)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("GOOGLE_TRANSLATE_V3_FAIL %s", e)
+        raise HTTPException(status_code=502, detail=f"Google Translate v3 failed: {e}")
