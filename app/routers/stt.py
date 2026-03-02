@@ -1,70 +1,75 @@
 from __future__ import annotations
 
 import os
+import io
+import json
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 
+from google.oauth2 import service_account
+from google.cloud import speech
+
 router = APIRouter(tags=["stt"])
 
-OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
-OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
+GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
+
+_client: Optional[speech.SpeechClient] = None
+
+def get_speech_client() -> speech.SpeechClient:
+    global _client
+
+    if not GOOGLE_CREDS_PATH:
+        raise RuntimeError("Missing GOOGLE_APPLICATION_CREDENTIALS")
+
+    if not os.path.exists(GOOGLE_CREDS_PATH):
+        raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
+
+    if _client is None:
+        creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
+        _client = speech.SpeechClient(credentials=creds)
+
+    return _client
+
 
 class STTResponse(BaseModel):
     text: str
     model_used: str
 
+
 @router.post("/stt", response_model=STTResponse)
 async def stt(
     file: UploadFile = File(...),
-    lang: Optional[str] = Form(default=None),      # "tr", "en" vb (opsiyonel)
-    model: Optional[str] = Form(default=None),     # opsiyonel override
+    lang: Optional[str] = Form(default="tr-TR"),
 ):
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY missing")
-
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(status_code=422, detail="Empty audio")
 
-    # hızlı model -> fallback whisper
-    model_try = [model] if model else ["gpt-4o-mini-transcribe", "whisper-1"]
+    try:
+        client = get_speech_client()
 
-    headers = { "Authorization": f"Bearer {OPENAI_API_KEY}" }
+        audio = speech.RecognitionAudio(content=audio_bytes)
 
-    last_err = None
-    for m in model_try:
-        try:
-            data = {
-                "model": m,
-                "response_format": "json",
-            }
-            if lang:
-                data["language"] = lang
+        config = speech.RecognitionConfig(
+            encoding=speech.RecognitionConfig.AudioEncoding.WEBM_OPUS,
+            sample_rate_hertz=48000,
+            language_code=lang or "tr-TR",
+        )
 
-            files = {
-                "file": (file.filename or "audio.webm", audio_bytes, file.content_type or "audio/webm")
-            }
+        response = client.recognize(config=config, audio=audio)
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                r = await client.post(OPENAI_TRANSCRIPTIONS_URL, headers=headers, data=data, files=files)
+        transcript = ""
+        for result in response.results:
+            transcript += result.alternatives[0].transcript + " "
 
-            if r.status_code >= 400:
-                last_err = r.text
-                continue
+        transcript = transcript.strip()
 
-            j = r.json()
-            text = (j.get("text") or "").strip()
-            if not text:
-                last_err = "empty transcription"
-                continue
+        if not transcript:
+            raise HTTPException(status_code=502, detail="Empty transcription")
 
-            return STTResponse(text=text, model_used=m)
+        return STTResponse(text=transcript, model_used="google-speech")
 
-        except Exception as e:
-            last_err = str(e)
-            continue
-
-    raise HTTPException(status_code=502, detail=f"stt failed: {last_err}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Google STT failed: {e}")
