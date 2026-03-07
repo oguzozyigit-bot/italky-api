@@ -133,11 +133,18 @@ async def translate_ai(req: TranslateReq):
         if source and source != "auto":
             payload["source_language_code"] = source
 
-        resp = client.translate_text(request=payload)
+        resp = client.translate_text(
+    request=request,
+    timeout=2.0
+)
 
-        out = ""
-        if resp.translations:
-            out = (resp.translations[0].translated_text or "").strip()
+out = resp.translations[0].translated_text.strip()
+
+return TranslateResp(
+    ok=True,
+    provider="google",
+    translated=out
+)
 
         if not out:
             raise HTTPException(status_code=502, detail="Google Translate returned empty response")
