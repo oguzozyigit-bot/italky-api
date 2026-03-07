@@ -1,10 +1,9 @@
-# FILE: app/routers/translate_ai.py
 from __future__ import annotations
 
 import os
 import json
 import logging
-from typing import Optional
+from typing import Optional, Tuple
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -16,37 +15,63 @@ logger = logging.getLogger("italky-translate")
 router = APIRouter(tags=["translate-ai"])
 
 GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
+GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
 
 _client: Optional[translate_v3.TranslationServiceClient] = None
 _project_id: Optional[str] = None
+
+
+def _load_project_id_from_dict(data: dict) -> str:
+    return str(data.get("project_id") or "").strip()
 
 
 def _load_project_id_from_file(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return str(data.get("project_id") or "").strip()
+        return _load_project_id_from_dict(data)
     except Exception:
         return ""
+
+
+def _build_credentials() -> Tuple[service_account.Credentials, str]:
+    # 1) Önce JSON string env dene
+    if GOOGLE_CREDS_JSON:
+        try:
+            info = json.loads(GOOGLE_CREDS_JSON)
+            creds = service_account.Credentials.from_service_account_info(info)
+            project_id = _load_project_id_from_dict(info)
+            if not project_id:
+                raise RuntimeError("project_id missing in GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            return creds, project_id
+        except Exception as e:
+            raise RuntimeError(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
+
+    # 2) Sonra dosya yolu dene
+    if GOOGLE_CREDS_PATH:
+        if not os.path.exists(GOOGLE_CREDS_PATH):
+            raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
+        try:
+            creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
+            project_id = _load_project_id_from_file(GOOGLE_CREDS_PATH)
+            if not project_id:
+                raise RuntimeError("Could not read project_id from service account JSON file")
+            return creds, project_id
+        except Exception as e:
+            raise RuntimeError(f"Invalid credentials file: {e}")
+
+    raise RuntimeError(
+        "Missing Google credentials. Set GOOGLE_APPLICATION_CREDENTIALS_JSON or GOOGLE_APPLICATION_CREDENTIALS"
+    )
 
 
 def _get_client_and_project():
     global _client, _project_id
 
-    if not GOOGLE_CREDS_PATH:
-        raise RuntimeError("Missing GOOGLE_APPLICATION_CREDENTIALS")
-
-    if not os.path.exists(GOOGLE_CREDS_PATH):
-        raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
-
-    if _client is None:
-        creds = service_account.Credentials.from_service_account_file(GOOGLE_CREDS_PATH)
+    if _client is None or not _project_id:
+        creds, project_id = _build_credentials()
         _client = translate_v3.TranslationServiceClient(credentials=creds)
-
-    if not _project_id:
-        _project_id = _load_project_id_from_file(GOOGLE_CREDS_PATH)
-        if not _project_id:
-            raise RuntimeError("Could not read project_id from service account JSON")
+        _project_id = project_id
 
     return _client, _project_id
 
@@ -61,6 +86,20 @@ class TranslateResp(BaseModel):
     ok: bool
     provider: str
     translated: str
+
+
+@router.get("/translate_ai/health")
+async def translate_ai_health():
+    try:
+        _, project_id = _get_client_and_project()
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "provider": "google-translate-v3"
+        }
+    except Exception as e:
+        logger.exception("TRANSLATE_AI_HEALTH_FAIL %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/translate_ai", response_model=TranslateResp)
@@ -82,10 +121,12 @@ async def translate_ai(req: TranslateReq):
             "target_language_code": target,
             "mime_type": "text/plain",
         }
+
         if source and source != "auto":
             request["source_language_code"] = source
 
         resp = client.translate_text(request=request)
+
         out = ""
         if resp.translations:
             out = (resp.translations[0].translated_text or "").strip()
