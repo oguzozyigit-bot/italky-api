@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import json
 import logging
-import tempfile
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
@@ -20,7 +19,6 @@ GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").str
 
 _client: Optional[translate_v3.TranslationServiceClient] = None
 _project_id: Optional[str] = None
-_temp_json_path: Optional[str] = None
 
 
 def _load_json_from_string(raw: str) -> dict:
@@ -50,18 +48,6 @@ def _resolve_credentials_info() -> dict:
     raise RuntimeError(
         "Missing Google credentials. Set GOOGLE_APPLICATION_CREDENTIALS_JSON or GOOGLE_APPLICATION_CREDENTIALS"
     )
-
-
-def _ensure_temp_json_file(info: dict) -> str:
-    global _temp_json_path
-    if _temp_json_path and os.path.exists(_temp_json_path):
-        return _temp_json_path
-
-    fd, path = tempfile.mkstemp(prefix="gcp_translate_", suffix=".json")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        json.dump(info, f)
-    _temp_json_path = path
-    return path
 
 
 def _get_client_and_project():
@@ -101,12 +87,12 @@ async def translate_ai_health():
             "ok": True,
             "project_id": str(info.get("project_id") or ""),
             "has_private_key": bool(info.get("private_key")),
-            "mode": "json_env" if GOOGLE_CREDS_JSON else "file_path"
+            "mode": "json_env" if GOOGLE_CREDS_JSON else "file_path",
         }
     except Exception as e:
         return {
             "ok": False,
-            "error": str(e)
+            "error": str(e),
         }
 
 
@@ -134,25 +120,31 @@ async def translate_ai(req: TranslateReq):
             payload["source_language_code"] = source
 
         resp = client.translate_text(
-    request=request,
-    timeout=2.0
-)
+            request=payload,
+            timeout=2.0,
+        )
 
-out = resp.translations[0].translated_text.strip()
-
-return TranslateResp(
-    ok=True,
-    provider="google",
-    translated=out
-)
+        out = ""
+        if resp.translations:
+            out = (resp.translations[0].translated_text or "").strip()
 
         if not out:
-            raise HTTPException(status_code=502, detail="Google Translate returned empty response")
+            raise HTTPException(
+                status_code=502,
+                detail="Google Translate returned empty response",
+            )
 
-        return TranslateResp(ok=True, provider="google", translated=out)
+        return TranslateResp(
+            ok=True,
+            provider="google",
+            translated=out,
+        )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("GOOGLE_TRANSLATE_V3_FAIL %s", e)
-        raise HTTPException(status_code=502, detail=f"Google Translate v3 failed: {e}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Google Translate v3 failed: {e}",
+        )
