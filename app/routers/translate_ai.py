@@ -11,11 +11,14 @@ from pydantic import BaseModel
 from google.oauth2 import service_account
 from google.cloud import translate as translate_v3
 
+import google.generativeai as genai
+
 logger = logging.getLogger("italky-translate")
 router = APIRouter(tags=["translate-ai"])
 
 GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
+GEMINI_API_KEY = (os.getenv("GOOGLE_API_KEY") or "").strip()
 
 _client: Optional[translate_v3.TranslationServiceClient] = None
 _project_id: Optional[str] = None
@@ -35,7 +38,6 @@ def _load_project_id_from_file(path: str) -> str:
 
 
 def _build_credentials() -> Tuple[service_account.Credentials, str]:
-    # 1) Önce JSON string env dene
     if GOOGLE_CREDS_JSON:
         try:
             info = json.loads(GOOGLE_CREDS_JSON)
@@ -47,7 +49,6 @@ def _build_credentials() -> Tuple[service_account.Credentials, str]:
         except Exception as e:
             raise RuntimeError(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
 
-    # 2) Sonra dosya yolu dene
     if GOOGLE_CREDS_PATH:
         if not os.path.exists(GOOGLE_CREDS_PATH):
             raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
@@ -76,6 +77,48 @@ def _get_client_and_project():
     return _client, _project_id
 
 
+def _translate_with_google_v3(text: str, source: str, target: str) -> Optional[str]:
+    client, project_id = _get_client_and_project()
+    parent = f"projects/{project_id}/locations/global"
+
+    request = {
+        "parent": parent,
+        "contents": [text],
+        "target_language_code": target,
+        "mime_type": "text/plain",
+    }
+
+    if source and source != "auto":
+        request["source_language_code"] = source
+
+    resp = client.translate_text(request=request)
+
+    out = ""
+    if resp.translations:
+        out = (resp.translations[0].translated_text or "").strip()
+
+    return out or None
+
+
+def _translate_with_gemini(text: str, source: str, target: str) -> Optional[str]:
+    if not GEMINI_API_KEY:
+        return None
+
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+
+    src = source if source != "auto" else "auto-detect"
+    prompt = (
+        f"Translate the following text from {src} to {target}. "
+        f"Return only the translated text, no explanation.\n\n{text}"
+    )
+
+    resp = model.generate_content(prompt)
+    out = getattr(resp, "text", None)
+    out = (out or "").strip()
+    return out or None
+
+
 class TranslateReq(BaseModel):
     text: str
     from_lang: Optional[str] = "auto"
@@ -91,12 +134,21 @@ class TranslateResp(BaseModel):
 @router.get("/translate_ai/health")
 async def translate_ai_health():
     try:
-        _, project_id = _get_client_and_project()
-        return {
-            "ok": True,
-            "project_id": project_id,
-            "provider": "google-translate-v3"
-        }
+        provider = None
+
+        try:
+            _, project_id = _get_client_and_project()
+            provider = "google-translate-v3"
+            return {"ok": True, "provider": provider, "project_id": project_id}
+        except Exception as e:
+            logger.warning("Google v3 health failed: %s", e)
+
+        if GEMINI_API_KEY:
+            provider = "gemini-fallback"
+            return {"ok": True, "provider": provider, "project_id": None}
+
+        raise RuntimeError("No translation provider is configured")
+
     except Exception as e:
         logger.exception("TRANSLATE_AI_HEALTH_FAIL %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -111,33 +163,20 @@ async def translate_ai(req: TranslateReq):
     source = (req.from_lang or "auto").strip().lower()
     target = (req.to_lang or "tr").strip().lower()
 
+    # 1) Google Translate v3
     try:
-        client, project_id = _get_client_and_project()
-        parent = f"projects/{project_id}/locations/global"
-
-        request = {
-            "parent": parent,
-            "contents": [text],
-            "target_language_code": target,
-            "mime_type": "text/plain",
-        }
-
-        if source and source != "auto":
-            request["source_language_code"] = source
-
-        resp = client.translate_text(request=request)
-
-        out = ""
-        if resp.translations:
-            out = (resp.translations[0].translated_text or "").strip()
-
-        if not out:
-            raise HTTPException(status_code=502, detail="Google Translate returned empty response")
-
-        return TranslateResp(ok=True, provider="google", translated=out)
-
-    except HTTPException:
-        raise
+        out = _translate_with_google_v3(text, source, target)
+        if out:
+            return TranslateResp(ok=True, provider="google-v3", translated=out)
     except Exception as e:
-        logger.exception("GOOGLE_TRANSLATE_V3_FAIL %s", e)
-        raise HTTPException(status_code=502, detail=f"Google Translate v3 failed: {e}")
+        logger.warning("GOOGLE_V3_TRANSLATE_FAIL %s", e)
+
+    # 2) Gemini fallback
+    try:
+        out = _translate_with_gemini(text, source, target)
+        if out:
+            return TranslateResp(ok=True, provider="gemini-fallback", translated=out)
+    except Exception as e:
+        logger.warning("GEMINI_TRANSLATE_FAIL %s", e)
+
+    raise HTTPException(status_code=502, detail="All translation providers failed")
