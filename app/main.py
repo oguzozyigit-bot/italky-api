@@ -13,6 +13,7 @@ import requests
 # ✅ CORE ROUTERS (OpenAI yok)
 from app.routers import translate, translate_ai, command_parse
 from app.routers import admin, f2f_ws, tts, stt, ocr_translate
+from app.routers import interpreter  # ✅ YENİ
 
 # ✅ OPTIONAL ROUTERS (OpenAI yok)
 try:
@@ -84,13 +85,14 @@ app.add_middleware(
 # CORE ROUTERS
 # ===============================
 app.include_router(translate.router, prefix="/api")
-app.include_router(translate_ai.router, prefix="/api")  # ✅ (adı translate_ai ama artık Google v3)
+app.include_router(translate_ai.router, prefix="/api")
 app.include_router(command_parse.router, prefix="/api")
 app.include_router(tts.router, prefix="/api")
 app.include_router(stt.router, prefix="/api")
 app.include_router(f2f_ws.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(ocr_translate.router, prefix="/api")
+app.include_router(interpreter.router, prefix="/api")  # ✅ YENİ
 
 # ===============================
 # OPTIONAL ROUTERS
