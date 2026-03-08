@@ -4,7 +4,6 @@ import os
 import logging
 from typing import Optional, Dict, Any
 
-import base64
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
@@ -17,17 +16,10 @@ router = APIRouter(tags=["tts"])
 # =========================
 GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
 
-OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
-OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL", "tts-1") or "").strip()
-OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "alloy") or "").strip()
-
 SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or "").rstrip("/")
 SUPABASE_SERVICE_ROLE = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
 
-# Google Cloud TTS endpoint
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
-# OpenAI TTS endpoint
-OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 
 # =========================
 # LANG MAP
@@ -75,6 +67,40 @@ LANG_BCP47 = {
     "ka": "ka-GE",
 }
 
+# =========================
+# LANGUAGE -> GOOGLE VOICE MAP
+# erkek / kadın / otomatik
+# =========================
+GOOGLE_VOICE_MAP = {
+    "tr": {
+        "male": "tr-TR-Standard-B",
+        "female": "tr-TR-Standard-A",
+    },
+    "en": {
+        "male": "en-US-Standard-D",
+        "female": "en-US-Standard-F",
+    },
+    "de": {
+        "male": "de-DE-Standard-B",
+        "female": "de-DE-Standard-A",
+    },
+    "fr": {
+        "male": "fr-FR-Standard-B",
+        "female": "fr-FR-Standard-A",
+    },
+    "it": {
+        "male": "it-IT-Standard-C",
+        "female": "it-IT-Standard-A",
+    },
+    "es": {
+        "male": "es-ES-Standard-B",
+        "female": "es-ES-Standard-A",
+    },
+    "ru": {
+        "male": "ru-RU-Standard-B",
+        "female": "ru-RU-Standard-A",
+    },
+}
 
 def canon_lang(code: str) -> str:
     c = (code or "tr").strip().lower().replace("_", "-")
@@ -86,13 +112,14 @@ def canon_lang(code: str) -> str:
         return f"{base}-{region}"
     return c
 
-
 def lang_to_bcp47(code: str) -> str:
     c = canon_lang(code)
     if "-" in c and len(c.split("-")[1]) == 2:
         return c
     return LANG_BCP47.get(c, "en-US")
 
+def lang_base(code: str) -> str:
+    return canon_lang(code).split("-")[0]
 
 # =========================
 # SCHEMAS
@@ -100,15 +127,13 @@ def lang_to_bcp47(code: str) -> str:
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-
 class TTSRequest(FlexibleModel):
     text: str
     lang: str = "tr"
-    voice: Optional[str] = None
+    voice: Optional[str] = None     # auto / male / female / direct voice-name
     speaking_rate: float = 1.0
     pitch: float = 0.0
-    user_id: Optional[str] = None  # ✅ yeni
-
+    user_id: Optional[str] = None
 
 class TTSResponse(FlexibleModel):
     ok: bool
@@ -116,15 +141,14 @@ class TTSResponse(FlexibleModel):
     provider_used: Optional[str] = None
     error: Optional[str] = None
 
-
 # =========================
 # PROFILE LOOKUP
 # =========================
 async def get_user_tts_profile(user_id: Optional[str]) -> Optional[dict]:
     if not user_id:
-        return None
+      return None
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
-        return None
+      return None
 
     url = (
         f"{SUPABASE_URL}/rest/v1/profiles"
@@ -160,9 +184,64 @@ async def get_user_tts_profile(user_id: Optional[str]) -> Optional[dict]:
         logger.exception("TTS_PROFILE_FETCH_EXCEPTION: %s", e)
         return None
 
+# =========================
+# CUSTOM VOICE HOOK
+# Şimdilik gerçek clone provider yok
+# Hazırsa işaretleyelim, sonra provider bağlanacak
+# =========================
+async def custom_voice_tts_if_ready(
+    text: str,
+    lang: str,
+    custom_profile: Optional[dict],
+) -> Optional[str]:
+    if not custom_profile:
+        return None
+
+    provider = str(custom_profile.get("tts_voice_provider") or "").strip().lower()
+    voice_id = str(custom_profile.get("tts_voice_id") or "").strip()
+
+    if not provider or not voice_id:
+        return None
+
+    # ŞİMDİLİK gerçek custom TTS yok.
+    # İleride ElevenLabs / Cartesia / başka provider bağlanınca buraya koyacağız.
+    logger.info("CUSTOM_VOICE_READY provider=%s voice_id=%s lang=%s", provider, voice_id, lang)
+    return None
 
 # =========================
-# GOOGLE
+# GOOGLE VOICE CHOOSER
+# =========================
+def pick_google_voice_and_gender(lang: str, voice: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """
+    returns: (voice_name, ssmlGender)
+    voice input can be:
+      - male
+      - female
+      - auto
+      - direct google voice name
+      - None
+    """
+    raw_voice = (voice or "auto").strip()
+    low_voice = raw_voice.lower()
+    base = lang_base(lang)
+
+    # Kullanıcı direkt voice adı gönderdiyse
+    if raw_voice and raw_voice not in ("auto", "male", "female"):
+        return raw_voice, None
+
+    if low_voice == "male":
+        name = GOOGLE_VOICE_MAP.get(base, {}).get("male")
+        return name, "MALE"
+
+    if low_voice == "female":
+        name = GOOGLE_VOICE_MAP.get(base, {}).get("female")
+        return name, "FEMALE"
+
+    # auto
+    return None, None
+
+# =========================
+# GOOGLE TTS
 # =========================
 async def google_tts(
     text: str,
@@ -176,18 +255,26 @@ async def google_tts(
         return None
 
     bcp47 = lang_to_bcp47(lang)
+    voice_name, gender = pick_google_voice_and_gender(lang, voice)
+
+    voice_cfg: Dict[str, Any] = {
+        "languageCode": bcp47
+    }
+
+    if voice_name:
+        voice_cfg["name"] = voice_name
+    elif gender:
+        voice_cfg["ssmlGender"] = gender
 
     payload: Dict[str, Any] = {
         "input": {"text": text},
-        "voice": {"languageCode": bcp47},
+        "voice": voice_cfg,
         "audioConfig": {
             "audioEncoding": "MP3",
             "speakingRate": float(speaking_rate or 1.0),
             "pitch": float(pitch or 0.0),
         },
     }
-    if voice:
-        payload["voice"]["name"] = voice
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -198,7 +285,7 @@ async def google_tts(
             )
 
         if r.status_code >= 400:
-            logger.error("TTS_FAIL_GOOGLE %s %s", r.status_code, r.text[:500])
+            logger.error("TTS_FAIL_GOOGLE %s %s", r.status_code, r.text[:700])
             return None
 
         data = r.json()
@@ -209,72 +296,6 @@ async def google_tts(
         logger.exception("TTS_GOOGLE_EXCEPTION: %s", e)
         return None
 
-
-# =========================
-# OPENAI FALLBACK
-# =========================
-async def openai_tts(text: str, voice: Optional[str]) -> Optional[str]:
-    if not OPENAI_API_KEY:
-        logger.warning("TTS_OPENAI: OPENAI_API_KEY missing -> skip")
-        return None
-
-    v = (voice or OPENAI_TTS_VOICE or "alloy").strip()
-    model = (OPENAI_TTS_MODEL or "tts-1").strip()
-
-    payload = {
-        "model": model,
-        "voice": v,
-        "input": text,
-        "format": "mp3",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            r = await client.post(
-                OPENAI_TTS_URL,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-            )
-
-        if r.status_code >= 400:
-            try:
-                err_txt = r.text
-            except Exception:
-                err_txt = "<no-text>"
-            logger.error("TTS_FAIL_OPENAI %s %s", r.status_code, err_txt[:800])
-            return None
-
-        b = r.content or b""
-        if not b:
-            logger.error("TTS_OPENAI_EMPTY")
-            return None
-
-        return base64.b64encode(b).decode("utf-8")
-
-    except Exception as e:
-        logger.exception("TTS_OPENAI_EXCEPTION: %s", e)
-        return None
-
-
-# =========================
-# VOICE SELECTION
-# =========================
-def choose_default_openai_voice(req_voice: Optional[str], lang: str) -> str:
-    if req_voice:
-        return req_voice.strip()
-
-    c = canon_lang(lang)
-
-    # Türkçe için erkek fallback biraz daha doğal hissettirsin
-    if c == "tr":
-        return "alloy"
-
-    return OPENAI_TTS_VOICE or "alloy"
-
-
 # =========================
 # ROUTE
 # =========================
@@ -284,30 +305,43 @@ async def tts(req: TTSRequest) -> TTSResponse:
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
+    # 1) custom voice profile var mı?
     custom_profile = await get_user_tts_profile(req.user_id)
 
-    # ✅ Şimdilik gerçek clone provider yok.
-    # Ama custom voice hazırsa bunu işaretleyelim.
-    provider_prefix = "custom-ready" if custom_profile else None
+    # 2) ileride gerçek custom voice buradan üretilecek
+    custom_audio = await custom_voice_tts_if_ready(text, req.lang, custom_profile)
+    if custom_audio:
+        return TTSResponse(
+            ok=True,
+            audio_base64=custom_audio,
+            provider_used="custom"
+        )
 
-    # 1) Google
-    g = await google_tts(text, req.lang, req.voice, req.speaking_rate, req.pitch)
+    # 3) Google TTS fallback
+    g = await google_tts(
+        text=text,
+        lang=req.lang,
+        voice=req.voice,
+        speaking_rate=req.speaking_rate,
+        pitch=req.pitch
+    )
+
     if g:
+        if custom_profile:
+            return TTSResponse(
+                ok=True,
+                audio_base64=g,
+                provider_used="custom-ready+google"
+            )
         return TTSResponse(
             ok=True,
             audio_base64=g,
-            provider_used=f"{provider_prefix}+google" if provider_prefix else "google"
+            provider_used="google"
         )
 
-    # 2) OpenAI fallback
-    fallback_voice = choose_default_openai_voice(req.voice, req.lang)
-    o = await openai_tts(text, fallback_voice)
-    if o:
-        return TTSResponse(
-            ok=True,
-            audio_base64=o,
-            provider_used=f"{provider_prefix}+openai" if provider_prefix else "openai"
-        )
-
-    # 3) none
-    return TTSResponse(ok=False, provider_used="none", error="TTS_UNAVAILABLE")
+    # 4) hiçbiri olmadı
+    return TTSResponse(
+        ok=False,
+        provider_used="none",
+        error="TTS_UNAVAILABLE"
+    )
