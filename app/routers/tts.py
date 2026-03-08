@@ -1,4 +1,3 @@
-# FILE: italky-api/app/routers/tts.py
 from __future__ import annotations
 
 import os
@@ -19,17 +18,20 @@ router = APIRouter(tags=["tts"])
 GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY", "") or "").strip()
-# Ucuz ve stabil seçenek: tts-1
 OPENAI_TTS_MODEL = (os.getenv("OPENAI_TTS_MODEL", "tts-1") or "").strip()
 OPENAI_TTS_VOICE = (os.getenv("OPENAI_TTS_VOICE", "alloy") or "").strip()
+
+SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or "").rstrip("/")
+SUPABASE_SERVICE_ROLE = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
 
 # Google Cloud TTS endpoint
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 # OpenAI TTS endpoint
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 
-# Basit dil->BCP47 map (Google voice languageCode için)
-# FaceToFace'te çok dil olduğundan geniş tuttuk.
+# =========================
+# LANG MAP
+# =========================
 LANG_BCP47 = {
     "tr": "tr-TR",
     "en": "en-US",
@@ -73,27 +75,24 @@ LANG_BCP47 = {
     "ka": "ka-GE",
 }
 
+
 def canon_lang(code: str) -> str:
-    """
-    input: "tr", "tr_TR", "tr-TR", "pt-br", "en-GB"...
-    output: normalized lower-base + optional region (keeps pt-br special)
-    """
     c = (code or "tr").strip().lower().replace("_", "-")
     if c == "pt-br":
         return "pt-br"
-    # if "xx-YY" keep it (YY upper for BCP47 lookup)
     if "-" in c and len(c) >= 4:
         base = c.split("-")[0]
         region = c.split("-")[1].upper()
         return f"{base}-{region}"
     return c
 
+
 def lang_to_bcp47(code: str) -> str:
     c = canon_lang(code)
-    # If already looks like "xx-YY", accept as-is
     if "-" in c and len(c.split("-")[1]) == 2:
         return c
     return LANG_BCP47.get(c, "en-US")
+
 
 # =========================
 # SCHEMAS
@@ -101,18 +100,66 @@ def lang_to_bcp47(code: str) -> str:
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+
 class TTSRequest(FlexibleModel):
     text: str
     lang: str = "tr"
     voice: Optional[str] = None
     speaking_rate: float = 1.0
     pitch: float = 0.0
+    user_id: Optional[str] = None  # ✅ yeni
+
 
 class TTSResponse(FlexibleModel):
     ok: bool
     audio_base64: Optional[str] = None
     provider_used: Optional[str] = None
     error: Optional[str] = None
+
+
+# =========================
+# PROFILE LOOKUP
+# =========================
+async def get_user_tts_profile(user_id: Optional[str]) -> Optional[dict]:
+    if not user_id:
+        return None
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
+        return None
+
+    url = (
+        f"{SUPABASE_URL}/rest/v1/profiles"
+        f"?id=eq.{user_id}"
+        f"&select=id,tts_voice_provider,tts_voice_id,tts_voice_ready"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(
+                url,
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                },
+            )
+
+        if r.status_code >= 400:
+            logger.error("TTS_PROFILE_FETCH_FAIL %s %s", r.status_code, r.text[:400])
+            return None
+
+        arr = r.json()
+        if not arr:
+            return None
+
+        row = arr[0] or {}
+        if row.get("tts_voice_ready") and row.get("tts_voice_id"):
+            return row
+
+        return None
+
+    except Exception as e:
+        logger.exception("TTS_PROFILE_FETCH_EXCEPTION: %s", e)
+        return None
+
 
 # =========================
 # GOOGLE
@@ -124,9 +171,6 @@ async def google_tts(
     speaking_rate: float,
     pitch: float
 ) -> Optional[str]:
-    """
-    Returns audio_base64 on success, None on failure.
-    """
     if not GOOGLE_API_KEY:
         logger.warning("TTS_GOOGLE: GOOGLE_API_KEY missing -> skip")
         return None
@@ -165,13 +209,11 @@ async def google_tts(
         logger.exception("TTS_GOOGLE_EXCEPTION: %s", e)
         return None
 
+
 # =========================
 # OPENAI FALLBACK
 # =========================
 async def openai_tts(text: str, voice: Optional[str]) -> Optional[str]:
-    """
-    OpenAI audio/speech -> returns base64 mp3
-    """
     if not OPENAI_API_KEY:
         logger.warning("TTS_OPENAI: OPENAI_API_KEY missing -> skip")
         return None
@@ -198,7 +240,6 @@ async def openai_tts(text: str, voice: Optional[str]) -> Optional[str]:
             )
 
         if r.status_code >= 400:
-            # OpenAI audio endpoint sometimes returns JSON error text
             try:
                 err_txt = r.text
             except Exception:
@@ -217,8 +258,25 @@ async def openai_tts(text: str, voice: Optional[str]) -> Optional[str]:
         logger.exception("TTS_OPENAI_EXCEPTION: %s", e)
         return None
 
+
 # =========================
-# ROUTE (GOOGLE -> OPENAI)
+# VOICE SELECTION
+# =========================
+def choose_default_openai_voice(req_voice: Optional[str], lang: str) -> str:
+    if req_voice:
+        return req_voice.strip()
+
+    c = canon_lang(lang)
+
+    # Türkçe için erkek fallback biraz daha doğal hissettirsin
+    if c == "tr":
+        return "alloy"
+
+    return OPENAI_TTS_VOICE or "alloy"
+
+
+# =========================
+# ROUTE
 # =========================
 @router.post("/tts", response_model=TTSResponse)
 async def tts(req: TTSRequest) -> TTSResponse:
@@ -226,15 +284,30 @@ async def tts(req: TTSRequest) -> TTSResponse:
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
+    custom_profile = await get_user_tts_profile(req.user_id)
+
+    # ✅ Şimdilik gerçek clone provider yok.
+    # Ama custom voice hazırsa bunu işaretleyelim.
+    provider_prefix = "custom-ready" if custom_profile else None
+
     # 1) Google
     g = await google_tts(text, req.lang, req.voice, req.speaking_rate, req.pitch)
     if g:
-        return TTSResponse(ok=True, audio_base64=g, provider_used="google")
+        return TTSResponse(
+            ok=True,
+            audio_base64=g,
+            provider_used=f"{provider_prefix}+google" if provider_prefix else "google"
+        )
 
     # 2) OpenAI fallback
-    o = await openai_tts(text, req.voice)
+    fallback_voice = choose_default_openai_voice(req.voice, req.lang)
+    o = await openai_tts(text, fallback_voice)
     if o:
-        return TTSResponse(ok=True, audio_base64=o, provider_used="openai")
+        return TTSResponse(
+            ok=True,
+            audio_base64=o,
+            provider_used=f"{provider_prefix}+openai" if provider_prefix else "openai"
+        )
 
     # 3) none
     return TTSResponse(ok=False, provider_used="none", error="TTS_UNAVAILABLE")
