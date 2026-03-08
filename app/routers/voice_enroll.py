@@ -16,125 +16,149 @@ SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 VOICE_PROVIDER = os.getenv("VOICE_PROVIDER", "mock").strip().lower()
-
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "").strip()
+CARTESIA_VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01").strip()
 
 def _get_bearer(auth_header: str | None) -> str:
     if not auth_header:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-
     parts = auth_header.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid Authorization header")
-
     token = parts[1].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Empty token")
-
     return token
 
-
 def _get_user_id_from_token(access_token: str) -> str:
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "apikey": SUPABASE_SERVICE_ROLE,
-            },
-            timeout=20,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Supabase auth check failed: {e}")
-
+    r = requests.get(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "apikey": SUPABASE_SERVICE_ROLE,
+        },
+        timeout=20,
+    )
     if r.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
-
-    try:
-        data = r.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail="Supabase auth returned invalid JSON")
-
+    data = r.json()
     user_id = data.get("id")
     if not user_id:
         raise HTTPException(status_code=401, detail="User ID not found")
-
     return user_id
 
-
 def _get_profile(user_id: str) -> dict:
-    try:
-        r = requests.get(
-            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}&select=id,voice_sample_path,voice_profile_lang",
-            headers={
-                "apikey": SUPABASE_SERVICE_ROLE,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-            },
-            timeout=20,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Profile fetch failed: {e}")
-
+    r = requests.get(
+        f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}&select=id,voice_sample_path,voice_profile_lang,plan",
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+        },
+        timeout=20,
+    )
     if r.status_code != 200:
         raise HTTPException(status_code=500, detail=f"Profile fetch failed: {r.text}")
-
-    try:
-        arr = r.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail="Profile fetch returned invalid JSON")
-
+    arr = r.json()
     if not arr:
         raise HTTPException(status_code=404, detail="Profile not found")
-
     return arr[0]
-
 
 def _parse_paths(raw) -> list[str]:
     if not raw:
         return []
-
     if isinstance(raw, list):
         return [str(x) for x in raw if x]
-
     s = str(raw).strip()
     if not s:
         return []
-
     if s.startswith("["):
         try:
             arr = json.loads(s)
             return [str(x) for x in arr if x]
         except Exception:
             return []
-
     return [s]
 
-
 def _update_profile(user_id: str, payload: dict) -> None:
-    try:
-        r = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
-            headers={
-                "apikey": SUPABASE_SERVICE_ROLE,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
-            json=payload,
-            timeout=20,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Profile update failed: {e}")
-
+    r = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}",
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        },
+        json=payload,
+        timeout=20,
+    )
     if r.status_code not in (200, 204):
         raise HTTPException(status_code=500, detail=f"Profile update failed: {r.text}")
 
+def _signed_url_for_storage_path(path: str, expires_in: int = 3600) -> str:
+    # path ör: userid/voice-sample-1-123.webm
+    r = requests.post(
+        f"{SUPABASE_URL}/storage/v1/object/sign/voice-samples/{path}",
+        headers={
+            "apikey": SUPABASE_SERVICE_ROLE,
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+            "Content-Type": "application/json",
+        },
+        json={"expiresIn": expires_in},
+        timeout=20,
+    )
+    if r.status_code not in (200, 201):
+        raise HTTPException(status_code=500, detail=f"Signed URL failed: {r.text}")
+    data = r.json()
+    signed_path = data.get("signedURL") or data.get("signedUrl")
+    if not signed_path:
+        raise HTTPException(status_code=500, detail="Signed URL missing")
+    return f"{SUPABASE_URL}/storage/v1{signed_path}"
+
+def _cartesia_clone(user_id: str, sample_url: str, lang: str) -> dict:
+    if not CARTESIA_API_KEY:
+        raise HTTPException(status_code=500, detail="CARTESIA_API_KEY missing")
+
+    audio_resp = requests.get(sample_url, timeout=30)
+    if audio_resp.status_code != 200 or not audio_resp.content:
+        raise HTTPException(status_code=500, detail="Could not fetch sample audio")
+
+    files = {
+        "clip": ("sample.webm", audio_resp.content, "audio/webm")
+    }
+    data = {
+        "name": f"italky-{user_id[:8]}",
+        "description": "italky interpreter custom voice",
+        "language": (lang or "en").split("-")[0].lower(),
+    }
+
+    r = requests.post(
+        "https://api.cartesia.ai/voices/clone",
+        headers={
+            "Authorization": f"Bearer {CARTESIA_API_KEY}",
+            "Cartesia-Version": CARTESIA_VERSION,
+        },
+        files=files,
+        data=data,
+        timeout=60,
+    )
+    if r.status_code != 200:
+        raise HTTPException(status_code=500, detail=f"Cartesia clone failed: {r.text[:500]}")
+
+    j = r.json()
+    voice_id = j.get("id") or j.get("voice_id")
+    if not voice_id:
+        raise HTTPException(status_code=500, detail="Cartesia voice_id missing")
+
+    return {
+        "provider": "cartesia",
+        "voice_id": voice_id,
+    }
 
 def _mock_enroll(user_id: str, paths: list[str]) -> dict:
     return {
         "provider": "mock",
         "voice_id": f"mock-{user_id[:8]}-{len(paths)}",
     }
-
 
 @router.post("/voice/enroll")
 def enroll_voice(authorization: Optional[str] = Header(default=None)):
@@ -145,13 +169,24 @@ def enroll_voice(authorization: Optional[str] = Header(default=None)):
     user_id = _get_user_id_from_token(access_token)
     profile = _get_profile(user_id)
 
+    if str(profile.get("plan") or "free").lower() == "free":
+        raise HTTPException(status_code=403, detail="Custom voice is premium only")
+
     paths = _parse_paths(profile.get("voice_sample_path"))
     if len(paths) < 1:
         raise HTTPException(status_code=400, detail="No voice samples found")
 
     try:
-        # Şimdilik mock. Sonra gerçek provider buraya bağlanacak.
-        result = _mock_enroll(user_id, paths)
+        if VOICE_PROVIDER == "cartesia":
+            # ilk kayıtla başlıyoruz; sonra istersen en iyi 2-3 klibi birleştiririz
+            sample_url = _signed_url_for_storage_path(paths[0])
+            result = _cartesia_clone(
+                user_id=user_id,
+                sample_url=sample_url,
+                lang=str(profile.get("voice_profile_lang") or "en"),
+            )
+        else:
+            result = _mock_enroll(user_id, paths)
 
         _update_profile(user_id, {
             "tts_voice_provider": result["provider"],
@@ -161,11 +196,18 @@ def enroll_voice(authorization: Optional[str] = Header(default=None)):
             "tts_voice_updated_at": datetime.now(timezone.utc).isoformat()
         })
 
-    except HTTPException:
+    except HTTPException as e:
+        try:
+            _update_profile(user_id, {
+                "tts_voice_ready": False,
+                "tts_voice_last_error": str(e.detail),
+                "tts_voice_updated_at": datetime.now(timezone.utc).isoformat()
+            })
+        except Exception:
+            pass
         raise
     except Exception as e:
         logger.exception("VOICE_ENROLL_FAIL %s", e)
-
         try:
             _update_profile(user_id, {
                 "tts_voice_ready": False,
@@ -174,7 +216,6 @@ def enroll_voice(authorization: Optional[str] = Header(default=None)):
             })
         except Exception:
             pass
-
         raise HTTPException(status_code=500, detail=f"Voice enroll failed: {e}")
 
     return {
