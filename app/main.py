@@ -14,6 +14,7 @@ import requests
 from app.routers import translate, translate_ai, command_parse
 from app.routers import admin, f2f_ws, tts, stt, ocr_translate
 from app.routers import interpreter  # ✅ YENİ
+from app.routers import voice_enroll
 
 # ✅ OPTIONAL ROUTERS (OpenAI yok)
 try:
@@ -93,6 +94,7 @@ app.include_router(f2f_ws.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(ocr_translate.router, prefix="/api")
 app.include_router(interpreter.router, prefix="/api")  # ✅ YENİ
+app.include_router(voice_enroll.router, prefix="/api")
 
 # ===============================
 # OPTIONAL ROUTERS
