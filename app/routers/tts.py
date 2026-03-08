@@ -194,12 +194,12 @@ async def tts(req: TTSRequest) -> TTSResponse:
 
     # Sadece Interpreter premium + custom-ready ise özel ses
     if (
-        module == "interpreter"
-        and plan != "free"
-        and profile
-        and profile.get("tts_voice_ready")
-        and profile.get("tts_voice_id")
-    ):
+    module in ("interpreter", "facetoface")
+    and plan != "free"
+    and profile
+    and profile.get("tts_voice_ready")
+    and profile.get("tts_voice_id")
+):
         audio = await cartesia_tts(
             text=text,
             lang=req.lang,
