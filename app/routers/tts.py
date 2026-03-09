@@ -33,7 +33,6 @@ LANG_BCP47 = {
     "ru": "ru-RU",
     "el": "el-GR",
     "ka": "ka-GE",
-    "az": "az-AZ",
 }
 
 GOOGLE_VOICE_MAP = {
@@ -45,61 +44,49 @@ GOOGLE_VOICE_MAP = {
     "es": {"male": "es-ES-Standard-B", "female": "es-ES-Standard-A"},
 }
 
+
 def canon_lang(code: str) -> str:
     return (code or "tr").strip().lower().replace("_", "-")
 
+
 def lang_base(code: str) -> str:
     return canon_lang(code).split("-")[0]
+
 
 def lang_to_bcp47(code: str) -> str:
     c = lang_base(code)
     return LANG_BCP47.get(c, "en-US")
 
+
 def canon_voice(value: Optional[str]) -> str:
-    v = str(value or "auto").strip().lower()
+    v = (value or "auto").strip().lower()
+    if v in ("own", "my"):
+        return "clone"
+    if v in ("female", "male", "clone"):
+        return v
+    return "auto"
 
-    # eski / yeni tüm varyasyonları normalize et
-    aliases = {
-        "auto": "auto",
-        "automatic": "auto",
-
-        "male": "male",
-        "man": "male",
-        "erkek": "male",
-
-        "female": "female",
-        "woman": "female",
-        "kadin": "female",
-        "kadın": "female",
-
-        "own": "own",
-        "myvoice": "own",
-        "benimsesim": "own",
-        "benim sesim": "own",
-
-        "ai_custom": "ai_custom",
-        "custom": "ai_custom",
-        "ai": "ai_custom",
-    }
-    return aliases.get(v, "auto")
 
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
+
 class TTSRequest(FlexibleModel):
     text: str
     lang: str = "tr"
-    voice: Optional[str] = None   # auto / male / female / own / ai_custom
+    voice: Optional[str] = None   # auto / male / female / clone
     speaking_rate: float = 1.0
     pitch: float = 0.0
     user_id: Optional[str] = None
     module: str = "facetoface"    # facetoface / interpreter / walkie / chat
+
 
 class TTSResponse(FlexibleModel):
     ok: bool
     audio_base64: Optional[str] = None
     provider_used: Optional[str] = None
     error: Optional[str] = None
+
 
 async def get_user_profile(user_id: Optional[str]) -> Optional[dict]:
     if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
@@ -108,12 +95,7 @@ async def get_user_profile(user_id: Optional[str]) -> Optional[dict]:
     url = (
         f"{SUPABASE_URL}/rest/v1/profiles"
         f"?id=eq.{user_id}"
-        f"&select="
-        f"id,plan,"
-        f"tts_voice_provider,tts_voice_id,tts_voice_ready,"
-        f"voice_profile_ready,"
-        f"ai_voice_profile_ready,"
-        f"ai_voice_sample_url"
+        f"&select=id,plan,tts_voice_provider,tts_voice_id,tts_voice_ready"
     )
 
     try:
@@ -134,13 +116,10 @@ async def get_user_profile(user_id: Optional[str]) -> Optional[dict]:
         logger.exception("TTS_PROFILE_FETCH_EXCEPTION: %s", e)
         return None
 
+
 def pick_google_voice(lang: str, voice: Optional[str]) -> tuple[Optional[str], Optional[str]]:
     base = lang_base(lang)
     v = canon_voice(voice)
-
-    # auto varsayılanı kadın ses olsun
-    if v == "auto":
-        v = "female"
 
     if v == "male":
         return GOOGLE_VOICE_MAP.get(base, {}).get("male"), "MALE"
@@ -148,8 +127,8 @@ def pick_google_voice(lang: str, voice: Optional[str]) -> tuple[Optional[str], O
     if v == "female":
         return GOOGLE_VOICE_MAP.get(base, {}).get("female"), "FEMALE"
 
-    # own / ai_custom google’a düşerse güvenli fallback kadın
-    return GOOGLE_VOICE_MAP.get(base, {}).get("female"), "FEMALE"
+    return None, None
+
 
 async def google_tts(
     text: str,
@@ -197,6 +176,7 @@ async def google_tts(
         logger.exception("TTS_GOOGLE_EXCEPTION: %s", e)
         return None
 
+
 async def cartesia_tts(text: str, lang: str, voice_id: str) -> Optional[str]:
     if not CARTESIA_API_KEY or not voice_id:
         return None
@@ -206,12 +186,12 @@ async def cartesia_tts(text: str, lang: str, voice_id: str) -> Optional[str]:
         "transcript": text,
         "voice": {
             "mode": "id",
-            "id": voice_id
+            "id": voice_id,
         },
         "output_format": {
             "container": "mp3",
             "bit_rate": 128000,
-            "sample_rate": 44100
+            "sample_rate": 44100,
         },
         "language": lang_base(lang),
     }
@@ -237,15 +217,6 @@ async def cartesia_tts(text: str, lang: str, voice_id: str) -> Optional[str]:
         logger.exception("TTS_CARTESIA_EXCEPTION: %s", e)
         return None
 
-def can_use_custom_voice(profile: Optional[dict], voice_mode: str) -> bool:
-    if not profile:
-        return False
-
-    if voice_mode != "own":
-        return False
-
-    # kendi ses sadece kullanıcı özellikle seçtiyse çalışsın
-    return bool(profile.get("tts_voice_ready") and profile.get("tts_voice_id"))
 
 @router.post("/tts", response_model=TTSResponse)
 async def tts(req: TTSRequest) -> TTSResponse:
@@ -253,43 +224,43 @@ async def tts(req: TTSRequest) -> TTSResponse:
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
-    voice_mode = canon_voice(req.voice)
+    module = str(req.module or "facetoface").lower().strip()
+    voice = canon_voice(req.voice)
+
     profile = await get_user_profile(req.user_id)
 
-    # SADECE own seçildiyse custom voice dene
-    if can_use_custom_voice(profile, voice_mode):
+    voice_ready = bool((profile or {}).get("tts_voice_ready"))
+    voice_id = str((profile or {}).get("tts_voice_id") or "").strip()
+
+    # 1) Kullanıcı özellikle "Benim Sesim" seçtiyse önce custom sesi dene
+    if voice == "clone" and voice_ready and voice_id:
         audio = await cartesia_tts(
             text=text,
             lang=req.lang,
-            voice_id=str(profile["tts_voice_id"])
+            voice_id=voice_id
         )
         if audio:
-            return TTSResponse(
-                ok=True,
-                audio_base64=audio,
-                provider_used="cartesia"
-            )
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-clone")
 
-        logger.warning("TTS_CUSTOM_SELECTED_BUT_FAILED; falling back to google")
+    # 2) FaceToFace / Interpreter için hazır özel ses varsa otomatik de olsa custom öncelikli olabilir
+    if module in ("facetoface", "interpreter") and voice_ready and voice_id and voice in ("auto", "clone"):
+        audio = await cartesia_tts(
+            text=text,
+            lang=req.lang,
+            voice_id=voice_id
+        )
+        if audio:
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia")
 
-    # own seçilmiş ama custom hazır değilse fallback
-    # ai_custom seçilmiş ama henüz özel yol yoksa da fallback
+    # 3) Google fallback
     g = await google_tts(
         text=text,
         lang=req.lang,
-        voice=voice_mode,
+        voice=voice,
         speaking_rate=req.speaking_rate,
         pitch=req.pitch
     )
     if g:
-        return TTSResponse(
-            ok=True,
-            audio_base64=g,
-            provider_used="google"
-        )
+        return TTSResponse(ok=True, audio_base64=g, provider_used="google")
 
-    return TTSResponse(
-        ok=False,
-        provider_used="none",
-        error="TTS_UNAVAILABLE"
-    )
+    return TTSResponse(ok=False, provider_used="none", error="TTS_UNAVAILABLE")
