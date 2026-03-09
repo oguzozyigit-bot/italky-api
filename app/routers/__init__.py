@@ -1,7 +1,7 @@
 # FILE: app/routers/__init__.py
 # ✅ Keep this file OpenAI-free. Do NOT import openai-based routers here.
 
-from . import chat
+from . import chat_ai
 from . import lang_pool
 from . import teacher_chat
 from . import translate
