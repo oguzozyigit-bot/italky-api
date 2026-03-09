@@ -7,6 +7,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from app.routers import chat_ai
 
 import requests
 
@@ -95,6 +96,7 @@ app.include_router(admin.router, prefix="/api")
 app.include_router(ocr_translate.router, prefix="/api")
 app.include_router(interpreter.router, prefix="/api")  # ✅ YENİ
 app.include_router(voice_enroll.router, prefix="/api")
+app.include_router(chat_ai.router, prefix="/api")
 
 # ===============================
 # OPTIONAL ROUTERS
