@@ -12,7 +12,7 @@ logger = logging.getLogger("uvicorn.error")
 router = APIRouter(tags=["chat-ai"])
 
 GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
-GEMINI_MODEL = (os.getenv("GEMINI_CHAT_MODEL") or "gemini-1.5-flash").strip()
+GEMINI_MODEL = (os.getenv("GEMINI_CHAT_MODEL") or "gemini-2.5-flash").strip()
 
 if GEMINI_API_KEY:
     try:
