@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 
 # ✅ Gemini çağrısı (chat.py içindeki async fonksiyon)
-from app.routers.chat import call_gemini
+from app.routers.chat_ai import call_gemini
 
 router = APIRouter()
 
