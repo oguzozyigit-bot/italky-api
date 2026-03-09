@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -39,7 +40,7 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     if amount <= 0:
         raise HTTPException(status_code=422, detail="amount must be > 0")
 
-    # 1) Aynı token daha önce işlendi mi?
+    # aynı token daha önce işlendi mi?
     existing = (
         supabase.table("billing_purchases")
         .select("id")
@@ -51,7 +52,7 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     if existing.data:
         return {"ok": True, "already_processed": True}
 
-    # 2) Mevcut token sayısını çek
+    # mevcut token sayısı
     prof = (
         supabase.table("profiles")
         .select("tokens")
@@ -66,12 +67,12 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     current_tokens = int((prof.data[0] or {}).get("tokens") or 0)
     next_tokens = current_tokens + amount
 
-    # 3) Profili güncelle
+    # token güncelle
     supabase.table("profiles").update(
         {"tokens": next_tokens}
     ).eq("id", user_id).execute()
 
-    # 4) İşlenmiş satın almayı kaydet
+    # satın almayı kaydet
     supabase.table("billing_purchases").insert({
         "user_id": user_id,
         "product_id": product_id,
