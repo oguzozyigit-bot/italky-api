@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import List
+from typing import List, Optional, Any
 
 import google.generativeai as genai
 from fastapi import APIRouter, HTTPException
@@ -65,6 +65,78 @@ def build_prompt(message: str, history: List[ChatMessage]) -> str:
     return "\n".join(parts)
 
 
+def _normalize_messages(messages: List[Any]) -> str:
+    lines: List[str] = []
+    for item in messages or []:
+        if isinstance(item, dict):
+            role = str(item.get("role", "user")).lower()
+            content = str(item.get("content", "")).strip()
+        else:
+            role = str(getattr(item, "role", "user")).lower()
+            content = str(getattr(item, "content", "")).strip()
+
+        if not content:
+            continue
+
+        who = "User" if role == "user" else "Assistant"
+        lines.append(f"{who}: {content}")
+
+    return "\n".join(lines).strip()
+
+
+async def call_gemini(
+    messages: List[Any],
+    system_instruction: Optional[str] = None,
+    max_tokens: int = 3200,
+    temperature: float = 0.7,
+) -> str:
+    """
+    lang_pool.py ve diğer routerlar burayı kullanabilir.
+    messages örneği:
+    [
+      {"role":"user","content":"..."}
+    ]
+    """
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY missing")
+
+    try:
+        final_system = (system_instruction or SYSTEM_PROMPT).strip()
+        convo = _normalize_messages(messages)
+
+        prompt_parts: List[str] = [final_system]
+        if convo:
+            prompt_parts.extend(["", convo])
+
+        prompt = "\n".join(prompt_parts).strip()
+
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": float(temperature),
+                "max_output_tokens": int(max_tokens),
+            },
+        )
+
+        text = ""
+        try:
+            text = (response.text or "").strip()
+        except Exception:
+            text = ""
+
+        if not text:
+            raise HTTPException(status_code=502, detail="Gemini returned empty response")
+
+        return text
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("CALL_GEMINI_FAIL: %s", e)
+        raise HTTPException(status_code=502, detail=f"Gemini call failed: {e}")
+
+
 @router.get("/chat_ai/health")
 async def chat_ai_health():
     return {
@@ -76,27 +148,18 @@ async def chat_ai_health():
 
 @router.post("/chat_ai", response_model=ChatAIResp)
 async def chat_ai(req: ChatAIReq):
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY missing")
-
     user_message = (req.message or "").strip()
     if not user_message:
         raise HTTPException(status_code=422, detail="message is required")
 
     try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = build_prompt(user_message, req.history or [])
-
-        response = model.generate_content(prompt)
-
-        reply = ""
-        try:
-            reply = (response.text or "").strip()
-        except Exception:
-            reply = ""
-
-        if not reply:
-            raise HTTPException(status_code=502, detail="Gemini returned empty response")
+        reply = await call_gemini(
+            messages=[{"role": "user", "content": prompt}],
+            system_instruction=SYSTEM_PROMPT,
+            max_tokens=1600,
+            temperature=0.7,
+        )
 
         return ChatAIResp(
             ok=True,
