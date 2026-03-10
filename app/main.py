@@ -9,12 +9,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
+# CORE ROUTERS
 from app.routers import chat_ai
 from app.routers import translate, translate_ai, command_parse
 from app.routers import admin, f2f_ws, tts, stt, ocr_translate
 from app.routers import interpreter
 from app.routers import voice_enroll
+
+# BILLING ROUTERS
 from app.routers.billing_google import router as billing_google_router
+from app.routers.offline_billing import router as offline_billing_router
 
 # OPTIONAL ROUTERS
 try:
@@ -45,7 +49,7 @@ except Exception:
     offline = None
     has_offline = False
 
-APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.1").strip()
+APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.2").strip()
 
 app = FastAPI(
     title="italky Academy API",
@@ -96,7 +100,12 @@ app.include_router(ocr_translate.router, prefix="/api")
 app.include_router(interpreter.router, prefix="/api")
 app.include_router(voice_enroll.router, prefix="/api")
 app.include_router(chat_ai.router, prefix="/api")
+
+# ===============================
+# BILLING ROUTERS
+# ===============================
 app.include_router(billing_google_router)
+app.include_router(offline_billing_router)
 
 # ===============================
 # OPTIONAL ROUTERS
@@ -118,15 +127,22 @@ if has_ocr:
 # ===============================
 @app.get("/")
 def root():
-    return {"status": "online", "service": "italky-academy-api", "version": APP_VERSION}
+    return {
+        "status": "online",
+        "service": "italky-academy-api",
+        "version": APP_VERSION
+    }
+
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
 
+
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
+
 
 # ===============================
 # HARD ACCOUNT DELETE
@@ -134,21 +150,29 @@ async def favicon():
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
+
 def _get_bearer(auth_header: str | None) -> str:
     if not auth_header:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
+
     parts = auth_header.split(" ", 1)
+
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid Authorization header")
+
     token = parts[1].strip()
+
     if not token:
         raise HTTPException(status_code=401, detail="Empty token")
+
     return token
+
 
 @app.post("/api/account/delete")
 def delete_account(authorization: str | None = Header(default=None)):
+
     if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
-        raise HTTPException(status_code=500, detail="Supabase not configured (missing env)")
+        raise HTTPException(status_code=500, detail="Supabase not configured")
 
     access_token = _get_bearer(authorization)
 
@@ -162,19 +186,16 @@ def delete_account(authorization: str | None = Header(default=None)):
             timeout=20,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Supabase auth check failed: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
 
     if user_resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
+        raise HTTPException(status_code=401, detail="Invalid session")
 
-    try:
-        user_data = user_resp.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail="Supabase returned invalid JSON")
-
+    user_data = user_resp.json()
     user_id = user_data.get("id")
+
     if not user_id:
-        raise HTTPException(status_code=401, detail="User ID not found in session")
+        raise HTTPException(status_code=401, detail="User id missing")
 
     try:
         del_resp = requests.delete(
@@ -187,13 +208,9 @@ def delete_account(authorization: str | None = Header(default=None)):
             timeout=20,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Supabase delete failed: {e}")
+        raise HTTPException(status_code=502, detail=str(e))
 
     if del_resp.status_code not in (200, 204):
-        try:
-            err = del_resp.json()
-        except Exception:
-            err = {"error": del_resp.text}
-        raise HTTPException(status_code=500, detail=f"Delete failed: {err}")
+        raise HTTPException(status_code=500, detail="Delete failed")
 
     return {"ok": True}
