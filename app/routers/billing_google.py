@@ -16,11 +16,19 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+PRODUCT_TOKENS = {
+    "jeton_10": 10,
+    "jeton_20": 20,
+    "jeton_50": 50,
+    "jeton_100": 100,
+    "jeton_250": 250,
+    "jeton_500": 500,
+}
+
 
 class GoogleBillingConfirmReq(BaseModel):
     user_id: str
     product_id: str
-    amount: int
     purchase_token: str
 
 
@@ -29,7 +37,6 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
     purchase_token = (req.purchase_token or "").strip()
-    amount = int(req.amount or 0)
 
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
@@ -37,10 +44,11 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
         raise HTTPException(status_code=422, detail="product_id required")
     if not purchase_token:
         raise HTTPException(status_code=422, detail="purchase_token required")
-    if amount <= 0:
-        raise HTTPException(status_code=422, detail="amount must be > 0")
 
-    # aynı token daha önce işlendi mi?
+    amount = PRODUCT_TOKENS.get(product_id)
+    if not amount:
+        raise HTTPException(status_code=400, detail="invalid product_id")
+
     existing = (
         supabase.table("billing_purchases")
         .select("id")
@@ -52,7 +60,6 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     if existing.data:
         return {"ok": True, "already_processed": True}
 
-    # mevcut token sayısı
     prof = (
         supabase.table("profiles")
         .select("tokens")
@@ -61,15 +68,12 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
         .execute()
     )
 
-    print("PROFILE SELECT RESULT:", prof)
-
     if not prof.data:
         raise HTTPException(status_code=404, detail="profile not found")
 
     current_tokens = int((prof.data[0] or {}).get("tokens") or 0)
     next_tokens = current_tokens + amount
 
-    # token güncelle
     update_res = (
         supabase.table("profiles")
         .update({"tokens": next_tokens})
@@ -79,7 +83,6 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
 
     print("PROFILE UPDATE RESULT:", update_res)
 
-    # satın almayı kaydet
     insert_res = (
         supabase.table("billing_purchases")
         .insert({
