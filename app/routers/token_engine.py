@@ -18,7 +18,7 @@ MODULE_LIMITS = {
     "interpreter": ("char_interpreter_remaining", 250),
     "interpreter_clone": ("char_interpreter_clone_remaining", 100),
     "text": ("char_text_remaining", 600),
-    "meeting": ("char_meeting_remaining", 200),
+    "meeting": ("char_meeting_remaining", 400),
 }
 
 
