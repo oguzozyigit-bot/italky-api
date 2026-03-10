@@ -19,6 +19,7 @@ from app.routers import voice_enroll
 # BILLING ROUTERS
 from app.routers.billing_google import router as billing_google_router
 from app.routers.offline_billing import router as offline_billing_router
+from app.routers.usage_billing import router as usage_billing_router
 
 # OPTIONAL ROUTERS
 try:
@@ -106,6 +107,7 @@ app.include_router(chat_ai.router, prefix="/api")
 # ===============================
 app.include_router(billing_google_router)
 app.include_router(offline_billing_router)
+app.include_router(usage_billing_router)
 
 # ===============================
 # OPTIONAL ROUTERS
