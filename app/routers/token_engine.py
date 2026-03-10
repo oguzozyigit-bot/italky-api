@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import HTTPException
 from supabase import create_client, Client
-import os
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
@@ -19,11 +23,14 @@ MODULE_LIMITS = {
 
 
 def spend_chars(user_id: str, module_key: str, used_chars: int):
-    if used_chars <= 0:
-        return {"ok": True, "charged_tokens": 0}
+    if not user_id:
+        raise HTTPException(status_code=422, detail="user_id required")
 
     if module_key not in MODULE_LIMITS:
         raise HTTPException(status_code=400, detail="invalid module_key")
+
+    if used_chars <= 0:
+        return {"ok": True, "charged_tokens": 0, "remaining_chars": 0}
 
     field_name, refill_amount = MODULE_LIMITS[module_key]
 
@@ -43,7 +50,7 @@ def spend_chars(user_id: str, module_key: str, used_chars: int):
     remaining = int(row.get(field_name) or 0)
 
     charged = 0
-    need = used_chars
+    need = int(used_chars)
 
     while remaining < need:
         if tokens <= 0:
@@ -54,14 +61,12 @@ def spend_chars(user_id: str, module_key: str, used_chars: int):
 
     remaining -= need
 
-    update_payload = {
-        "tokens": tokens,
-        field_name: remaining,
-    }
-
     update_res = (
         supabase.table("profiles")
-        .update(update_payload)
+        .update({
+            "tokens": tokens,
+            field_name: remaining
+        })
         .eq("id", user_id)
         .execute()
     )
