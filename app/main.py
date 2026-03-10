@@ -21,6 +21,7 @@ from app.routers.billing_google import router as billing_google_router
 from app.routers.offline_billing import router as offline_billing_router
 from app.routers.usage_billing import router as usage_billing_router
 from app.routers.interpreter_billing import router as interpreter_billing_router
+from app.routers.meeting_billing import router as meeting_billing_router
 
 # OPTIONAL ROUTERS
 try:
@@ -110,6 +111,7 @@ app.include_router(billing_google_router)
 app.include_router(offline_billing_router)
 app.include_router(usage_billing_router)
 app.include_router(interpreter_billing_router)
+app.include_router(meeting_billing_router)
 
 # ===============================
 # OPTIONAL ROUTERS
