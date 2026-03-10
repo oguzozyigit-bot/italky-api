@@ -61,6 +61,8 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
         .execute()
     )
 
+    print("PROFILE SELECT RESULT:", prof)
+
     if not prof.data:
         raise HTTPException(status_code=404, detail="profile not found")
 
@@ -68,17 +70,28 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     next_tokens = current_tokens + amount
 
     # token güncelle
-    supabase.table("profiles").update(
-        {"tokens": next_tokens}
-    ).eq("id", user_id).execute()
+    update_res = (
+        supabase.table("profiles")
+        .update({"tokens": next_tokens})
+        .eq("id", user_id)
+        .execute()
+    )
+
+    print("PROFILE UPDATE RESULT:", update_res)
 
     # satın almayı kaydet
-    supabase.table("billing_purchases").insert({
-        "user_id": user_id,
-        "product_id": product_id,
-        "amount": amount,
-        "purchase_token": purchase_token,
-        "provider": "google_play"
-    }).execute()
+    insert_res = (
+        supabase.table("billing_purchases")
+        .insert({
+            "user_id": user_id,
+            "product_id": product_id,
+            "amount": amount,
+            "purchase_token": purchase_token,
+            "provider": "google_play"
+        })
+        .execute()
+    )
+
+    print("PURCHASE INSERT RESULT:", insert_res)
 
     return {"ok": True, "tokens": next_tokens}
