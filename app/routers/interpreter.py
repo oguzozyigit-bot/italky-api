@@ -1,3 +1,4 @@
+# FILE: app/routers/interpreter.py
 from __future__ import annotations
 
 import asyncio
@@ -18,9 +19,6 @@ from google.cloud import translate as translate_v3
 logger = logging.getLogger("italky-interpreter")
 router = APIRouter(tags=["interpreter"])
 
-# =========================
-# Google Translate
-# =========================
 GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
 
@@ -53,13 +51,13 @@ def _get_translate_client_and_project():
     info = _load_credentials_info()
 
     if _translate_client is None:
-      creds = service_account.Credentials.from_service_account_info(info)
-      _translate_client = translate_v3.TranslationServiceClient(credentials=creds)
+        creds = service_account.Credentials.from_service_account_info(info)
+        _translate_client = translate_v3.TranslationServiceClient(credentials=creds)
 
     if not _translate_project_id:
-      _translate_project_id = str(info.get("project_id") or "").strip()
-      if not _translate_project_id:
-          raise RuntimeError("project_id missing in Google credentials JSON")
+        _translate_project_id = str(info.get("project_id") or "").strip()
+        if not _translate_project_id:
+            raise RuntimeError("project_id missing in Google credentials JSON")
 
     return _translate_client, _translate_project_id
 
@@ -100,9 +98,6 @@ def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
     return out
 
 
-# =========================
-# In-memory room store
-# =========================
 @dataclass
 class PeerState:
     role: str
@@ -115,7 +110,7 @@ class RoomState:
     room_id: str
     host_lang: str
     guest_lang: Optional[str] = None
-    status: str = "waiting"   # waiting | active | closed
+    status: str = "waiting"
     created_at: float = field(default_factory=lambda: time.time())
     updated_at: float = field(default_factory=lambda: time.time())
     peers: Dict[str, PeerState] = field(default_factory=dict)
@@ -155,9 +150,6 @@ async def broadcast(room: RoomState, payload: dict):
         room.sockets.discard(ws)
 
 
-# =========================
-# Schemas
-# =========================
 class CreateRoomReq(BaseModel):
     my_lang: str = "tr"
 
@@ -190,9 +182,6 @@ class RoomResp(BaseModel):
     peer_count: int = 0
 
 
-# =========================
-# REST
-# =========================
 @router.post("/interpreter/create-room", response_model=CreateRoomResp)
 async def create_room(req: CreateRoomReq):
     room_id = new_room_id()
@@ -203,8 +192,8 @@ async def create_room(req: CreateRoomReq):
         room.peers["host"] = PeerState(role="host", lang=host_lang)
         ROOMS[room_id] = room
 
-    join_url = f"https://italky.ai/pages/interpreter_qr_scan.html?room={room_id}"
-    ws_url = f"wss://italky-api.onrender.com/ws/interpreter/{room_id}"
+    join_url = f"https://italky.ai/pages/interpreter_join.html?room={room_id}&v=1"
+    ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room_id}"
 
     return CreateRoomResp(
         ok=True,
@@ -256,15 +245,9 @@ async def get_room(room_id: str):
 
 @router.get("/interpreter/health")
 async def interpreter_health():
-    return {
-        "ok": True,
-        "rooms": len(ROOMS),
-    }
+    return {"ok": True, "rooms": len(ROOMS)}
 
 
-# =========================
-# WebSocket
-# =========================
 @router.websocket("/ws/interpreter/{room_id}")
 async def interpreter_ws(websocket: WebSocket, room_id: str):
     await websocket.accept()
@@ -302,14 +285,10 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
         while True:
             raw = await websocket.receive_text()
             data = json.loads(raw)
-
             mtype = str(data.get("type") or "").strip()
 
             if mtype == "ping":
-                await websocket.send_text(json.dumps({
-                    "type": "pong",
-                    "ts": now_ts(),
-                }, ensure_ascii=False))
+                await websocket.send_text(json.dumps({"type": "pong", "ts": now_ts()}, ensure_ascii=False))
                 continue
 
             if mtype == "typing":
@@ -354,7 +333,6 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     "to_lang": to_lang,
                     "ts": now_ts(),
                 })
-                continue
 
     except WebSocketDisconnect:
         room.sockets.discard(websocket)
