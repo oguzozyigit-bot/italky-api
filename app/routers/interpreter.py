@@ -109,7 +109,7 @@ class PeerState:
 class RoomState:
     room_id: str
     host_code: str
-    mode: str = "interpreter"   # interpreter / meeting
+    mode: str = "interpreter"
     host_lang: str = "tr"
     guest_lang: Optional[str] = None
     status: str = "waiting"
@@ -223,7 +223,6 @@ async def create_room(req: CreateRoomReq):
         ROOMS[room_id] = room
         HOST_ACTIVE_ROOM[host_code] = room_id
 
-    # YENİ MİMARİ: QR artık room ile çalışıyor
     join_url = f"https://italky.ai/open/interpreter?room={room_id}&v=1"
     ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room_id}"
 
@@ -268,7 +267,6 @@ async def resolve_room(req: ResolveRoomReq):
 
         room.updated_at = time.time()
 
-    # YENİ MİMARİYE UYUMLU
     join_url = f"https://italky.ai/open/interpreter?room={room.room_id}&v=1"
     ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room.room_id}"
 
@@ -427,13 +425,21 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
         room.sockets.discard(websocket)
         room.updated_at = time.time()
 
-        if not room.sockets:
-            if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
-                HOST_ACTIVE_ROOM.pop(room.host_code, None)
+        async with ROOM_LOCK:
+            room.peers.pop(role, None)
+
+            if role == "guest":
+                room.guest_lang = None
+                room.status = "waiting"
+
+            if not room.sockets:
+                if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
+                    HOST_ACTIVE_ROOM.pop(room.host_code, None)
 
         await broadcast(room, {
             "type": "peer_left",
             "sender": role,
+            "message": "Karşı taraf odadan ayrıldı.",
             "ts": now_ts(),
         })
 
