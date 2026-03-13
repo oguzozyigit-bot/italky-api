@@ -155,7 +155,7 @@ async def broadcast(room: RoomState, payload: dict):
 
 class CreateRoomReq(BaseModel):
     my_lang: str = "tr"
-    host_code: str
+    host_code: str = "HOME-HOST"
     mode: str = "interpreter"
 
 
@@ -209,11 +209,8 @@ class RoomResp(BaseModel):
 async def create_room(req: CreateRoomReq):
     room_id = new_room_id()
     host_lang = (req.my_lang or "tr").strip().lower()
-    host_code = (req.host_code or "").strip().upper()
+    host_code = (req.host_code or "HOME-HOST").strip().upper()
     mode = (req.mode or "interpreter").strip().lower()
-
-    if not host_code:
-        raise HTTPException(status_code=422, detail="host_code is required")
 
     async with ROOM_LOCK:
         room = RoomState(
@@ -226,7 +223,8 @@ async def create_room(req: CreateRoomReq):
         ROOMS[room_id] = room
         HOST_ACTIVE_ROOM[host_code] = room_id
 
-    join_url = f"https://italky.ai/open/interpreter?host={host_code}&v=1"
+    # YENİ MİMARİ: QR artık room ile çalışıyor
+    join_url = f"https://italky.ai/open/interpreter?room={room_id}&v=1"
     ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room_id}"
 
     return CreateRoomResp(
@@ -270,7 +268,8 @@ async def resolve_room(req: ResolveRoomReq):
 
         room.updated_at = time.time()
 
-    join_url = f"https://italky.ai/open/interpreter?host={host_code}&v=1"
+    # YENİ MİMARİYE UYUMLU
+    join_url = f"https://italky.ai/open/interpreter?room={room.room_id}&v=1"
     ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room.room_id}"
 
     return ResolveRoomResp(
@@ -376,7 +375,9 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
             mtype = str(data.get("type") or "").strip()
 
             if mtype == "ping":
-                await websocket.send_text(json.dumps({"type": "pong", "ts": now_ts()}, ensure_ascii=False))
+                await websocket.send_text(
+                    json.dumps({"type": "pong", "ts": now_ts()}, ensure_ascii=False)
+                )
                 continue
 
             if mtype == "typing":
@@ -435,6 +436,7 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
             "sender": role,
             "ts": now_ts(),
         })
+
     except Exception as e:
         logger.exception("INTERPRETER_WS_ERROR %s", e)
         room.sockets.discard(websocket)
