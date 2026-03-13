@@ -108,7 +108,9 @@ class PeerState:
 @dataclass
 class RoomState:
     room_id: str
-    host_lang: str
+    host_code: str
+    mode: str = "interpreter"   # interpreter / meeting
+    host_lang: str = "tr"
     guest_lang: Optional[str] = None
     status: str = "waiting"
     created_at: float = field(default_factory=lambda: time.time())
@@ -118,6 +120,7 @@ class RoomState:
 
 
 ROOMS: Dict[str, RoomState] = {}
+HOST_ACTIVE_ROOM: Dict[str, str] = {}
 ROOM_LOCK = asyncio.Lock()
 
 
@@ -152,6 +155,8 @@ async def broadcast(room: RoomState, payload: dict):
 
 class CreateRoomReq(BaseModel):
     my_lang: str = "tr"
+    host_code: str
+    mode: str = "interpreter"
 
 
 class CreateRoomResp(BaseModel):
@@ -160,6 +165,22 @@ class CreateRoomResp(BaseModel):
     join_url: str
     ws_url: str
     status: str
+
+
+class ResolveRoomReq(BaseModel):
+    host_code: str
+    my_lang: str = "tr"
+    mode: str = "interpreter"
+
+
+class ResolveRoomResp(BaseModel):
+    ok: bool
+    room_id: str
+    host_code: str
+    status: str
+    mode: str
+    join_url: str
+    ws_url: str
 
 
 class JoinRoomReq(BaseModel):
@@ -176,6 +197,8 @@ class JoinRoomResp(BaseModel):
 class RoomResp(BaseModel):
     ok: bool
     room_id: str
+    host_code: str
+    mode: str
     status: str
     host_lang: str
     guest_lang: Optional[str] = None
@@ -186,13 +209,24 @@ class RoomResp(BaseModel):
 async def create_room(req: CreateRoomReq):
     room_id = new_room_id()
     host_lang = (req.my_lang or "tr").strip().lower()
+    host_code = (req.host_code or "").strip().upper()
+    mode = (req.mode or "interpreter").strip().lower()
+
+    if not host_code:
+        raise HTTPException(status_code=422, detail="host_code is required")
 
     async with ROOM_LOCK:
-        room = RoomState(room_id=room_id, host_lang=host_lang)
+        room = RoomState(
+            room_id=room_id,
+            host_code=host_code,
+            mode=mode,
+            host_lang=host_lang,
+        )
         room.peers["host"] = PeerState(role="host", lang=host_lang)
         ROOMS[room_id] = room
+        HOST_ACTIVE_ROOM[host_code] = room_id
 
-    join_url = f"https://italky.ai/pages/interpreter_join.html?room={room_id}&v=1"
+    join_url = f"https://italky.ai/open/interpreter?host={host_code}&v=1"
     ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room_id}"
 
     return CreateRoomResp(
@@ -201,6 +235,52 @@ async def create_room(req: CreateRoomReq):
         join_url=join_url,
         ws_url=ws_url,
         status=room.status,
+    )
+
+
+@router.post("/interpreter/resolve-room", response_model=ResolveRoomResp)
+async def resolve_room(req: ResolveRoomReq):
+    host_code = (req.host_code or "").strip().upper()
+    my_lang = (req.my_lang or "tr").strip().lower()
+    mode = (req.mode or "interpreter").strip().lower()
+
+    if not host_code:
+        raise HTTPException(status_code=422, detail="host_code is required")
+
+    async with ROOM_LOCK:
+        room_id = HOST_ACTIVE_ROOM.get(host_code)
+        room: Optional[RoomState] = None
+
+        if room_id:
+            room = ROOMS.get(room_id)
+            if not room:
+                HOST_ACTIVE_ROOM.pop(host_code, None)
+
+        if not room:
+            room_id = new_room_id()
+            room = RoomState(
+                room_id=room_id,
+                host_code=host_code,
+                mode=mode,
+                host_lang=my_lang,
+            )
+            room.peers["host"] = PeerState(role="host", lang=my_lang)
+            ROOMS[room_id] = room
+            HOST_ACTIVE_ROOM[host_code] = room_id
+
+        room.updated_at = time.time()
+
+    join_url = f"https://italky.ai/open/interpreter?host={host_code}&v=1"
+    ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room.room_id}"
+
+    return ResolveRoomResp(
+        ok=True,
+        room_id=room.room_id,
+        host_code=host_code,
+        status=room.status,
+        mode=room.mode,
+        join_url=join_url,
+        ws_url=ws_url,
     )
 
 
@@ -236,6 +316,8 @@ async def get_room(room_id: str):
     return RoomResp(
         ok=True,
         room_id=room.room_id,
+        host_code=room.host_code,
+        mode=room.mode,
         status=room.status,
         host_lang=room.host_lang,
         guest_lang=room.guest_lang,
@@ -245,7 +327,11 @@ async def get_room(room_id: str):
 
 @router.get("/interpreter/health")
 async def interpreter_health():
-    return {"ok": True, "rooms": len(ROOMS)}
+    return {
+        "ok": True,
+        "rooms": len(ROOMS),
+        "active_hosts": len(HOST_ACTIVE_ROOM),
+    }
 
 
 @router.websocket("/ws/interpreter/{room_id}")
@@ -274,6 +360,8 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
     await broadcast(room, {
         "type": "presence",
         "room_id": room_id,
+        "host_code": room.host_code,
+        "mode": room.mode,
         "status": room.status,
         "host_lang": room.host_lang,
         "guest_lang": room.guest_lang,
@@ -337,6 +425,10 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
     except WebSocketDisconnect:
         room.sockets.discard(websocket)
         room.updated_at = time.time()
+
+        if not room.sockets:
+            if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
+                HOST_ACTIVE_ROOM.pop(room.host_code, None)
 
         await broadcast(room, {
             "type": "peer_left",
