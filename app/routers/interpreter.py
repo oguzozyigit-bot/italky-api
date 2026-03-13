@@ -385,7 +385,30 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     "ts": now_ts(),
                 })
                 continue
+             if mtype == "set_lang":
+                new_lang = str(data.get("lang") or my_lang).strip().lower()
 
+                async with ROOM_LOCK:
+                    if role == "host":
+                        room.host_lang = new_lang
+                    else:
+                        room.guest_lang = new_lang
+
+                    room.peers[role] = PeerState(role=role, lang=new_lang)
+                    room.updated_at = time.time()
+
+                await broadcast(room, {
+                    "type": "presence",
+                    "room_id": room_id,
+                    "host_code": room.host_code,
+                    "mode": room.mode,
+                    "status": room.status,
+                    "host_lang": room.host_lang,
+                    "guest_lang": room.guest_lang,
+                    "peer_count": len(room.peers),
+                    "ts": now_ts(),
+                })
+                continue
             if mtype == "text_message":
                 original_text = str(data.get("text") or "").strip()
                 from_lang = str(data.get("from_lang") or my_lang).strip().lower()
