@@ -1,5 +1,4 @@
 # FILE: app/routers/interpreter.py
-
 from __future__ import annotations
 
 import asyncio
@@ -14,271 +13,224 @@ from typing import Dict, Optional, Set
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from supabase import create_client
+from google.oauth2 import service_account
+from google.cloud import translate as translate_v3
 
 logger = logging.getLogger("italky-interpreter")
 router = APIRouter(tags=["interpreter"])
 
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# ===============================
+# GOOGLE TRANSLATE
+# ===============================
 
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE)
+GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
+
+_translate_client = None
+_translate_project = None
 
 
-# =========================================================
-# ROOM DATA
-# =========================================================
+def get_translate():
+    global _translate_client, _translate_project
+
+    if _translate_client:
+        return _translate_client, _translate_project
+
+    info = json.loads(GOOGLE_CREDS_JSON)
+
+    creds = service_account.Credentials.from_service_account_info(info)
+    _translate_client = translate_v3.TranslationServiceClient(credentials=creds)
+    _translate_project = info["project_id"]
+
+    return _translate_client, _translate_project
+
+
+def translate_text(text, src, dst):
+
+    if not text:
+        return ""
+
+    client, project = get_translate()
+
+    parent = f"projects/{project}/locations/global"
+
+    resp = client.translate_text(
+        request={
+            "parent": parent,
+            "contents": [text],
+            "target_language_code": dst,
+            "source_language_code": src,
+        }
+    )
+
+    return resp.translations[0].translated_text
+
+
+# ===============================
+# ROOM STRUCTURE
+# ===============================
 
 @dataclass
-class PeerState:
-    role: str
-    user_id: str
-    full_name: str
-    avatar_url: Optional[str]
-    lang: str
-    voice: Optional[str] = None
-    joined_at: float = field(default_factory=lambda: time.time())
-
-
-@dataclass
-class RoomState:
+class Room:
     room_id: str
     host_code: str
-    mode: str
     host_lang: str
     guest_lang: Optional[str] = None
-    status: str = "waiting"
-    peers: Dict[str, PeerState] = field(default_factory=dict)
     sockets: Set[WebSocket] = field(default_factory=set)
 
 
-ROOMS: Dict[str, RoomState] = {}
-HOST_ACTIVE_ROOM: Dict[str, str] = {}
-ROOM_LOCK = asyncio.Lock()
+ROOMS: Dict[str, Room] = {}
+HOST_ROOM: Dict[str, str] = {}
+
+LOCK = asyncio.Lock()
 
 
-# =========================================================
-# HELPERS
-# =========================================================
-
-def new_room_id() -> str:
+def new_room():
     return secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:12]
 
 
-def now_ts() -> int:
-    return int(time.time())
-
-
-async def broadcast(room: RoomState, payload: dict):
-
-    dead = []
-    text = json.dumps(payload, ensure_ascii=False)
-
-    for ws in list(room.sockets):
-        try:
-            await ws.send_text(text)
-        except Exception:
-            dead.append(ws)
-
-    for ws in dead:
-        room.sockets.discard(ws)
-
-
-# =========================================================
-# PROFILE READ
-# =========================================================
-
-def get_profile(user_id):
-
-    try:
-        r = supabase.table("profiles").select(
-            "full_name,avatar_url,tts_voice"
-        ).eq("id", user_id).single().execute()
-
-        if not r.data:
-            return None
-
-        return r.data
-
-    except Exception:
-        return None
-
-
-# =========================================================
-# CREATE ROOM
-# =========================================================
+# ===============================
+# MODELS
+# ===============================
 
 class CreateRoomReq(BaseModel):
-
     host_code: str
-    my_lang: str = "tr"
-    user_id: str
-    mode: str = "interpreter"
+    my_lang: str
 
+
+class JoinRoomReq(BaseModel):
+    room_id: str
+    my_lang: str
+
+
+class ResolveRoomReq(BaseModel):
+    host_code: str
+    my_lang: str
+
+
+# ===============================
+# CREATE ROOM (HOST)
+# ===============================
 
 @router.post("/interpreter/create-room")
 async def create_room(req: CreateRoomReq):
 
     host_code = req.host_code.strip().upper()
-    user_id = req.user_id
-    host_lang = req.my_lang
 
-    profile = get_profile(user_id)
+    async with LOCK:
 
-    if not profile:
-        raise HTTPException(400, "Profile bulunamadı")
+        if host_code in HOST_ROOM:
+            room_id = HOST_ROOM[host_code]
+            return {"room_id": room_id}
 
-    room_id = new_room_id()
+        room_id = new_room()
 
-    async with ROOM_LOCK:
-
-        room = RoomState(
+        room = Room(
             room_id=room_id,
             host_code=host_code,
-            mode=req.mode,
-            host_lang=host_lang,
-        )
-
-        room.peers["host"] = PeerState(
-            role="host",
-            user_id=user_id,
-            full_name=profile["full_name"],
-            avatar_url=profile["avatar_url"],
-            lang=host_lang,
-            voice=profile.get("tts_voice"),
+            host_lang=req.my_lang.lower()
         )
 
         ROOMS[room_id] = room
-        HOST_ACTIVE_ROOM[host_code] = room_id
+        HOST_ROOM[host_code] = room_id
 
-    return {
-        "ok": True,
-        "room_id": room_id,
-    }
+    return {"room_id": room_id}
 
 
-# =========================================================
-# RESOLVE ROOM
-# =========================================================
-
-class ResolveRoomReq(BaseModel):
-
-    host_code: str
-    my_lang: str
-    user_id: str
-
+# ===============================
+# RESOLVE ROOM (GUEST)
+# ===============================
 
 @router.post("/interpreter/resolve-room")
 async def resolve_room(req: ResolveRoomReq):
 
     host_code = req.host_code.strip().upper()
-    user_id = req.user_id
-    guest_lang = req.my_lang
 
-    profile = get_profile(user_id)
+    async with LOCK:
 
-    if not profile:
-        raise HTTPException(400, "Profile bulunamadı")
-
-    async with ROOM_LOCK:
-
-        room_id = HOST_ACTIVE_ROOM.get(host_code)
+        room_id = HOST_ROOM.get(host_code)
 
         if not room_id:
-            raise HTTPException(404, "Room bulunamadı")
+            raise HTTPException(404, "Room not found")
 
-        room = ROOMS.get(room_id)
-
-        if not room:
-            raise HTTPException(404, "Room bulunamadı")
-
-        room.guest_lang = guest_lang
-
-        room.peers["guest"] = PeerState(
-            role="guest",
-            user_id=user_id,
-            full_name=profile["full_name"],
-            avatar_url=profile["avatar_url"],
-            lang=guest_lang,
-            voice=profile.get("tts_voice"),
-        )
-
-        room.status = "active"
-
-    return {
-        "ok": True,
-        "room_id": room.room_id
-    }
+    return {"room_id": room_id}
 
 
-# =========================================================
+# ===============================
+# JOIN ROOM
+# ===============================
+
+@router.post("/interpreter/join-room")
+async def join_room(req: JoinRoomReq):
+
+    room = ROOMS.get(req.room_id)
+
+    if not room:
+        raise HTTPException(404, "Room not found")
+
+    room.guest_lang = req.my_lang.lower()
+
+    return {"ok": True}
+
+
+# ===============================
 # WEBSOCKET
-# =========================================================
+# ===============================
 
 @router.websocket("/ws/interpreter/{room_id}")
-async def interpreter_ws(websocket: WebSocket, room_id: str):
+async def ws_interpreter(ws: WebSocket, room_id: str):
 
-    await websocket.accept()
+    await ws.accept()
 
-    role = websocket.query_params.get("role") or "guest"
-    lang = websocket.query_params.get("lang") or "en"
+    role = ws.query_params.get("role", "guest")
+    lang = ws.query_params.get("lang", "en")
 
     room = ROOMS.get(room_id)
 
     if not room:
-        await websocket.close()
+        await ws.close()
         return
 
-    room.sockets.add(websocket)
-
-    peer = room.peers.get(role)
-
-    await broadcast(room, {
-        "type": "presence",
-        "room_id": room_id,
-        "peer_count": len(room.peers),
-        "host_lang": room.host_lang,
-        "guest_lang": room.guest_lang,
-        "peer_name": peer.full_name,
-        "peer_avatar": peer.avatar_url,
-        "peer_voice": peer.voice,
-        "ts": now_ts()
-    })
+    room.sockets.add(ws)
 
     try:
 
+        await ws.send_text(json.dumps({
+            "type": "presence",
+            "room_id": room_id,
+            "host_lang": room.host_lang,
+            "guest_lang": room.guest_lang
+        }))
+
         while True:
 
-            raw = await websocket.receive_text()
+            raw = await ws.receive_text()
             data = json.loads(raw)
 
             if data["type"] == "ping":
-                await websocket.send_text(json.dumps({"type": "pong"}))
+                await ws.send_text(json.dumps({"type": "pong"}))
                 continue
 
             if data["type"] == "text_message":
 
                 text = data["text"]
+                src = data["from_lang"]
+                dst = data["to_lang"]
 
-                await broadcast(room, {
+                translated = translate_text(text, src, dst)
+
+                payload = {
                     "type": "translated_message",
                     "sender": role,
                     "original_text": text,
-                    "translated_text": text,
-                    "sender_name": peer.full_name,
-                    "sender_avatar": peer.avatar_url,
-                    "sender_voice": peer.voice,
-                    "ts": now_ts()
-                })
+                    "translated_text": translated
+                }
+
+                for s in list(room.sockets):
+                    try:
+                        await s.send_text(json.dumps(payload))
+                    except:
+                        pass
 
     except WebSocketDisconnect:
-
-        room.sockets.discard(websocket)
-
-        await broadcast(room, {
-            "type": "peer_left",
-            "sender": role,
-            "sender_name": peer.full_name,
-            "ts": now_ts()
-        })
+        room.sockets.discard(ws)
