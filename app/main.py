@@ -106,7 +106,7 @@ app.include_router(voice_enroll.router, prefix="/api")
 app.include_router(chat_ai.router, prefix="/api")
 
 # UI TRANSLATE
-app.include_router(ui_translate_router, prefix="/api"))
+app.include_router(ui_translate_router, prefix="/api")
 
 # ===============================
 # BILLING ROUTERS
