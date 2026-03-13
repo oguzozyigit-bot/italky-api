@@ -1,15 +1,15 @@
-# FILE: app/routers/ui_translate.py
-
 from __future__ import annotations
 
+import logging
 import os
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 import google.generativeai as genai
 
 router = APIRouter()
+logger = logging.getLogger("ui-translate")
 
 SUPPORTED_LANGS = {"en", "de", "fr", "it", "es"}
 
@@ -23,15 +23,13 @@ class UiTranslateOut(BaseModel):
     translated_text: str
 
 
-def _get_gemini_key():
-    key = (
+def _get_gemini_key() -> str:
+    return (
         os.getenv("GEMINI_API_KEY")
         or os.getenv("GOOGLE_API_KEY")
         or os.getenv("GOOGLE_AI_API_KEY")
-    )
-    if not key:
-        raise HTTPException(500, "Gemini API key bulunamadı")
-    return key
+        or ""
+    ).strip()
 
 
 def _lang_name(code: str) -> str:
@@ -46,49 +44,63 @@ def _lang_name(code: str) -> str:
 
 @router.post("/ui-translate", response_model=UiTranslateOut)
 async def ui_translate(payload: UiTranslateIn):
-
-    text = payload.text.strip()
-    lang = payload.target_lang.lower()
+    text = (payload.text or "").strip()
+    lang = (payload.target_lang or "").strip().lower()
 
     if not text:
-        return {"translated_text": ""}
+        return UiTranslateOut(translated_text="")
 
     if lang not in SUPPORTED_LANGS:
-        return {"translated_text": text}
+        return UiTranslateOut(translated_text=text)
+
+    # Çok kısa / anlamsız parçalar için API'ye gitme
+    if len(text) < 3:
+        return UiTranslateOut(translated_text=text)
+
+    api_key = _get_gemini_key()
+    if not api_key:
+        logger.warning("ui_translate: Gemini key yok, fallback text dönüldü.")
+        return UiTranslateOut(translated_text=text)
 
     try:
+        genai.configure(api_key=api_key)
 
-        genai.configure(api_key=_get_gemini_key())
+        model_name = (
+            os.getenv("GEMINI_UI_TRANSLATE_MODEL")
+            or os.getenv("GEMINI_MODEL")
+            or "gemini-1.5-flash"
+        ).strip()
 
-        model = genai.GenerativeModel(
-            os.getenv("GEMINI_UI_TRANSLATE_MODEL", "gemini-1.5-flash")
-        )
+        model = genai.GenerativeModel(model_name=model_name)
 
         prompt = f"""
-Translate the following Turkish UI text to {_lang_name(lang)}.
+Translate the following Turkish mobile app UI text into {_lang_name(lang)}.
 
 Rules:
-- keep it short
-- mobile UI style
-- no explanation
-- return only translation
-- keep product names unchanged (italkyAI, FaceToFace, SideToSide, AllToAll)
+- Keep it short and natural.
+- Return only the translation.
+- Do not add quotes.
+- Do not explain anything.
+- Keep brand names unchanged: italkyAI, FaceToFace, SideToSide, AllToAll, TextToText.
 
 Text:
 {text}
-"""
+""".strip()
 
-        r = model.generate_content(prompt)
+        response = model.generate_content(prompt)
 
+        translated = ""
         try:
-            translated = r.text.strip()
-        except:
-            translated = text
+            translated = (response.text or "").strip()
+        except Exception:
+            translated = ""
 
         if not translated:
-            translated = text
+            logger.warning("ui_translate: boş Gemini cevabı, fallback text dönüldü. text=%r", text)
+            return UiTranslateOut(translated_text=text)
 
-        return {"translated_text": translated}
+        return UiTranslateOut(translated_text=translated)
 
     except Exception as e:
-        raise HTTPException(500, f"Translate failed: {e}")
+        logger.exception("ui_translate failed. text=%r lang=%r error=%s", text, lang, e)
+        return UiTranslateOut(translated_text=text)
