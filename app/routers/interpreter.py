@@ -385,8 +385,10 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     "ts": now_ts(),
                 })
                 continue
-             if mtype == "set_lang":
+
+            if mtype == "set_lang":
                 new_lang = str(data.get("lang") or my_lang).strip().lower()
+                my_lang = new_lang
 
                 async with ROOM_LOCK:
                     if role == "host":
@@ -409,6 +411,7 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     "ts": now_ts(),
                 })
                 continue
+
             if mtype == "text_message":
                 original_text = str(data.get("text") or "").strip()
                 from_lang = str(data.get("from_lang") or my_lang).strip().lower()
