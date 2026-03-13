@@ -19,218 +19,428 @@ from google.cloud import translate as translate_v3
 logger = logging.getLogger("italky-interpreter")
 router = APIRouter(tags=["interpreter"])
 
-
-# ===============================
-# GOOGLE TRANSLATE
-# ===============================
-
+GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
 
-_translate_client = None
-_translate_project = None
+_translate_client: Optional[translate_v3.TranslationServiceClient] = None
+_translate_project_id: Optional[str] = None
 
 
-def get_translate():
-    global _translate_client, _translate_project
+def _load_credentials_info() -> dict:
+    if GOOGLE_CREDS_JSON:
+        try:
+            return json.loads(GOOGLE_CREDS_JSON)
+        except Exception as e:
+            raise RuntimeError(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
 
-    if _translate_client:
-        return _translate_client, _translate_project
+    if GOOGLE_CREDS_PATH:
+        if not os.path.exists(GOOGLE_CREDS_PATH):
+            raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
+        try:
+            with open(GOOGLE_CREDS_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            raise RuntimeError(f"Could not read credentials file: {e}")
 
-    info = json.loads(GOOGLE_CREDS_JSON)
-
-    creds = service_account.Credentials.from_service_account_info(info)
-    _translate_client = translate_v3.TranslationServiceClient(credentials=creds)
-    _translate_project = info["project_id"]
-
-    return _translate_client, _translate_project
+    raise RuntimeError("Missing Google credentials.")
 
 
-def translate_text(text, src, dst):
+def _get_translate_client_and_project():
+    global _translate_client, _translate_project_id
 
-    if not text:
+    info = _load_credentials_info()
+
+    if _translate_client is None:
+        creds = service_account.Credentials.from_service_account_info(info)
+        _translate_client = translate_v3.TranslationServiceClient(credentials=creds)
+
+    if not _translate_project_id:
+        _translate_project_id = str(info.get("project_id") or "").strip()
+        if not _translate_project_id:
+            raise RuntimeError("project_id missing in Google credentials JSON")
+
+    return _translate_client, _translate_project_id
+
+
+def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
+    value = (text or "").strip()
+    if not value:
         return ""
 
-    client, project = get_translate()
+    src = (from_lang or "auto").strip().lower()
+    dst = (to_lang or "tr").strip().lower()
 
-    parent = f"projects/{project}/locations/global"
+    if src == dst:
+        return value
 
-    resp = client.translate_text(
-        request={
-            "parent": parent,
-            "contents": [text],
-            "target_language_code": dst,
-            "source_language_code": src,
-        }
-    )
+    client, project_id = _get_translate_client_and_project()
+    parent = f"projects/{project_id}/locations/global"
 
-    return resp.translations[0].translated_text
+    payload = {
+        "parent": parent,
+        "contents": [value],
+        "target_language_code": dst,
+        "mime_type": "text/plain",
+    }
 
+    if src and src != "auto":
+        payload["source_language_code"] = src
 
-# ===============================
-# ROOM STRUCTURE
-# ===============================
+    resp = client.translate_text(request=payload, timeout=3.0)
+
+    out = ""
+    if resp.translations:
+        out = (resp.translations[0].translated_text or "").strip()
+
+    if not out:
+        raise RuntimeError("Google Translate returned empty response")
+
+    return out
+
 
 @dataclass
-class Room:
+class PeerState:
+    role: str
+    lang: str
+    joined_at: float = field(default_factory=lambda: time.time())
+
+
+@dataclass
+class RoomState:
     room_id: str
     host_code: str
-    host_lang: str
+    mode: str = "interpreter"   # interpreter / meeting
+    host_lang: str = "tr"
     guest_lang: Optional[str] = None
+    status: str = "waiting"
+    created_at: float = field(default_factory=lambda: time.time())
+    updated_at: float = field(default_factory=lambda: time.time())
+    peers: Dict[str, PeerState] = field(default_factory=dict)
     sockets: Set[WebSocket] = field(default_factory=set)
 
 
-ROOMS: Dict[str, Room] = {}
-HOST_ROOM: Dict[str, str] = {}
+ROOMS: Dict[str, RoomState] = {}
+HOST_ACTIVE_ROOM: Dict[str, str] = {}
+ROOM_LOCK = asyncio.Lock()
 
-LOCK = asyncio.Lock()
+
+def now_ts() -> int:
+    return int(time.time())
 
 
-def new_room():
+def new_room_id() -> str:
     return secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:12]
 
 
-# ===============================
-# MODELS
-# ===============================
+def get_room_or_404(room_id: str) -> RoomState:
+    room = ROOMS.get(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    return room
+
+
+async def broadcast(room: RoomState, payload: dict):
+    dead = []
+    text = json.dumps(payload, ensure_ascii=False)
+
+    for ws in list(room.sockets):
+        try:
+            await ws.send_text(text)
+        except Exception:
+            dead.append(ws)
+
+    for ws in dead:
+        room.sockets.discard(ws)
+
 
 class CreateRoomReq(BaseModel):
-    host_code: str
-    my_lang: str
+    my_lang: str = "tr"
+    host_code: str = "HOME-HOST"
+    mode: str = "interpreter"
 
 
-class JoinRoomReq(BaseModel):
+class CreateRoomResp(BaseModel):
+    ok: bool
     room_id: str
-    my_lang: str
+    join_url: str
+    ws_url: str
+    status: str
 
 
 class ResolveRoomReq(BaseModel):
     host_code: str
-    my_lang: str
+    my_lang: str = "tr"
+    mode: str = "interpreter"
 
 
-# ===============================
-# CREATE ROOM (HOST)
-# ===============================
+class ResolveRoomResp(BaseModel):
+    ok: bool
+    room_id: str
+    host_code: str
+    status: str
+    mode: str
+    join_url: str
+    ws_url: str
 
-@router.post("/interpreter/create-room")
+
+class JoinRoomReq(BaseModel):
+    room_id: str
+    my_lang: str = "en"
+
+
+class JoinRoomResp(BaseModel):
+    ok: bool
+    room_id: str
+    status: str
+
+
+class RoomResp(BaseModel):
+    ok: bool
+    room_id: str
+    host_code: str
+    mode: str
+    status: str
+    host_lang: str
+    guest_lang: Optional[str] = None
+    peer_count: int = 0
+
+
+@router.post("/interpreter/create-room", response_model=CreateRoomResp)
 async def create_room(req: CreateRoomReq):
+    room_id = new_room_id()
+    host_lang = (req.my_lang or "tr").strip().lower()
+    host_code = (req.host_code or "HOME-HOST").strip().upper()
+    mode = (req.mode or "interpreter").strip().lower()
 
-    host_code = req.host_code.strip().upper()
-
-    async with LOCK:
-
-        if host_code in HOST_ROOM:
-            room_id = HOST_ROOM[host_code]
-            return {"room_id": room_id}
-
-        room_id = new_room()
-
-        room = Room(
+    async with ROOM_LOCK:
+        room = RoomState(
             room_id=room_id,
             host_code=host_code,
-            host_lang=req.my_lang.lower()
+            mode=mode,
+            host_lang=host_lang,
         )
-
+        room.peers["host"] = PeerState(role="host", lang=host_lang)
         ROOMS[room_id] = room
-        HOST_ROOM[host_code] = room_id
+        HOST_ACTIVE_ROOM[host_code] = room_id
 
-    return {"room_id": room_id}
+    # YENİ MİMARİ: QR artık room ile çalışıyor
+    join_url = f"https://italky.ai/open/interpreter?room={room_id}&v=1"
+    ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room_id}"
+
+    return CreateRoomResp(
+        ok=True,
+        room_id=room_id,
+        join_url=join_url,
+        ws_url=ws_url,
+        status=room.status,
+    )
 
 
-# ===============================
-# RESOLVE ROOM (GUEST)
-# ===============================
-
-@router.post("/interpreter/resolve-room")
+@router.post("/interpreter/resolve-room", response_model=ResolveRoomResp)
 async def resolve_room(req: ResolveRoomReq):
+    host_code = (req.host_code or "").strip().upper()
+    my_lang = (req.my_lang or "tr").strip().lower()
+    mode = (req.mode or "interpreter").strip().lower()
 
-    host_code = req.host_code.strip().upper()
+    if not host_code:
+        raise HTTPException(status_code=422, detail="host_code is required")
 
-    async with LOCK:
+    async with ROOM_LOCK:
+        room_id = HOST_ACTIVE_ROOM.get(host_code)
+        room: Optional[RoomState] = None
 
-        room_id = HOST_ROOM.get(host_code)
+        if room_id:
+            room = ROOMS.get(room_id)
+            if not room:
+                HOST_ACTIVE_ROOM.pop(host_code, None)
 
-        if not room_id:
-            raise HTTPException(404, "Room not found")
+        if not room:
+            room_id = new_room_id()
+            room = RoomState(
+                room_id=room_id,
+                host_code=host_code,
+                mode=mode,
+                host_lang=my_lang,
+            )
+            room.peers["host"] = PeerState(role="host", lang=my_lang)
+            ROOMS[room_id] = room
+            HOST_ACTIVE_ROOM[host_code] = room_id
 
-    return {"room_id": room_id}
+        room.updated_at = time.time()
+
+    # YENİ MİMARİYE UYUMLU
+    join_url = f"https://italky.ai/open/interpreter?room={room.room_id}&v=1"
+    ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room.room_id}"
+
+    return ResolveRoomResp(
+        ok=True,
+        room_id=room.room_id,
+        host_code=host_code,
+        status=room.status,
+        mode=room.mode,
+        join_url=join_url,
+        ws_url=ws_url,
+    )
 
 
-# ===============================
-# JOIN ROOM
-# ===============================
-
-@router.post("/interpreter/join-room")
+@router.post("/interpreter/join-room", response_model=JoinRoomResp)
 async def join_room(req: JoinRoomReq):
+    room_id = (req.room_id or "").strip()
+    guest_lang = (req.my_lang or "en").strip().lower()
 
-    room = ROOMS.get(req.room_id)
+    if not room_id:
+        raise HTTPException(status_code=422, detail="room_id is required")
 
-    if not room:
-        raise HTTPException(404, "Room not found")
+    async with ROOM_LOCK:
+        room = get_room_or_404(room_id)
+        room.guest_lang = guest_lang
+        room.peers["guest"] = PeerState(role="guest", lang=guest_lang)
+        room.status = "active"
+        room.updated_at = time.time()
 
-    room.guest_lang = req.my_lang.lower()
+    await broadcast(room, {
+        "type": "peer_joined",
+        "room_id": room_id,
+        "status": room.status,
+        "guest_lang": guest_lang,
+        "ts": now_ts(),
+    })
 
-    return {"ok": True}
+    return JoinRoomResp(ok=True, room_id=room_id, status=room.status)
 
 
-# ===============================
-# WEBSOCKET
-# ===============================
+@router.get("/interpreter/room/{room_id}", response_model=RoomResp)
+async def get_room(room_id: str):
+    room = get_room_or_404(room_id)
+    return RoomResp(
+        ok=True,
+        room_id=room.room_id,
+        host_code=room.host_code,
+        mode=room.mode,
+        status=room.status,
+        host_lang=room.host_lang,
+        guest_lang=room.guest_lang,
+        peer_count=len(room.peers),
+    )
+
+
+@router.get("/interpreter/health")
+async def interpreter_health():
+    return {
+        "ok": True,
+        "rooms": len(ROOMS),
+        "active_hosts": len(HOST_ACTIVE_ROOM),
+    }
+
 
 @router.websocket("/ws/interpreter/{room_id}")
-async def ws_interpreter(ws: WebSocket, room_id: str):
+async def interpreter_ws(websocket: WebSocket, room_id: str):
+    await websocket.accept()
 
-    await ws.accept()
-
-    role = ws.query_params.get("role", "guest")
-    lang = ws.query_params.get("lang", "en")
+    role = (websocket.query_params.get("role") or "guest").strip().lower()
+    my_lang = (websocket.query_params.get("lang") or "en").strip().lower()
 
     room = ROOMS.get(room_id)
-
     if not room:
-        await ws.close()
+        await websocket.send_text(json.dumps({
+            "type": "error",
+            "message": "Room not found",
+            "ts": now_ts(),
+        }, ensure_ascii=False))
+        await websocket.close()
         return
 
-    room.sockets.add(ws)
+    room.sockets.add(websocket)
+    room.updated_at = time.time()
+
+    if role not in room.peers:
+        room.peers[role] = PeerState(role=role, lang=my_lang)
+
+    await broadcast(room, {
+        "type": "presence",
+        "room_id": room_id,
+        "host_code": room.host_code,
+        "mode": room.mode,
+        "status": room.status,
+        "host_lang": room.host_lang,
+        "guest_lang": room.guest_lang,
+        "peer_count": len(room.peers),
+        "ts": now_ts(),
+    })
 
     try:
-
-        await ws.send_text(json.dumps({
-            "type": "presence",
-            "room_id": room_id,
-            "host_lang": room.host_lang,
-            "guest_lang": room.guest_lang
-        }))
-
         while True:
-
-            raw = await ws.receive_text()
+            raw = await websocket.receive_text()
             data = json.loads(raw)
+            mtype = str(data.get("type") or "").strip()
 
-            if data["type"] == "ping":
-                await ws.send_text(json.dumps({"type": "pong"}))
+            if mtype == "ping":
+                await websocket.send_text(
+                    json.dumps({"type": "pong", "ts": now_ts()}, ensure_ascii=False)
+                )
                 continue
 
-            if data["type"] == "text_message":
+            if mtype == "typing":
+                await broadcast(room, {
+                    "type": "typing",
+                    "sender": role,
+                    "ts": now_ts(),
+                })
+                continue
 
-                text = data["text"]
-                src = data["from_lang"]
-                dst = data["to_lang"]
+            if mtype == "text_message":
+                original_text = str(data.get("text") or "").strip()
+                from_lang = str(data.get("from_lang") or my_lang).strip().lower()
+                to_lang = str(data.get("to_lang") or "").strip().lower()
 
-                translated = translate_text(text, src, dst)
+                if not original_text:
+                    continue
 
-                payload = {
+                if not to_lang:
+                    if role == "host":
+                        to_lang = room.guest_lang or "en"
+                    else:
+                        to_lang = room.host_lang or "tr"
+
+                try:
+                    translated = translate_with_google(original_text, from_lang, to_lang)
+                except Exception as e:
+                    logger.exception("INTERPRETER_TRANSLATE_FAIL %s", e)
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": f"Translation failed: {e}",
+                        "ts": now_ts(),
+                    }, ensure_ascii=False))
+                    continue
+
+                await broadcast(room, {
                     "type": "translated_message",
                     "sender": role,
-                    "original_text": text,
-                    "translated_text": translated
-                }
-
-                for s in list(room.sockets):
-                    try:
-                        await s.send_text(json.dumps(payload))
-                    except:
-                        pass
+                    "original_text": original_text,
+                    "translated_text": translated,
+                    "from_lang": from_lang,
+                    "to_lang": to_lang,
+                    "ts": now_ts(),
+                })
 
     except WebSocketDisconnect:
-        room.sockets.discard(ws)
+        room.sockets.discard(websocket)
+        room.updated_at = time.time()
+
+        if not room.sockets:
+            if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
+                HOST_ACTIVE_ROOM.pop(room.host_code, None)
+
+        await broadcast(room, {
+            "type": "peer_left",
+            "sender": role,
+            "ts": now_ts(),
+        })
+
+    except Exception as e:
+        logger.exception("INTERPRETER_WS_ERROR %s", e)
+        room.sockets.discard(websocket)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
