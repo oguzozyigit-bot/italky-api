@@ -1,452 +1,275 @@
-# FILE: app/routers/interpreter.py
+# FILE: app/routers/tts.py
 from __future__ import annotations
 
-import asyncio
-import json
-import logging
 import os
-import secrets
-import time
-from dataclasses import dataclass, field
-from typing import Dict, Optional, Set
+import logging
+import base64
+from typing import Optional, Dict, Any
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+import httpx
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, ConfigDict
 
-from google.oauth2 import service_account
-from google.cloud import translate as translate_v3
+logger = logging.getLogger("uvicorn.error")
+router = APIRouter(tags=["tts"])
 
-logger = logging.getLogger("italky-interpreter")
-router = APIRouter(tags=["interpreter"])
+GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
+SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or "").rstrip("/")
+SUPABASE_SERVICE_ROLE = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
 
-GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
-GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "").strip()
+CARTESIA_VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01").strip()
 
-_translate_client: Optional[translate_v3.TranslationServiceClient] = None
-_translate_project_id: Optional[str] = None
+GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+CARTESIA_TTS_URL = "https://api.cartesia.ai/tts/bytes"
+CARTESIA_MODEL_ID = "sonic-2"
 
+LANG_BCP47 = {
+    "tr": "tr-TR",
+    "en": "en-US",
+    "de": "de-DE",
+    "fr": "fr-FR",
+    "it": "it-IT",
+    "es": "es-ES",
+    "ru": "ru-RU",
+    "el": "el-GR",
+    "ka": "ka-GE",
+}
 
-def _load_credentials_info() -> dict:
-    if GOOGLE_CREDS_JSON:
-        try:
-            return json.loads(GOOGLE_CREDS_JSON)
-        except Exception as e:
-            raise RuntimeError(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
-
-    if GOOGLE_CREDS_PATH:
-        if not os.path.exists(GOOGLE_CREDS_PATH):
-            raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
-        try:
-            with open(GOOGLE_CREDS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            raise RuntimeError(f"Could not read credentials file: {e}")
-
-    raise RuntimeError("Missing Google credentials.")
-
-
-def _get_translate_client_and_project():
-    global _translate_client, _translate_project_id
-
-    info = _load_credentials_info()
-
-    if _translate_client is None:
-        creds = service_account.Credentials.from_service_account_info(info)
-        _translate_client = translate_v3.TranslationServiceClient(credentials=creds)
-
-    if not _translate_project_id:
-        _translate_project_id = str(info.get("project_id") or "").strip()
-        if not _translate_project_id:
-            raise RuntimeError("project_id missing in Google credentials JSON")
-
-    return _translate_client, _translate_project_id
+GOOGLE_VOICE_MAP = {
+    "tr": {"male": "tr-TR-Standard-B", "female": "tr-TR-Standard-A"},
+    "en": {"male": "en-US-Standard-D", "female": "en-US-Standard-F"},
+    "de": {"male": "de-DE-Standard-B", "female": "de-DE-Standard-A"},
+    "fr": {"male": "fr-FR-Standard-B", "female": "fr-FR-Standard-A"},
+    "it": {"male": "it-IT-Standard-C", "female": "it-IT-Standard-A"},
+    "es": {"male": "es-ES-Standard-B", "female": "es-ES-Standard-A"},
+}
 
 
-def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
-    value = (text or "").strip()
-    if not value:
-        return ""
-
-    src = (from_lang or "auto").strip().lower()
-    dst = (to_lang or "tr").strip().lower()
-
-    if src == dst:
-        return value
-
-    client, project_id = _get_translate_client_and_project()
-    parent = f"projects/{project_id}/locations/global"
-
-    payload = {
-        "parent": parent,
-        "contents": [value],
-        "target_language_code": dst,
-        "mime_type": "text/plain",
-    }
-
-    if src and src != "auto":
-        payload["source_language_code"] = src
-
-    resp = client.translate_text(request=payload, timeout=3.0)
-
-    out = ""
-    if resp.translations:
-        out = (resp.translations[0].translated_text or "").strip()
-
-    if not out:
-        raise RuntimeError("Google Translate returned empty response")
-
-    return out
+def canon_lang(code: str) -> str:
+    return (code or "tr").strip().lower().replace("_", "-")
 
 
-@dataclass
-class PeerState:
-    role: str
-    lang: str
-    joined_at: float = field(default_factory=lambda: time.time())
+def lang_base(code: str) -> str:
+    return canon_lang(code).split("-")[0]
 
 
-@dataclass
-class RoomState:
-    room_id: str
-    host_code: str
-    mode: str = "interpreter"
-    host_lang: str = "tr"
-    guest_lang: Optional[str] = None
-    status: str = "waiting"
-    created_at: float = field(default_factory=lambda: time.time())
-    updated_at: float = field(default_factory=lambda: time.time())
-    peers: Dict[str, PeerState] = field(default_factory=dict)
-    sockets: Set[WebSocket] = field(default_factory=set)
+def lang_to_bcp47(code: str) -> str:
+    c = lang_base(code)
+    return LANG_BCP47.get(c, "en-US")
 
 
-ROOMS: Dict[str, RoomState] = {}
-HOST_ACTIVE_ROOM: Dict[str, str] = {}
-ROOM_LOCK = asyncio.Lock()
+def canon_voice(value: Optional[str]) -> str:
+    v = (value or "auto").strip().lower()
+    if v in ("own", "my"):
+        return "clone"
+    if v in ("female", "male", "clone"):
+        return v
+    return "auto"
 
 
-def now_ts() -> int:
-    return int(time.time())
+class FlexibleModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
 
 
-def new_room_id() -> str:
-    return secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:12]
+class TTSRequest(FlexibleModel):
+    text: str
+    lang: str = "tr"
+    voice: Optional[str] = None   # auto / male / female / clone
+    speaking_rate: float = 1.0
+    pitch: float = 0.0
+    user_id: Optional[str] = None
+    module: str = "facetoface"    # facetoface / interpreter / walkie / chat
 
 
-def get_room_or_404(room_id: str) -> RoomState:
-    room = ROOMS.get(room_id)
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    return room
-
-
-async def broadcast(room: RoomState, payload: dict):
-    dead = []
-    text = json.dumps(payload, ensure_ascii=False)
-
-    for ws in list(room.sockets):
-        try:
-            await ws.send_text(text)
-        except Exception:
-            dead.append(ws)
-
-    for ws in dead:
-        room.sockets.discard(ws)
-
-
-class CreateRoomReq(BaseModel):
-    my_lang: str = "tr"
-    host_code: str = "HOME-HOST"
-    mode: str = "interpreter"
-
-
-class CreateRoomResp(BaseModel):
+class TTSResponse(FlexibleModel):
     ok: bool
-    room_id: str
-    join_url: str
-    ws_url: str
-    status: str
+    audio_base64: Optional[str] = None
+    provider_used: Optional[str] = None
+    error: Optional[str] = None
 
 
-class ResolveRoomReq(BaseModel):
-    host_code: str
-    my_lang: str = "tr"
-    mode: str = "interpreter"
+async def get_user_profile(user_id: Optional[str]) -> Optional[dict]:
+    if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
+        return None
 
-
-class ResolveRoomResp(BaseModel):
-    ok: bool
-    room_id: str
-    host_code: str
-    status: str
-    mode: str
-    join_url: str
-    ws_url: str
-
-
-class JoinRoomReq(BaseModel):
-    room_id: str
-    my_lang: str = "en"
-
-
-class JoinRoomResp(BaseModel):
-    ok: bool
-    room_id: str
-    status: str
-
-
-class RoomResp(BaseModel):
-    ok: bool
-    room_id: str
-    host_code: str
-    mode: str
-    status: str
-    host_lang: str
-    guest_lang: Optional[str] = None
-    peer_count: int = 0
-
-
-@router.post("/interpreter/create-room", response_model=CreateRoomResp)
-async def create_room(req: CreateRoomReq):
-    room_id = new_room_id()
-    host_lang = (req.my_lang or "tr").strip().lower()
-    host_code = (req.host_code or "HOME-HOST").strip().upper()
-    mode = (req.mode or "interpreter").strip().lower()
-
-    async with ROOM_LOCK:
-        room = RoomState(
-            room_id=room_id,
-            host_code=host_code,
-            mode=mode,
-            host_lang=host_lang,
-        )
-        room.peers["host"] = PeerState(role="host", lang=host_lang)
-        ROOMS[room_id] = room
-        HOST_ACTIVE_ROOM[host_code] = room_id
-
-    join_url = f"https://italky.ai/open/interpreter?room={room_id}&v=1"
-    ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room_id}"
-
-    return CreateRoomResp(
-        ok=True,
-        room_id=room_id,
-        join_url=join_url,
-        ws_url=ws_url,
-        status=room.status,
+    url = (
+        f"{SUPABASE_URL}/rest/v1/profiles"
+        f"?id=eq.{user_id}"
+        f"&select=id,plan,tts_voice_provider,tts_voice_id,tts_voice_ready,tts_voice_preference,tts_voice"
     )
-
-
-@router.post("/interpreter/resolve-room", response_model=ResolveRoomResp)
-async def resolve_room(req: ResolveRoomReq):
-    host_code = (req.host_code or "").strip().upper()
-    my_lang = (req.my_lang or "tr").strip().lower()
-    mode = (req.mode or "interpreter").strip().lower()
-
-    if not host_code:
-        raise HTTPException(status_code=422, detail="host_code is required")
-
-    async with ROOM_LOCK:
-        room_id = HOST_ACTIVE_ROOM.get(host_code)
-        room: Optional[RoomState] = None
-
-        if room_id:
-            room = ROOMS.get(room_id)
-            if not room:
-                HOST_ACTIVE_ROOM.pop(host_code, None)
-
-        if not room:
-            room_id = new_room_id()
-            room = RoomState(
-                room_id=room_id,
-                host_code=host_code,
-                mode=mode,
-                host_lang=my_lang,
-            )
-            room.peers["host"] = PeerState(role="host", lang=my_lang)
-            ROOMS[room_id] = room
-            HOST_ACTIVE_ROOM[host_code] = room_id
-
-        room.updated_at = time.time()
-
-    join_url = f"https://italky.ai/open/interpreter?room={room.room_id}&v=1"
-    ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room.room_id}"
-
-    return ResolveRoomResp(
-        ok=True,
-        room_id=room.room_id,
-        host_code=host_code,
-        status=room.status,
-        mode=room.mode,
-        join_url=join_url,
-        ws_url=ws_url,
-    )
-
-
-@router.post("/interpreter/join-room", response_model=JoinRoomResp)
-async def join_room(req: JoinRoomReq):
-    room_id = (req.room_id or "").strip()
-    guest_lang = (req.my_lang or "en").strip().lower()
-
-    if not room_id:
-        raise HTTPException(status_code=422, detail="room_id is required")
-
-    async with ROOM_LOCK:
-        room = get_room_or_404(room_id)
-        room.guest_lang = guest_lang
-        room.peers["guest"] = PeerState(role="guest", lang=guest_lang)
-        room.status = "active"
-        room.updated_at = time.time()
-
-    await broadcast(room, {
-        "type": "peer_joined",
-        "room_id": room_id,
-        "status": room.status,
-        "guest_lang": guest_lang,
-        "ts": now_ts(),
-    })
-
-    return JoinRoomResp(ok=True, room_id=room_id, status=room.status)
-
-
-@router.get("/interpreter/room/{room_id}", response_model=RoomResp)
-async def get_room(room_id: str):
-    room = get_room_or_404(room_id)
-    return RoomResp(
-        ok=True,
-        room_id=room.room_id,
-        host_code=room.host_code,
-        mode=room.mode,
-        status=room.status,
-        host_lang=room.host_lang,
-        guest_lang=room.guest_lang,
-        peer_count=len(room.peers),
-    )
-
-
-@router.get("/interpreter/health")
-async def interpreter_health():
-    return {
-        "ok": True,
-        "rooms": len(ROOMS),
-        "active_hosts": len(HOST_ACTIVE_ROOM),
-    }
-
-
-@router.websocket("/ws/interpreter/{room_id}")
-async def interpreter_ws(websocket: WebSocket, room_id: str):
-    await websocket.accept()
-
-    role = (websocket.query_params.get("role") or "guest").strip().lower()
-    my_lang = (websocket.query_params.get("lang") or "en").strip().lower()
-
-    room = ROOMS.get(room_id)
-    if not room:
-        await websocket.send_text(json.dumps({
-            "type": "error",
-            "message": "Room not found",
-            "ts": now_ts(),
-        }, ensure_ascii=False))
-        await websocket.close()
-        return
-
-    room.sockets.add(websocket)
-    room.updated_at = time.time()
-
-    if role not in room.peers:
-        room.peers[role] = PeerState(role=role, lang=my_lang)
-
-    await broadcast(room, {
-        "type": "presence",
-        "room_id": room_id,
-        "host_code": room.host_code,
-        "mode": room.mode,
-        "status": room.status,
-        "host_lang": room.host_lang,
-        "guest_lang": room.guest_lang,
-        "peer_count": len(room.peers),
-        "ts": now_ts(),
-    })
 
     try:
-        while True:
-            raw = await websocket.receive_text()
-            data = json.loads(raw)
-            mtype = str(data.get("type") or "").strip()
-
-            if mtype == "ping":
-                await websocket.send_text(
-                    json.dumps({"type": "pong", "ts": now_ts()}, ensure_ascii=False)
-                )
-                continue
-
-            if mtype == "typing":
-                await broadcast(room, {
-                    "type": "typing",
-                    "sender": role,
-                    "ts": now_ts(),
-                })
-                continue
-
-            if mtype == "text_message":
-                original_text = str(data.get("text") or "").strip()
-                from_lang = str(data.get("from_lang") or my_lang).strip().lower()
-                to_lang = str(data.get("to_lang") or "").strip().lower()
-
-                if not original_text:
-                    continue
-
-                if not to_lang:
-                    if role == "host":
-                        to_lang = room.guest_lang or "en"
-                    else:
-                        to_lang = room.host_lang or "tr"
-
-                try:
-                    translated = translate_with_google(original_text, from_lang, to_lang)
-                except Exception as e:
-                    logger.exception("INTERPRETER_TRANSLATE_FAIL %s", e)
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": f"Translation failed: {e}",
-                        "ts": now_ts(),
-                    }, ensure_ascii=False))
-                    continue
-
-                await broadcast(room, {
-                    "type": "translated_message",
-                    "sender": role,
-                    "original_text": original_text,
-                    "translated_text": translated,
-                    "from_lang": from_lang,
-                    "to_lang": to_lang,
-                    "ts": now_ts(),
-                })
-
-    except WebSocketDisconnect:
-        room.sockets.discard(websocket)
-        room.updated_at = time.time()
-
-        async with ROOM_LOCK:
-            room.peers.pop(role, None)
-
-            if role == "guest":
-                room.guest_lang = None
-                room.status = "waiting"
-
-            if not room.sockets:
-                if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
-                    HOST_ACTIVE_ROOM.pop(room.host_code, None)
-
-        await broadcast(room, {
-            "type": "peer_left",
-            "sender": role,
-            "message": "Karşı taraf odadan ayrıldı.",
-            "ts": now_ts(),
-        })
-
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(
+                url,
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                },
+            )
+        if r.status_code >= 400:
+            logger.error("TTS_PROFILE_FETCH_FAIL %s %s", r.status_code, r.text[:400])
+            return None
+        arr = r.json()
+        return arr[0] if arr else None
     except Exception as e:
-        logger.exception("INTERPRETER_WS_ERROR %s", e)
-        room.sockets.discard(websocket)
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+        logger.exception("TTS_PROFILE_FETCH_EXCEPTION: %s", e)
+        return None
+
+
+def pick_google_voice(lang: str, voice: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    base = lang_base(lang)
+    v = canon_voice(voice)
+
+    if v == "male":
+        return GOOGLE_VOICE_MAP.get(base, {}).get("male"), "MALE"
+
+    if v == "female":
+        return GOOGLE_VOICE_MAP.get(base, {}).get("female"), "FEMALE"
+
+    return None, None
+
+
+async def google_tts(
+    text: str,
+    lang: str,
+    voice: Optional[str],
+    speaking_rate: float,
+    pitch: float
+) -> Optional[str]:
+    if not GOOGLE_API_KEY:
+        logger.warning("TTS_GOOGLE: GOOGLE_API_KEY missing")
+        return None
+
+    bcp47 = lang_to_bcp47(lang)
+    voice_name, gender = pick_google_voice(lang, voice)
+
+    voice_cfg: Dict[str, Any] = {"languageCode": bcp47}
+    if voice_name:
+        voice_cfg["name"] = voice_name
+    elif gender:
+        voice_cfg["ssmlGender"] = gender
+
+    payload = {
+        "input": {"text": text},
+        "voice": voice_cfg,
+        "audioConfig": {
+            "audioEncoding": "MP3",
+            "speakingRate": float(speaking_rate or 1.0),
+            "pitch": float(pitch or 0.0),
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(
+                f"{GOOGLE_TTS_URL}?key={GOOGLE_API_KEY}",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+        if r.status_code >= 400:
+            logger.error("TTS_FAIL_GOOGLE %s %s", r.status_code, r.text[:700])
+            return None
+        data = r.json()
+        return (data.get("audioContent") or "").strip() or None
+    except Exception as e:
+        logger.exception("TTS_GOOGLE_EXCEPTION: %s", e)
+        return None
+
+
+async def cartesia_tts(text: str, lang: str, voice_id: str) -> Optional[str]:
+    if not CARTESIA_API_KEY or not voice_id:
+        return None
+
+    payload = {
+        "model_id": CARTESIA_MODEL_ID,
+        "transcript": text,
+        "voice": {
+            "mode": "id",
+            "id": voice_id,
+        },
+        "output_format": {
+            "container": "mp3",
+            "bit_rate": 128000,
+            "sample_rate": 44100,
+        },
+        "language": lang_base(lang),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                CARTESIA_TTS_URL,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {CARTESIA_API_KEY}",
+                    "Cartesia-Version": CARTESIA_VERSION,
+                    "Content-Type": "application/json",
+                },
+            )
+        if r.status_code >= 400:
+            logger.error("TTS_FAIL_CARTESIA %s %s", r.status_code, r.text[:500])
+            return None
+        if not r.content:
+            return None
+        return base64.b64encode(r.content).decode("utf-8")
+    except Exception as e:
+        logger.exception("TTS_CARTESIA_EXCEPTION: %s", e)
+        return None
+
+
+@router.post("/tts", response_model=TTSResponse)
+async def tts(req: TTSRequest) -> TTSResponse:
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text is required")
+
+    module = str(req.module or "facetoface").lower().strip()
+    requested_voice = canon_voice(req.voice)
+
+    profile = await get_user_profile(req.user_id)
+
+    voice_ready = bool((profile or {}).get("tts_voice_ready"))
+    voice_id = str((profile or {}).get("tts_voice_id") or "").strip()
+
+    profile_pref = canon_voice(
+        (profile or {}).get("tts_voice_preference") or
+        (profile or {}).get("tts_voice") or
+        "auto"
+    )
+
+    effective_voice = requested_voice if requested_voice != "auto" else profile_pref
+
+    # 1) Kullanıcı clone istediyse ve özel ses hazırsa önce onu dene
+    if effective_voice == "clone" and voice_ready and voice_id:
+        audio = await cartesia_tts(
+            text=text,
+            lang=req.lang,
+            voice_id=voice_id
+        )
+        if audio:
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-clone")
+
+    # 2) FaceToFace / Interpreter için auto olsa bile profilde clone varsa özel sesi öncelikle dene
+    if module in ("facetoface", "interpreter") and voice_ready and voice_id and effective_voice in ("auto", "clone"):
+        audio = await cartesia_tts(
+            text=text,
+            lang=req.lang,
+            voice_id=voice_id
+        )
+        if audio:
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia")
+
+    # 3) Google fallback
+    g = await google_tts(
+        text=text,
+        lang=req.lang,
+        voice=effective_voice,
+        speaking_rate=req.speaking_rate,
+        pitch=req.pitch
+    )
+    if g:
+        return TTSResponse(ok=True, audio_base64=g, provider_used="google")
+
+    return TTSResponse(ok=False, provider_used="none", error="TTS_UNAVAILABLE")
