@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from app.routers.ui_translate import router as ui_translate_router
+from app.routers import alltoall_ws
 
 # CORE ROUTERS
 from app.routers import chat_ai
@@ -104,6 +105,7 @@ app.include_router(ocr_translate.router, prefix="/api")
 app.include_router(interpreter.router, prefix="/api")
 app.include_router(voice_enroll.router, prefix="/api")
 app.include_router(chat_ai.router, prefix="/api")
+app.include_router(alltoall_ws.router, prefix="/api")
 
 # UI TRANSLATE
 app.include_router(ui_translate_router, prefix="/api")
