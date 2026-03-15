@@ -32,13 +32,13 @@ def now() -> float:
 
 def norm_room_id(room_id: str) -> str:
     s = (room_id or "").strip().upper()
-    s = "".join(ch for ch in s if ch.isalnum())
+    s = "".(ch for ch in s if ch.isalnum())
     return s[:6]
 
 
 def new_room_code() -> str:
     chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".join(secrets.choice(chars) for _ in range(6))
+    return "".(secrets.choice(chars) for _ in range(6))
 
 
 def clean_name(value: str, fallback: str = "User") -> str:
@@ -282,44 +282,6 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                 await ws_send(ws, {"type": "room_ok" if r else "room_not_found"})
                 continue
 
-            if mtype == "create":
-                if joined_room is not None:
-                    await ws_send(ws, {"type": "error", "message": "ALREADY_JOINED"})
-                    continue
-
-                r = get_room(rid)
-                if r is None:
-                    r = create_room(rid)
-
-                if len(r["clients"]) >= MAX_PARTICIPANTS:
-                    await ws_send(ws, {"type": "error", "message": "ROOM_FULL"})
-                    await ws.close()
-                    return
-
-                joined_room = r
-                my_meta = {
-                    "from": str(msg.get("from") or ""),
-                    "from_name": clean_name(msg.get("from_name"), "Host"),
-                    "from_pic": clean_pic(msg.get("from_pic")),
-                    "me_lang": clean_lang(msg.get("me_lang"), "tr"),
-                    "role": "host",
-                    "user_id": clean_user_id(msg.get("user_id")),
-                }
-
-                r["clients"].add(ws)
-                r["meta"][ws] = my_meta
-                r["updated_at"] = now()
-
-                await ws_send(ws, {
-                    "type": "room_created",
-                    "room": rid,
-                    "max_participants": MAX_PARTICIPANTS,
-                    "ttl_sec": ROOM_TTL_SEC,
-                    "self": my_meta,
-                })
-                await send_presence(r)
-                continue
-
             if mtype == "join":
                 if joined_room is not None:
                     await ws_send(ws, {"type": "error", "message": "ALREADY_JOINED"})
@@ -329,7 +291,18 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                 if r is None:
                     await ws_send(ws, {
                         "type": "room_not_found",
-                        "message": "Kod hatalı olabilir veya oda kapanmış olabilir."
+                        "message": "Kanal henüz oluşturulmamış veya kapanmış."
+                    })
+                    await ws.close()
+                    return
+
+                roster = build_roster(r)
+                has_host = any((x.get("role") == "host") for x in roster)
+
+                if not has_host:
+                    await ws_send(ws, {
+                        "type": "error",
+                        "message": "HOST_NOT_READY"
                     })
                     await ws.close()
                     return
@@ -368,55 +341,6 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                     "roster": build_roster(r),
                 })
                 await send_presence(r)
-                continue
-
-            if mtype == "profile_sync":
-                if joined_room is None:
-                    await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
-                    continue
-
-                old = joined_room["meta"].get(ws, {}) or {}
-
-                old["from_name"] = clean_name(msg.get("from_name"), old.get("from_name") or "User")
-
-                pic_candidate = clean_pic(msg.get("from_pic"))
-                if pic_candidate:
-                    old["from_pic"] = pic_candidate
-
-                old["me_lang"] = clean_lang(msg.get("me_lang"), old.get("me_lang") or "tr")
-
-                uid_candidate = clean_user_id(msg.get("user_id"))
-                if uid_candidate:
-                    old["user_id"] = uid_candidate
-
-                joined_room["meta"][ws] = old
-                my_meta = old
-                joined_room["updated_at"] = now()
-
-                await broadcast(joined_room, {
-                    "type": "profile_updated",
-                    "peer": my_meta,
-                    "roster": build_roster(joined_room),
-                })
-                await send_presence(joined_room)
-                continue
-
-            if mtype == "typing":
-                if joined_room is None:
-                    await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
-                    continue
-
-                await broadcast(joined_room, {
-                    "type": "typing",
-                    "from": my_meta.get("from") or "",
-                    "from_name": my_meta.get("from_name") or "User",
-                    "from_pic": my_meta.get("from_pic") or "",
-                    "role": my_meta.get("role") or "guest",
-                    "user_id": my_meta.get("user_id") or "",
-                    "ts": int(now() * 1000),
-                }, exclude=ws)
-
-                joined_room["updated_at"] = now()
                 continue
 
             if mtype == "message":
