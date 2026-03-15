@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import time
 from typing import Dict, Any, Optional, List
 
@@ -13,8 +14,8 @@ from google.cloud import translate as translate_v3
 router = APIRouter(tags=["alltoall-ws"])
 logger = logging.getLogger("italky-alltoall")
 
-ROOM_TTL_SEC = 60 * 60 * 4  # 4 saat
-MAX_PARTICIPANTS = 12
+ROOM_TTL_SEC = 60 * 60 * 4
+MAX_PARTICIPANTS = 50
 
 GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
@@ -22,16 +23,6 @@ GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").str
 _translate_client: Optional[translate_v3.TranslationServiceClient] = None
 _translate_project_id: Optional[str] = None
 
-# ROOMS[room_id] = {
-#   "created_at": float,
-#   "updated_at": float,
-#   "clients": set(WebSocket),
-#   "meta": {
-#       WebSocket: {
-#           "from","from_name","from_pic","me_lang","role","user_id"
-#       }
-#   }
-# }
 ROOMS: Dict[str, Dict[str, Any]] = {}
 
 
@@ -42,7 +33,12 @@ def now() -> float:
 def norm_room_id(room_id: str) -> str:
     s = (room_id or "").strip().upper()
     s = "".join(ch for ch in s if ch.isalnum())
-    return s[:12]
+    return s[:6]
+
+
+def new_room_code() -> str:
+    chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    return "".join(secrets.choice(chars) for _ in range(6))
 
 
 def clean_name(value: str, fallback: str = "User") -> str:
@@ -81,16 +77,20 @@ def get_room(room_id: str) -> Optional[Dict[str, Any]]:
     return r
 
 
-def create_room(room_id: str) -> Dict[str, Any]:
-    rid = norm_room_id(room_id)
-    r = {
+def create_room(room_id: Optional[str] = None) -> Dict[str, Any]:
+    rid = norm_room_id(room_id or new_room_code())
+    while rid in ROOMS:
+        rid = new_room_code()
+
+    room = {
+        "room_id": rid,
         "created_at": now(),
         "updated_at": now(),
         "clients": set(),   # type: ignore
         "meta": {},         # type: ignore
     }
-    ROOMS[rid] = r
-    return r
+    ROOMS[rid] = room
+    return room
 
 
 async def ws_send(ws: Optional[WebSocket], msg: Dict[str, Any]) -> None:
@@ -146,6 +146,7 @@ def build_roster(room: Dict[str, Any]) -> List[Dict[str, Any]]:
 async def send_presence(room: Dict[str, Any]) -> None:
     await broadcast(room, {
         "type": "presence",
+        "room": room.get("room_id") or "",
         "count": len(room["clients"]),
         "roster": build_roster(room),
         "max_participants": MAX_PARTICIPANTS,
@@ -182,9 +183,9 @@ def _get_translate_client_and_project():
         _translate_client = translate_v3.TranslationServiceClient(credentials=creds)
 
     if not _translate_project_id:
-      _translate_project_id = str(info.get("project_id") or "").strip()
-      if not _translate_project_id:
-          raise RuntimeError("project_id missing in Google credentials JSON")
+        _translate_project_id = str(info.get("project_id") or "").strip()
+        if not _translate_project_id:
+            raise RuntimeError("project_id missing in Google credentials JSON")
 
     return _translate_client, _translate_project_id
 
@@ -225,47 +226,41 @@ def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
     return out
 
 
-def translate_for_all(room: Dict[str, Any], sender_ws: WebSocket, original_text: str, from_lang: str) -> List[Dict[str, Any]]:
-    results: List[Dict[str, Any]] = []
+async def fanout_translated(room: Dict[str, Any], sender_ws: WebSocket, original_text: str, from_lang: str):
     meta = room.get("meta") or {}
-
     sender_meta = meta.get(sender_ws, {}) or {}
+
     sender_name = str(sender_meta.get("from_name") or "User")
     sender_pic = str(sender_meta.get("from_pic") or "")
     sender_id = str(sender_meta.get("from") or "")
     sender_user_id = str(sender_meta.get("user_id") or "")
     sender_role = str(sender_meta.get("role") or "guest")
 
-    for target_ws, target_meta in meta.items():
-        if target_ws is sender_ws:
-            continue
+    for target_ws, target_meta in list(meta.items()):
+      if target_ws is sender_ws:
+          continue
 
-        to_lang = clean_lang(target_meta.get("me_lang"), "tr")
+      to_lang = clean_lang(target_meta.get("me_lang"), "tr")
 
-        try:
-            translated = translate_with_google(original_text, from_lang, to_lang)
-        except Exception as e:
-            logger.exception("ALLTOALL_TRANSLATE_FAIL %s", e)
-            translated = original_text
+      try:
+          translated = translate_with_google(original_text, from_lang, to_lang)
+      except Exception as e:
+          logger.exception("ALLTOALL_TRANSLATE_FAIL %s", e)
+          translated = original_text
 
-        results.append({
-            "ws": target_ws,
-            "payload": {
-                "type": "translated_message",
-                "from": sender_id,
-                "from_name": sender_name,
-                "from_pic": sender_pic,
-                "from_user_id": sender_user_id,
-                "role": sender_role,
-                "original_text": original_text,
-                "translated_text": translated,
-                "from_lang": from_lang,
-                "to_lang": to_lang,
-                "ts": int(now() * 1000),
-            }
-        })
-
-    return results
+      await ws_send(target_ws, {
+          "type": "translated_message",
+          "from": sender_id,
+          "from_name": sender_name,
+          "from_pic": sender_pic,
+          "from_user_id": sender_user_id,
+          "role": sender_role,
+          "original_text": original_text,
+          "translated_text": translated,
+          "from_lang": from_lang,
+          "to_lang": to_lang,
+          "ts": int(now() * 1000),
+      })
 
 
 @router.websocket("/alltoall/ws/{room_id}")
@@ -334,16 +329,13 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                 if r is None:
                     await ws_send(ws, {
                         "type": "room_not_found",
-                        "message": "Kod hatalı olabilir veya sohbet odası kapanmış olabilir."
+                        "message": "Kod hatalı olabilir veya oda kapanmış olabilir."
                     })
                     await ws.close()
                     return
 
                 if len(r["clients"]) >= MAX_PARTICIPANTS:
-                    await ws_send(ws, {
-                        "type": "error",
-                        "message": "ROOM_FULL",
-                    })
+                    await ws_send(ws, {"type": "error", "message": "ROOM_FULL"})
                     await ws.close()
                     return
 
@@ -427,7 +419,7 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                 joined_room["updated_at"] = now()
                 continue
 
-            if mtype == "text_message":
+            if mtype == "message":
                 if joined_room is None:
                     await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
                     continue
@@ -436,12 +428,9 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                 if not text:
                     continue
 
-                from_lang = clean_lang(msg.get("from_lang"), my_meta.get("me_lang") or "tr")
+                from_lang = clean_lang(msg.get("lang"), my_meta.get("me_lang") or "tr")
                 joined_room["updated_at"] = now()
 
-                translated_packets = translate_for_all(joined_room, ws, text, from_lang)
-
-                # sender'a echo bilgi
                 await ws_send(ws, {
                     "type": "message_sent",
                     "text": text,
@@ -449,12 +438,7 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                     "ts": int(now() * 1000),
                 })
 
-                for item in translated_packets:
-                    try:
-                        await ws_send(item["ws"], item["payload"])
-                    except Exception:
-                        pass
-
+                await fanout_translated(joined_room, ws, text, from_lang)
                 continue
 
             await ws_send(ws, {"type": "error", "message": "UNKNOWN_TYPE"})
