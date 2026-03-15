@@ -38,7 +38,7 @@ def norm_room_id(room_id: str) -> str:
 
 def new_room_code() -> str:
     chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    return "".(secrets.choice(chars) for _ in range(6))
+    return "".join(secrets.choice(chars) for _ in range(6))
 
 
 def clean_name(value: str, fallback: str = "User") -> str:
@@ -86,8 +86,8 @@ def create_room(room_id: Optional[str] = None) -> Dict[str, Any]:
         "room_id": rid,
         "created_at": now(),
         "updated_at": now(),
-        "clients": set(),   # type: ignore
-        "meta": {},         # type: ignore
+        "clients": set(),
+        "meta": {},
     }
     ROOMS[rid] = room
     return room
@@ -237,30 +237,30 @@ async def fanout_translated(room: Dict[str, Any], sender_ws: WebSocket, original
     sender_role = str(sender_meta.get("role") or "guest")
 
     for target_ws, target_meta in list(meta.items()):
-      if target_ws is sender_ws:
-          continue
+        if target_ws is sender_ws:
+            continue
 
-      to_lang = clean_lang(target_meta.get("me_lang"), "tr")
+        to_lang = clean_lang(target_meta.get("me_lang"), "tr")
 
-      try:
-          translated = translate_with_google(original_text, from_lang, to_lang)
-      except Exception as e:
-          logger.exception("ALLTOALL_TRANSLATE_FAIL %s", e)
-          translated = original_text
+        try:
+            translated = translate_with_google(original_text, from_lang, to_lang)
+        except Exception as e:
+            logger.exception("ALLTOALL_TRANSLATE_FAIL %s", e)
+            translated = original_text
 
-      await ws_send(target_ws, {
-          "type": "translated_message",
-          "from": sender_id,
-          "from_name": sender_name,
-          "from_pic": sender_pic,
-          "from_user_id": sender_user_id,
-          "role": sender_role,
-          "original_text": original_text,
-          "translated_text": translated,
-          "from_lang": from_lang,
-          "to_lang": to_lang,
-          "ts": int(now() * 1000),
-      })
+        await ws_send(target_ws, {
+            "type": "translated_message",
+            "from": sender_id,
+            "from_name": sender_name,
+            "from_pic": sender_pic,
+            "from_user_id": sender_user_id,
+            "role": sender_role,
+            "original_text": original_text,
+            "translated_text": translated,
+            "from_lang": from_lang,
+            "to_lang": to_lang,
+            "ts": int(now() * 1000),
+        })
 
 
 @router.websocket("/alltoall/ws/{room_id}")
@@ -280,6 +280,44 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
             if mtype == "join_check":
                 r = get_room(rid)
                 await ws_send(ws, {"type": "room_ok" if r else "room_not_found"})
+                continue
+
+            if mtype == "create":
+                if joined_room is not None:
+                    await ws_send(ws, {"type": "error", "message": "ALREADY_JOINED"})
+                    continue
+
+                r = get_room(rid)
+                if r is None:
+                    r = create_room(rid)
+
+                if len(r["clients"]) >= MAX_PARTICIPANTS:
+                    await ws_send(ws, {"type": "error", "message": "ROOM_FULL"})
+                    await ws.close()
+                    return
+
+                joined_room = r
+                my_meta = {
+                    "from": str(msg.get("from") or ""),
+                    "from_name": clean_name(msg.get("from_name"), "Host"),
+                    "from_pic": clean_pic(msg.get("from_pic")),
+                    "me_lang": clean_lang(msg.get("me_lang"), "tr"),
+                    "role": "host",
+                    "user_id": clean_user_id(msg.get("user_id")),
+                }
+
+                r["clients"].add(ws)
+                r["meta"][ws] = my_meta
+                r["updated_at"] = now()
+
+                await ws_send(ws, {
+                    "type": "room_created",
+                    "room": rid,
+                    "max_participants": MAX_PARTICIPANTS,
+                    "ttl_sec": ROOM_TTL_SEC,
+                    "self": my_meta,
+                })
+                await send_presence(r)
                 continue
 
             if mtype == "join":
@@ -341,6 +379,55 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                     "roster": build_roster(r),
                 })
                 await send_presence(r)
+                continue
+
+            if mtype == "profile_sync":
+                if joined_room is None:
+                    await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
+                    continue
+
+                old = joined_room["meta"].get(ws, {}) or {}
+
+                old["from_name"] = clean_name(msg.get("from_name"), old.get("from_name") or "User")
+
+                pic_candidate = clean_pic(msg.get("from_pic"))
+                if pic_candidate:
+                    old["from_pic"] = pic_candidate
+
+                old["me_lang"] = clean_lang(msg.get("me_lang"), old.get("me_lang") or "tr")
+
+                uid_candidate = clean_user_id(msg.get("user_id"))
+                if uid_candidate:
+                    old["user_id"] = uid_candidate
+
+                joined_room["meta"][ws] = old
+                my_meta = old
+                joined_room["updated_at"] = now()
+
+                await broadcast(joined_room, {
+                    "type": "profile_updated",
+                    "peer": my_meta,
+                    "roster": build_roster(joined_room),
+                })
+                await send_presence(joined_room)
+                continue
+
+            if mtype == "typing":
+                if joined_room is None:
+                    await ws_send(ws, {"type": "error", "message": "NOT_IN_ROOM"})
+                    continue
+
+                await broadcast(joined_room, {
+                    "type": "typing",
+                    "from": my_meta.get("from") or "",
+                    "from_name": my_meta.get("from_name") or "User",
+                    "from_pic": my_meta.get("from_pic") or "",
+                    "role": my_meta.get("role") or "guest",
+                    "user_id": my_meta.get("user_id") or "",
+                    "ts": int(now() * 1000),
+                }, exclude=ws)
+
+                joined_room["updated_at"] = now()
                 continue
 
             if mtype == "message":
