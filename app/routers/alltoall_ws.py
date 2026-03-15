@@ -279,7 +279,27 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
 
             if mtype == "join_check":
                 r = get_room(rid)
-                await ws_send(ws, {"type": "room_ok" if r else "room_not_found"})
+                if r is None:
+                    await ws_send(ws, {
+                        "type": "room_not_found",
+                        "message": "Kanal henüz oluşturulmamış."
+                    })
+                    continue
+
+                roster = build_roster(r)
+                has_host = any((x.get("role") == "host") for x in roster)
+
+                if not has_host:
+                    await ws_send(ws, {
+                        "type": "host_not_ready",
+                        "message": "Host henüz kanala giriş yapmadı."
+                    })
+                    continue
+
+                await ws_send(ws, {
+                    "type": "room_ok",
+                    "message": "Kanal hazır."
+                })
                 continue
 
             if mtype == "create":
