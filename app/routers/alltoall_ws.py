@@ -32,8 +32,8 @@ def now() -> float:
 
 def norm_room_id(room_id: str) -> str:
     s = (room_id or "").strip().upper()
-    s = "".(ch for ch in s if ch.isalnum())
-    return s[:6]
+    s = "".join(ch for ch in s if ch.isalnum())
+    return s[:8]
 
 
 def new_room_code() -> str:
