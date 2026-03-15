@@ -365,7 +365,8 @@ async def alltoall_ws(ws: WebSocket, room_id: str):
                 await fanout_translated(joined_room, ws, text, from_lang)
                 continue
 
-            await ws_send(ws, {"type": "error", "message": "UNKNOWN_TYPE"})
+            logger.warning("ALLTOALL_UNKNOWN_TYPE: %s", mtype)
+            await ws_send(ws, {"type": "error", "message": f"UNKNOWN_TYPE:{mtype}"})
 
     except WebSocketDisconnect:
         pass
