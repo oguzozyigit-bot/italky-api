@@ -60,7 +60,6 @@ async def activate_file(req: OfflineFileReq):
         raise HTTPException(status_code=404, detail="profile not found")
 
     tokens = int((prof.data[0] or {}).get("tokens") or 0)
-
     now_utc = datetime.now(timezone.utc)
 
     existing = (
