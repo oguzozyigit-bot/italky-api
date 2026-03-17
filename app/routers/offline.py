@@ -1,212 +1,154 @@
-# FILE: italky-api/app/routers/offline.py
 from __future__ import annotations
 
-import os
-import time
-from typing import Optional, Dict, Any
-
-from fastapi import APIRouter, HTTPException, Header
-from pydantic import BaseModel, Field
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from supabase import create_client, Client
+import os
 
-router = APIRouter(tags=["offline"])
+router = APIRouter(tags=["offline-files"])
 
-SUPABASE_URL = (os.getenv("SUPABASE_URL") or "").strip()
-SUPABASE_SERVICE_ROLE = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-STORAGE_BUCKET = "offline"
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
-sb: Optional[Client] = None
-if SUPABASE_URL and SUPABASE_SERVICE_ROLE:
-    sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE)
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+OFFLINE_PRICE_TOKENS = 5
+OFFLINE_DURATION_DAYS = 365
+
+
+class OfflineFileReq(BaseModel):
+    user_id: str
+    file_name: str
+
+
+def parse_dt(value) -> datetime | None:
+    try:
+        if not value:
+            return None
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
 
 # =========================
-# SCHEMAS
+# DOSYA AKTİF ET / YENİLE
 # =========================
-class OfflineLinkReq(BaseModel):
-    base_lang: str = Field(..., min_length=2, max_length=16)
-    target_lang: str = Field(..., min_length=2, max_length=16)
+@router.post("/api/offline/files/activate")
+async def activate_file(req: OfflineFileReq):
+    user_id = (req.user_id or "").strip()
+    file_name = (req.file_name or "").strip()
 
-class OfflineLinkResp(BaseModel):
-    ok: bool
-    pair_1: str
-    pair_2: str
-    url_1: str
-    url_2: str
+    if not user_id:
+        raise HTTPException(status_code=422, detail="user_id required")
 
-# Backward-compatible response for older frontend
-class OfflineSingleLinkResp(BaseModel):
-    ok: bool
-    url: str
+    if not file_name:
+        raise HTTPException(status_code=422, detail="file_name required")
 
-# =========================
-# HELPERS
-# =========================
-def _norm(code: str) -> str:
-    return (code or "").strip().lower().replace("_", "-")
-
-def _require_bearer(authorization: Optional[str]) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Authorization missing")
-    return authorization.replace("Bearer ", "").strip()
-
-def _storage_path(pair_code: str) -> str:
-    # Bucket içinde: langpacks/en-tr/model.zip
-    return f"langpacks/{pair_code}/model.zip"
-
-def _public_url(path: str) -> str:
-    """
-    Bucket public olduğu için: signed link gerekmeden public URL üretir.
-    """
-    if sb is None:
-        return ""
-    out = sb.storage.from_(STORAGE_BUCKET).get_public_url(path)
-    # supabase-py bazen string, bazen dict döndürür
-    if isinstance(out, str):
-        return out
-    if isinstance(out, dict):
-        data = out.get("data") if isinstance(out.get("data"), dict) else {}
-        return (
-            data.get("publicUrl")
-            or data.get("public_url")
-            or out.get("publicUrl")
-            or out.get("public_url")
-            or out.get("url")
-            or ""
-        )
-    return ""
-
-def _signed_url(path: str, seconds: int = 60) -> str:
-    """
-    İleride bucket private yapılırsa diye: signed URL opsiyonu.
-    Şu an public kullandığımız için zorunlu değil.
-    """
-    if sb is None:
-        return ""
-    signed = sb.storage.from_(STORAGE_BUCKET).create_signed_url(path, seconds)
-    if not signed:
-        return ""
-    data = signed.get("data") if isinstance(signed, dict) else None
-    if isinstance(data, dict):
-        signed = {**signed, **data}
-    return (
-        signed.get("signedURL")
-        or signed.get("signedUrl")
-        or signed.get("signed_url")
-        or signed.get("url")
-        or ""
+    prof = (
+        supabase.table("profiles")
+        .select("tokens")
+        .eq("id", user_id)
+        .limit(1)
+        .execute()
     )
 
-async def _get_user_id_from_access_token(access_token: str) -> str:
-    """
-    (Opsiyonel) Signed link + yetkilendirme gerektiğinde kullanılır.
-    Şu an offline FREE + public ise bu fonksiyon kullanılmayabilir.
-    """
-    if sb is None:
-        return ""
-    try:
-        try:
-            user = sb.auth.get_user(jwt=access_token)
-        except TypeError:
-            user = sb.auth.get_user(access_token)
+    if not prof.data:
+        raise HTTPException(status_code=404, detail="profile not found")
 
-        if isinstance(user, dict):
-            u = user.get("user") or {}
-            return str(u.get("id") or "")
+    tokens = int((prof.data[0] or {}).get("tokens") or 0)
 
-        uobj = getattr(user, "user", None)
-        if uobj and getattr(uobj, "id", None):
-            return str(uobj.id)
+    now_utc = datetime.now(timezone.utc)
 
-        try:
-            return str(user.user.id)
-        except Exception:
-            return ""
-    except Exception:
-        return ""
+    existing = (
+        supabase.table("offline_files")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("file_name", file_name)
+        .limit(1)
+        .execute()
+    )
 
-# =========================
-# ✅ FREE + PUBLIC LINKS (NO LOGIN)
-# =========================
-@router.post("/offline/public_links", response_model=OfflineLinkResp)
-async def get_offline_public_links(req: OfflineLinkReq):
-    """
-    ✅ OFFLINE FREE model:
-    - Login yok
-    - Paket/jeton yok
-    - Bucket public -> public URL veriyoruz
-    """
-    if sb is None:
-        raise HTTPException(status_code=500, detail="Offline service misconfigured (Supabase ENV missing)")
+    # Aktif lisans varsa tekrar ücret alma
+    if existing.data:
+        row = existing.data[0]
+        current_exp = parse_dt(row.get("expires_at"))
 
-    base = _norm(req.base_lang)
-    target = _norm(req.target_lang)
-    if not base or not target or base == target:
-        raise HTTPException(status_code=400, detail="Dil parametresi hatalı")
+        if current_exp and current_exp > now_utc:
+            return {
+                "ok": True,
+                "already_active": True,
+                "tokens": tokens,
+                "price_tokens": OFFLINE_PRICE_TOKENS,
+                "expires_at": current_exp.isoformat(),
+                "duration_days": OFFLINE_DURATION_DAYS
+            }
 
-    pair_1 = f"{base}-{target}"
-    pair_2 = f"{target}-{base}"
+    if tokens < OFFLINE_PRICE_TOKENS:
+        raise HTTPException(status_code=402, detail="insufficient_tokens")
 
-    p1 = _storage_path(pair_1)
-    p2 = _storage_path(pair_2)
+    expires = now_utc + timedelta(days=OFFLINE_DURATION_DAYS)
 
-    url1 = _public_url(p1)
-    url2 = _public_url(p2)
-    if not url1 or not url2:
-        raise HTTPException(status_code=404, detail="Dosya bulunamadı (storage path yanlış olabilir)")
+    if existing.data:
+        supabase.table("offline_files").update({
+            "expires_at": expires.isoformat()
+        }).eq("id", existing.data[0]["id"]).execute()
+    else:
+        supabase.table("offline_files").insert({
+            "user_id": user_id,
+            "file_name": file_name,
+            "expires_at": expires.isoformat()
+        }).execute()
 
-    return OfflineLinkResp(ok=True, pair_1=pair_1, pair_2=pair_2, url_1=url1, url_2=url2)
+    next_tokens = tokens - OFFLINE_PRICE_TOKENS
 
-# =========================
-# ✅ BACKWARD COMPAT: /offline/get_link  (tek dosya isteyen eski frontend)
-# =========================
-@router.post("/offline/get_link", response_model=OfflineSingleLinkResp)
-async def get_offline_single_public_link(req: Dict[str, Any]):
-    """
-    Eski sayfalar tek link istiyordu.
-    Body örn: { base_lang:"tr", target_lang:"en" }
-    """
-    base = _norm(str(req.get("base_lang") or ""))
-    target = _norm(str(req.get("target_lang") or ""))
-    if not base or not target or base == target:
-        raise HTTPException(status_code=400, detail="Dil parametresi hatalı")
+    supabase.table("profiles").update({
+        "tokens": next_tokens
+    }).eq("id", user_id).execute()
 
-    path = _storage_path(f"{base}-{target}")
-    url = _public_url(path)
-    if not url:
-        raise HTTPException(status_code=404, detail="Dosya bulunamadı")
-    return OfflineSingleLinkResp(ok=True, url=url)
+    return {
+        "ok": True,
+        "already_active": False,
+        "tokens": next_tokens,
+        "price_tokens": OFFLINE_PRICE_TOKENS,
+        "expires_at": expires.isoformat(),
+        "duration_days": OFFLINE_DURATION_DAYS
+    }
+
 
 # =========================
-# (OPTIONAL) SIGNED + AUTH LINKS (ileride tekrar ücretli/limitli istersen)
+# DOSYA LİSTESİ
 # =========================
-@router.post("/offline/get_links", response_model=OfflineLinkResp)
-async def get_offline_signed_links(req: OfflineLinkReq, authorization: Optional[str] = Header(None)):
-    """
-    Bu endpointi şimdilik KULLANMA.
-    İleride bucket private yaparsan veya erişimi kısıtlamak istersen devreye alırsın.
-    """
-    if sb is None:
-        raise HTTPException(status_code=500, detail="Offline service misconfigured (Supabase ENV missing)")
-
-    token = _require_bearer(authorization)
-    user_id = await _get_user_id_from_access_token(token)
+@router.get("/api/offline/files/list")
+async def list_files(user_id: str):
     if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=422, detail="user_id required")
 
-    base = _norm(req.base_lang)
-    target = _norm(req.target_lang)
-    if not base or not target or base == target:
-        raise HTTPException(status_code=400, detail="Dil parametresi hatalı")
+    rows = (
+        supabase.table("offline_files")
+        .select("*")
+        .eq("user_id", user_id)
+        .execute()
+    )
 
-    pair_1 = f"{base}-{target}"
-    pair_2 = f"{target}-{base}"
+    now_utc = datetime.now(timezone.utc)
+    items = []
 
-    p1 = _storage_path(pair_1)
-    p2 = _storage_path(pair_2)
+    for r in rows.data or []:
+        exp = parse_dt(r.get("expires_at"))
+        active = bool(exp and exp > now_utc)
 
-    url1 = _signed_url(p1, 60)
-    url2 = _signed_url(p2, 60)
-    if not url1 or not url2:
-        raise HTTPException(status_code=404, detail="Signed link üretilemedi")
+        items.append({
+            **r,
+            "active": active
+        })
 
-    return OfflineLinkResp(ok=True, pair_1=pair_1, pair_2=pair_2, url_1=url1, url_2=url2)
+    return {
+        "ok": True,
+        "items": items,
+        "price_tokens": OFFLINE_PRICE_TOKENS,
+        "duration_days": OFFLINE_DURATION_DAYS
+    }
