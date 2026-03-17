@@ -653,6 +653,7 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 original_text = str(data.get("text") or "").strip()
                 from_lang = str(data.get("from_lang") or my_lang).strip().lower()
                 to_lang = str(data.get("to_lang") or "").strip().lower()
+                sender_id = str(data.get("sender_id") or "").strip()
 
                 if not original_text:
                     continue
@@ -686,6 +687,7 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     {
                         "type": "translated_message",
                         "sender": role,
+                        "sender_id": sender_id,
                         "original_text": original_text,
                         "translated_text": translated,
                         "from_lang": from_lang,
