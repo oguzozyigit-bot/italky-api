@@ -355,6 +355,22 @@ async def broadcast(room: RoomState, payload: dict):
         room.sockets.discard(ws)
 
 
+async def broadcast_except_sender(room: RoomState, payload: dict, sender_ws: WebSocket):
+    dead = []
+    text = json.dumps(payload, ensure_ascii=False)
+
+    for ws in list(room.sockets):
+        if ws is sender_ws:
+            continue
+        try:
+            await ws.send_text(text)
+        except Exception:
+            dead.append(ws)
+
+    for ws in dead:
+        room.sockets.discard(ws)
+
+
 class CreateRoomReq(BaseModel):
     my_lang: str = "tr"
     host_code: str = "HOME-HOST"
@@ -637,8 +653,6 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 original_text = str(data.get("text") or "").strip()
                 from_lang = str(data.get("from_lang") or my_lang).strip().lower()
                 to_lang = str(data.get("to_lang") or "").strip().lower()
-                sender_user_id = str(data.get("user_id") or "").strip()
-                sender_client_session_id = str(data.get("client_session_id") or "").strip()
 
                 if not original_text:
                     continue
@@ -667,19 +681,18 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     )
                     continue
 
-                await broadcast(
+                await broadcast_except_sender(
                     room,
                     {
                         "type": "translated_message",
                         "sender": role,
-                        "user_id": sender_user_id,
-                        "client_session_id": sender_client_session_id,
                         "original_text": original_text,
                         "translated_text": translated,
                         "from_lang": from_lang,
                         "to_lang": to_lang,
                         "ts": now_ts(),
                     },
+                    websocket,
                 )
                 continue
 
