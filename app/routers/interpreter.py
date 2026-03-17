@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Set
 
+import httpx
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
@@ -94,6 +95,89 @@ def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
 
     if not out:
         raise RuntimeError("Google Translate returned empty response")
+
+    return out
+
+
+def build_meaning_prompt(text: str, from_lang: str, to_lang: str) -> str:
+    return f"""
+You are an expert live interpreter.
+
+Your task:
+- Understand the user's intended meaning.
+- Fix spelling mistakes silently.
+- Understand slang, idioms, and cultural expressions.
+- Do not translate literally.
+- Translate naturally as a native speaker would say it.
+- Return only the final translated sentence.
+- Do not add explanations.
+- Do not use quotation marks.
+
+Source language: {from_lang}
+Target language: {to_lang}
+
+Text:
+{text}
+""".strip()
+
+
+async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
+    value = (text or "").strip()
+    if not value:
+        return ""
+
+    src = (from_lang or "auto").strip().lower()
+    dst = (to_lang or "tr").strip().lower()
+
+    if src == dst:
+        return value
+
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY missing")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    body = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": build_meaning_prompt(value, src, dst)
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+            "topP": 0.9,
+            "maxOutputTokens": 200
+        }
+    }
+
+    headers = {
+        "x-goog-api-key": api_key,
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(url, headers=headers, json=body)
+
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Gemini API error: {resp.status_code} {resp.text}")
+
+    data = resp.json()
+
+    try:
+        out = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception:
+        raise RuntimeError("Gemini returned empty response")
+
+    if not out:
+        raise RuntimeError("Gemini returned blank translation")
 
     return out
 
@@ -427,7 +511,7 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                         to_lang = room.host_lang or "tr"
 
                 try:
-                    translated = translate_with_google(original_text, from_lang, to_lang)
+                    translated = await translate_with_gemini(original_text, from_lang, to_lang)
                 except Exception as e:
                     logger.exception("INTERPRETER_TRANSLATE_FAIL %s", e)
                     await websocket.send_text(json.dumps({
