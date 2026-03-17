@@ -16,9 +16,8 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# 🔥 YENİ MODEL
-OFFLINE_PRICE = 5          # 5 jeton
-OFFLINE_DURATION = 365     # 12 ay
+OFFLINE_PRICE = 5
+OFFLINE_DURATION = 365
 
 
 class OfflineFileReq(BaseModel):
@@ -29,18 +28,24 @@ class OfflineFileReq(BaseModel):
 def parse_dt(value):
     try:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except:
+    except Exception:
         return None
+
+
+def norm_file_name(value: str) -> str:
+    return str(value or "").strip().lower().replace("_", "-")
 
 
 # =========================
 # AKTİVASYON
+# sadece ücretli ek diller için
+# ör: fr, de, es
 # =========================
 @router.post("/api/offline/files/activate")
 async def activate_file(req: OfflineFileReq):
 
     user_id = (req.user_id or "").strip()
-    file_name = (req.file_name or "").strip()
+    file_name = norm_file_name(req.file_name)
 
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
@@ -48,7 +53,6 @@ async def activate_file(req: OfflineFileReq):
     if not file_name:
         raise HTTPException(status_code=422, detail="file_name required")
 
-    # kullanıcı token
     prof = (
         supabase.table("profiles")
         .select("tokens")
@@ -63,7 +67,6 @@ async def activate_file(req: OfflineFileReq):
     tokens = int((prof.data[0] or {}).get("tokens") or 0)
     now = datetime.now(timezone.utc)
 
-    # mevcut kayıt
     existing = (
         supabase.table("offline_files")
         .select("*")
@@ -73,7 +76,6 @@ async def activate_file(req: OfflineFileReq):
         .execute()
     )
 
-    # 🔥 AKTİFSE ÜCRET ALMA
     if existing.data:
         row = existing.data[0]
         exp = parse_dt(row.get("expires_at"))
@@ -85,10 +87,10 @@ async def activate_file(req: OfflineFileReq):
                 "tokens": tokens,
                 "price": OFFLINE_PRICE,
                 "expires_at": exp.isoformat(),
-                "duration_days": OFFLINE_DURATION
+                "duration_days": OFFLINE_DURATION,
+                "file_name": file_name
             }
 
-    # 🔥 TOKEN KONTROL (5 jeton)
     if tokens < OFFLINE_PRICE:
         raise HTTPException(status_code=402, detail="insufficient_tokens")
 
@@ -105,7 +107,6 @@ async def activate_file(req: OfflineFileReq):
             "expires_at": expires.isoformat()
         }).execute()
 
-    # 🔥 5 jeton düş
     next_tokens = tokens - OFFLINE_PRICE
 
     supabase.table("profiles").update({
@@ -118,15 +119,19 @@ async def activate_file(req: OfflineFileReq):
         "tokens": next_tokens,
         "price": OFFLINE_PRICE,
         "expires_at": expires.isoformat(),
-        "duration_days": OFFLINE_DURATION
+        "duration_days": OFFLINE_DURATION,
+        "file_name": file_name
     }
 
 
 # =========================
 # LİSTE
+# sadece ücretli ek dil lisansları
 # =========================
 @router.get("/api/offline/files/list")
 async def list_files(user_id: str):
+
+    user_id = (user_id or "").strip()
 
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
@@ -139,7 +144,6 @@ async def list_files(user_id: str):
     )
 
     now = datetime.now(timezone.utc)
-
     items = []
 
     for r in rows.data or []:
