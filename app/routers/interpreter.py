@@ -258,7 +258,7 @@ async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, headers=headers, json=body)
+            resp =  client.post(url, headers=headers, json=body)
     except Exception as e:
         raise RuntimeError("Translation provider request failed") from e
 
@@ -287,7 +287,7 @@ async def translate_with_fallback(text: str, from_lang: str, to_lang: str) -> st
         return forced
 
     try:
-        return await translate_with_gemini(text, from_lang, to_lang)
+        return  translate_with_gemini(text, from_lang, to_lang)
     except Exception as gemini_error:
         logger.warning("PRIMARY_TRANSLATION_FAILED_FALLING_BACK: %s", gemini_error)
 
@@ -347,7 +347,7 @@ async def broadcast(room: RoomState, payload: dict):
 
     for ws in list(room.sockets):
         try:
-            await ws.send_text(text)
+             ws.send_text(text)
         except Exception:
             dead.append(ws)
 
@@ -500,16 +500,18 @@ async def join_room(req: JoinRoomReq):
         room.status = "active"
         room.updated_at = time.time()
 
-    await broadcast(
-        room,
-        {
-            "type": "peer_joined",
-            "room_id": room_id,
-            "status": room.status,
-            "guest_lang": guest_lang,
-            "ts": now_ts(),
-        },
-    )
+    sender_user_id = str(data.get("user_id") or "").strip()
+
+await broadcast(room, {
+    "type": "translated_message",
+    "sender": role,
+    "user_id": sender_user_id,
+    "original_text": original_text,
+    "translated_text": translated,
+    "from_lang": from_lang,
+    "to_lang": to_lang,
+    "ts": now_ts(),
+})
 
     return JoinRoomResp(ok=True, room_id=room_id, status=room.status)
 
