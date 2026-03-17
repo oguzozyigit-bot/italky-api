@@ -1,4 +1,5 @@
 # FILE: app/routers/tts.py
+
 from __future__ import annotations
 
 import os
@@ -22,42 +23,15 @@ CARTESIA_VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01").strip()
 
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 CARTESIA_TTS_URL = "https://api.cartesia.ai/tts/bytes"
+
+# 🔥 BURASI KRİTİK
 CARTESIA_MODEL_ID = "sonic-3"
-
-LANG_BCP47 = {
-    "tr": "tr-TR",
-    "en": "en-US",
-    "de": "de-DE",
-    "fr": "fr-FR",
-    "it": "it-IT",
-    "es": "es-ES",
-    "ru": "ru-RU",
-    "el": "el-GR",
-    "ka": "ka-GE",
-}
-
-GOOGLE_VOICE_MAP = {
-    "tr": {"male": "tr-TR-Standard-B", "female": "tr-TR-Standard-A"},
-    "en": {"male": "en-US-Standard-D", "female": "en-US-Standard-F"},
-    "de": {"male": "de-DE-Standard-B", "female": "de-DE-Standard-A"},
-    "fr": {"male": "fr-FR-Standard-B", "female": "fr-FR-Standard-A"},
-    "it": {"male": "it-IT-Standard-C", "female": "it-IT-Standard-A"},
-    "es": {"male": "es-ES-Standard-B", "female": "es-ES-Standard-A"},
-}
-
 
 def canon_lang(code: str) -> str:
     return (code or "tr").strip().lower().replace("_", "-")
 
-
 def lang_base(code: str) -> str:
     return canon_lang(code).split("-")[0]
-
-
-def lang_to_bcp47(code: str) -> str:
-    c = lang_base(code)
-    return LANG_BCP47.get(c, "en-US")
-
 
 def canon_voice(value: Optional[str]) -> str:
     v = (value or "auto").strip().lower()
@@ -67,7 +41,6 @@ def canon_voice(value: Optional[str]) -> str:
         return v
     return "auto"
 
-
 def canon_tone(value: Optional[str]) -> str:
     v = (value or "neutral").strip().lower()
     if v in ("happy", "angry", "sad", "excited", "neutral"):
@@ -75,17 +48,21 @@ def canon_tone(value: Optional[str]) -> str:
     return "neutral"
 
 
-def tone_to_cartesia_generation_config(tone: Optional[str]) -> dict:
+# 🔥 TON GÜÇLENDİRİLDİ
+def tone_config(tone: str):
     t = canon_tone(tone)
 
     if t == "happy":
-        return {"speed": 1.05, "volume": 1.0, "emotion": "happy"}
+        return {"speed": 1.15, "volume": 1.1, "emotion": "positivity:high"}
+
     if t == "angry":
-        return {"speed": 1.08, "volume": 1.02, "emotion": "anger"}
+        return {"speed": 1.25, "volume": 1.15, "emotion": "anger:high"}
+
     if t == "sad":
-        return {"speed": 0.92, "volume": 0.96, "emotion": "sadness"}
+        return {"speed": 0.85, "volume": 0.9, "emotion": "sadness:high"}
+
     if t == "excited":
-        return {"speed": 1.12, "volume": 1.02, "emotion": "excitement"}
+        return {"speed": 1.3, "volume": 1.15, "emotion": "excitement:high"}
 
     return {"speed": 1.0, "volume": 1.0, "emotion": "neutral"}
 
@@ -93,17 +70,13 @@ def tone_to_cartesia_generation_config(tone: Optional[str]) -> dict:
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-
 class TTSRequest(FlexibleModel):
     text: str
     lang: str = "tr"
     voice: Optional[str] = None
     tone: Optional[str] = "neutral"
-    speaking_rate: float = 1.0
-    pitch: float = 0.0
     user_id: Optional[str] = None
     module: str = "facetoface"
-
 
 class TTSResponse(FlexibleModel):
     ok: bool
@@ -116,121 +89,29 @@ async def get_user_profile(user_id: Optional[str]) -> Optional[dict]:
     if not user_id or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
         return None
 
-    url = (
-        f"{SUPABASE_URL}/rest/v1/profiles"
-        f"?id=eq.{user_id}"
-        f"&select=id,plan,tts_voice_provider,tts_voice_id,tts_voice_ready,tts_voice_preference,tts_voice"
-    )
+    url = f"{SUPABASE_URL}/rest/v1/profiles?id=eq.{user_id}&select=tts_voice_id,tts_voice_ready"
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.get(
-                url,
-                headers={
-                    "apikey": SUPABASE_SERVICE_ROLE,
-                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-                },
-            )
-        if r.status_code >= 400:
-            logger.error("TTS_PROFILE_FETCH_FAIL %s %s", r.status_code, r.text[:400])
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            url,
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+            },
+        )
+        if r.status_code != 200:
             return None
-        arr = r.json()
-        return arr[0] if arr else None
-    except Exception as e:
-        logger.exception("TTS_PROFILE_FETCH_EXCEPTION: %s", e)
+
+        data = r.json()
+        return data[0] if data else None
+
+
+# 🔥 CLONE + TON
+async def cartesia_tts(text: str, lang: str, voice_id: str, tone: str, use_tone=True):
+    if not CARTESIA_API_KEY:
         return None
-
-
-def pick_google_voice(lang: str, voice: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    base = lang_base(lang)
-    v = canon_voice(voice)
-
-    if v == "male":
-        return GOOGLE_VOICE_MAP.get(base, {}).get("male"), "MALE"
-
-    if v == "female":
-        return GOOGLE_VOICE_MAP.get(base, {}).get("female"), "FEMALE"
-
-    return None, None
-
-
-def tone_to_google_adjustments(tone: str, speaking_rate: float, pitch: float) -> tuple[float, float]:
-    t = canon_tone(tone)
-    rate = float(speaking_rate or 1.0)
-    pit = float(pitch or 0.0)
-
-    if t == "happy":
-        return min(rate + 0.05, 1.25), min(pit + 1.0, 6.0)
-    if t == "angry":
-        return min(rate + 0.08, 1.30), min(pit + 0.3, 6.0)
-    if t == "sad":
-        return max(rate - 0.08, 0.70), max(pit - 1.0, -6.0)
-    if t == "excited":
-        return min(rate + 0.12, 1.35), min(pit + 1.5, 6.0)
-
-    return rate, pit
-
-
-async def google_tts(
-    text: str,
-    lang: str,
-    voice: Optional[str],
-    tone: Optional[str],
-    speaking_rate: float,
-    pitch: float,
-) -> Optional[str]:
-    if not GOOGLE_API_KEY:
-        logger.warning("TTS_GOOGLE: GOOGLE_API_KEY missing")
-        return None
-
-    bcp47 = lang_to_bcp47(lang)
-    voice_name, gender = pick_google_voice(lang, voice)
-    adj_rate, adj_pitch = tone_to_google_adjustments(tone, speaking_rate, pitch)
-
-    voice_cfg: Dict[str, Any] = {"languageCode": bcp47}
-    if voice_name:
-        voice_cfg["name"] = voice_name
-    elif gender:
-        voice_cfg["ssmlGender"] = gender
 
     payload = {
-        "input": {"text": text},
-        "voice": voice_cfg,
-        "audioConfig": {
-            "audioEncoding": "MP3",
-            "speakingRate": adj_rate,
-            "pitch": adj_pitch,
-        },
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            r = await client.post(
-                f"{GOOGLE_TTS_URL}?key={GOOGLE_API_KEY}",
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
-        if r.status_code >= 400:
-            logger.error("TTS_FAIL_GOOGLE %s %s", r.status_code, r.text[:700])
-            return None
-        data = r.json()
-        return (data.get("audioContent") or "").strip() or None
-    except Exception as e:
-        logger.exception("TTS_GOOGLE_EXCEPTION: %s", e)
-        return None
-
-
-async def cartesia_tts(
-    text: str,
-    lang: str,
-    voice_id: str,
-    tone: Optional[str] = None,
-    apply_tone: bool = True,
-) -> Optional[str]:
-    if not CARTESIA_API_KEY or not voice_id:
-        return None
-
-    payload: Dict[str, Any] = {
         "model_id": CARTESIA_MODEL_ID,
         "transcript": text,
         "voice": {
@@ -245,11 +126,12 @@ async def cartesia_tts(
         "language": lang_base(lang),
     }
 
-    if apply_tone:
-        payload["generation_config"] = tone_to_cartesia_generation_config(tone)
+    # 🔥 TON BURADA
+    if use_tone:
+        payload["generation_config"] = tone_config(tone)
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(
                 CARTESIA_TTS_URL,
                 json=payload,
@@ -259,95 +141,59 @@ async def cartesia_tts(
                     "Content-Type": "application/json",
                 },
             )
+
         if r.status_code >= 400:
-            logger.error("TTS_FAIL_CARTESIA %s %s", r.status_code, r.text[:500])
             return None
-        if not r.content:
-            return None
+
         return base64.b64encode(r.content).decode("utf-8")
-    except Exception as e:
-        logger.exception("TTS_CARTESIA_EXCEPTION: %s", e)
+
+    except Exception:
         return None
 
 
 @router.post("/tts", response_model=TTSResponse)
-async def tts(req: TTSRequest) -> TTSResponse:
+async def tts(req: TTSRequest):
+
     text = (req.text or "").strip()
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
 
-    module = str(req.module or "facetoface").lower().strip()
-    requested_voice = canon_voice(req.voice)
     tone = canon_tone(req.tone)
+    voice = canon_voice(req.voice)
 
     profile = await get_user_profile(req.user_id)
 
-    voice_ready = bool((profile or {}).get("tts_voice_ready"))
-    voice_id = str((profile or {}).get("tts_voice_id") or "").strip()
+    voice_ready = bool(profile and profile.get("tts_voice_ready"))
+    voice_id = (profile or {}).get("tts_voice_id")
 
-    profile_pref = canon_voice(
-        (profile or {}).get("tts_voice_preference")
-        or (profile or {}).get("tts_voice")
-        or "auto"
-    )
-
-    effective_voice = requested_voice if requested_voice != "auto" else profile_pref
-
-    # 1) Kullanıcı clone istediyse tone'lu clone dene
-    if effective_voice == "clone" and voice_ready and voice_id:
-        audio = await cartesia_tts(
-            text=text,
-            lang=req.lang,
-            voice_id=voice_id,
-            tone=tone,
-            apply_tone=True,
-        )
+    # 🔥 1. CLONE + TON
+    if voice_ready and voice_id:
+        audio = await cartesia_tts(text, req.lang, voice_id, tone, True)
         if audio:
-            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-clone-tone")
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="clone-tone")
 
-        # tone'lu clone olmazsa sade clone dene
-        audio = await cartesia_tts(
-            text=text,
-            lang=req.lang,
-            voice_id=voice_id,
-            tone="neutral",
-            apply_tone=False,
-        )
+        # 🔥 2. CLONE NORMAL (fallback)
+        audio = await cartesia_tts(text, req.lang, voice_id, tone, False)
         if audio:
-            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-clone")
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="clone")
 
-    # 2) FaceToFace / Interpreter için auto olsa bile clone varsa önce onu dene
-    if module in ("facetoface", "interpreter") and voice_ready and voice_id and effective_voice in ("auto", "clone"):
-        audio = await cartesia_tts(
-            text=text,
-            lang=req.lang,
-            voice_id=voice_id,
-            tone=tone,
-            apply_tone=True,
-        )
-        if audio:
-            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-tone")
+    # 🔥 3. GOOGLE FALLBACK
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.post(
+                f"{GOOGLE_TTS_URL}?key={GOOGLE_API_KEY}",
+                json={
+                    "input": {"text": text},
+                    "voice": {"languageCode": "en-US"},
+                    "audioConfig": {"audioEncoding": "MP3"},
+                },
+            )
 
-        audio = await cartesia_tts(
-            text=text,
-            lang=req.lang,
-            voice_id=voice_id,
-            tone="neutral",
-            apply_tone=False,
-        )
-        if audio:
-            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia")
+        if r.status_code == 200:
+            audio = r.json().get("audioContent")
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="google")
 
-    # 3) Google fallback
-    g = await google_tts(
-        text=text,
-        lang=req.lang,
-        voice=effective_voice,
-        tone=tone,
-        speaking_rate=req.speaking_rate,
-        pitch=req.pitch,
-    )
-    if g:
-        return TTSResponse(ok=True, audio_base64=g, provider_used="google")
+    except Exception:
+        pass
 
-    return TTSResponse(ok=False, provider_used="none", error="TTS_UNAVAILABLE")
+    return TTSResponse(ok=False, error="TTS_UNAVAILABLE")
