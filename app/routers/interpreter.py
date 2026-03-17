@@ -123,7 +123,6 @@ IDIOM_OVERRIDES: Dict[tuple[str, str], Dict[str, str]] = {
 
 def normalize_text_for_idiom_match(text: str) -> str:
     value = str(text or "").strip().lower()
-
     replacements = {
         "â": "a",
         "î": "i",
@@ -133,7 +132,6 @@ def normalize_text_for_idiom_match(text: str) -> str:
         "”": '"',
         "…": "...",
     }
-
     for old, new in replacements.items():
         value = value.replace(old, new)
 
@@ -177,7 +175,7 @@ Rules:
 - Do not over-dramatize.
 - Prefer the most natural everyday equivalent in the target language.
 - If the source is an idiom, use the closest natural idiom in the target language.
-- Make sure the output is a COMPLETE sentence.
+- Make sure the output is a complete sentence.
 - Always finish the sentence properly.
 
 Examples:
@@ -204,10 +202,8 @@ Text:
 def post_clean_translation(text: str) -> str:
     value = str(text or "").strip()
     value = " ".join(value.split())
-
     if value and value[-1] not in ".!?":
         value += "."
-
     return value
 
 
@@ -327,7 +323,7 @@ def get_room_or_404(room_id: str) -> RoomState:
 
 
 async def broadcast(room: RoomState, payload: dict):
-    dead: list[WebSocket] = []
+    dead = []
     text = json.dumps(payload, ensure_ascii=False)
 
     for ws in list(room.sockets):
