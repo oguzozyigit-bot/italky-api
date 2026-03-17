@@ -99,7 +99,7 @@ def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
     return out
 
 
-IDIOM_OVERRIDES = {
+IDIOM_OVERRIDES: Dict[tuple[str, str], Dict[str, str]] = {
     ("tr", "en"): {
         "ensemde boza pişiriyorsun": "You're really getting on my nerves.",
         "ensemde boza pisiriyorsun": "You're really getting on my nerves.",
@@ -121,6 +121,7 @@ IDIOM_OVERRIDES = {
 
 def normalize_text_for_idiom_match(text: str) -> str:
     value = str(text or "").strip().lower()
+
     replacements = {
         "â": "a",
         "î": "i",
@@ -130,6 +131,7 @@ def normalize_text_for_idiom_match(text: str) -> str:
         "”": '"',
         "…": "...",
     }
+
     for old, new in replacements.items():
         value = value.replace(old, new)
 
@@ -137,12 +139,13 @@ def normalize_text_for_idiom_match(text: str) -> str:
     return value
 
 
-def maybe_translate_with_idiom_override(text: str, from_lang: str, to_lang: str) -> Optional[str]:
+def maybe_translate_with_idiom_override(
+    text: str, from_lang: str, to_lang: str
+) -> Optional[str]:
     src = (from_lang or "").strip().lower()
     dst = (to_lang or "").strip().lower()
-    key = (src, dst)
+    table = IDIOM_OVERRIDES.get((src, dst)) or {}
 
-    table = IDIOM_OVERRIDES.get(key) or {}
     norm = normalize_text_for_idiom_match(text)
 
     if norm in table:
@@ -236,8 +239,8 @@ async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
         "generationConfig": {
             "temperature": 0.0,
             "topP": 0.8,
-            "maxOutputTokens": 160
-        }
+            "maxOutputTokens": 160,
+        },
     }
 
     headers = {
@@ -306,7 +309,7 @@ def get_room_or_404(room_id: str) -> RoomState:
 
 
 async def broadcast(room: RoomState, payload: dict):
-    dead = []
+    dead: list[WebSocket] = []
     text = json.dumps(payload, ensure_ascii=False)
 
     for ws in list(room.sockets):
@@ -331,6 +334,7 @@ class CreateRoomResp(BaseModel):
     join_url: str
     ws_url: str
     status: str
+    host_code: str
 
 
 class ResolveRoomReq(BaseModel):
@@ -398,6 +402,7 @@ async def create_room(req: CreateRoomReq):
         join_url=join_url,
         ws_url=ws_url,
         status=room.status,
+        host_code=host_code,
     )
 
 
@@ -462,13 +467,16 @@ async def join_room(req: JoinRoomReq):
         room.status = "active"
         room.updated_at = time.time()
 
-    await broadcast(room, {
-        "type": "peer_joined",
-        "room_id": room_id,
-        "status": room.status,
-        "guest_lang": guest_lang,
-        "ts": now_ts(),
-    })
+    await broadcast(
+        room,
+        {
+            "type": "peer_joined",
+            "room_id": room_id,
+            "status": room.status,
+            "guest_lang": guest_lang,
+            "ts": now_ts(),
+        },
+    )
 
     return JoinRoomResp(ok=True, room_id=room_id, status=room.status)
 
@@ -506,11 +514,16 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
 
     room = ROOMS.get(room_id)
     if not room:
-        await websocket.send_text(json.dumps({
-            "type": "error",
-            "message": "Room not found",
-            "ts": now_ts(),
-        }, ensure_ascii=False))
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": "Room not found",
+                    "ts": now_ts(),
+                },
+                ensure_ascii=False,
+            )
+        )
         await websocket.close()
         return
 
@@ -520,17 +533,20 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
     if role not in room.peers:
         room.peers[role] = PeerState(role=role, lang=my_lang)
 
-    await broadcast(room, {
-        "type": "presence",
-        "room_id": room_id,
-        "host_code": room.host_code,
-        "mode": room.mode,
-        "status": room.status,
-        "host_lang": room.host_lang,
-        "guest_lang": room.guest_lang,
-        "peer_count": len(room.peers),
-        "ts": now_ts(),
-    })
+    await broadcast(
+        room,
+        {
+            "type": "presence",
+            "room_id": room_id,
+            "host_code": room.host_code,
+            "mode": room.mode,
+            "status": room.status,
+            "host_lang": room.host_lang,
+            "guest_lang": room.guest_lang,
+            "peer_count": len(room.peers),
+            "ts": now_ts(),
+        },
+    )
 
     try:
         while True:
@@ -545,11 +561,14 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 continue
 
             if mtype == "typing":
-                await broadcast(room, {
-                    "type": "typing",
-                    "sender": role,
-                    "ts": now_ts(),
-                })
+                await broadcast(
+                    room,
+                    {
+                        "type": "typing",
+                        "sender": role,
+                        "ts": now_ts(),
+                    },
+                )
                 continue
 
             if mtype == "set_lang":
@@ -565,17 +584,20 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     room.peers[role] = PeerState(role=role, lang=new_lang)
                     room.updated_at = time.time()
 
-                await broadcast(room, {
-                    "type": "presence",
-                    "room_id": room_id,
-                    "host_code": room.host_code,
-                    "mode": room.mode,
-                    "status": room.status,
-                    "host_lang": room.host_lang,
-                    "guest_lang": room.guest_lang,
-                    "peer_count": len(room.peers),
-                    "ts": now_ts(),
-                })
+                await broadcast(
+                    room,
+                    {
+                        "type": "presence",
+                        "room_id": room_id,
+                        "host_code": room.host_code,
+                        "mode": room.mode,
+                        "status": room.status,
+                        "host_lang": room.host_lang,
+                        "guest_lang": room.guest_lang,
+                        "peer_count": len(room.peers),
+                        "ts": now_ts(),
+                    },
+                )
                 continue
 
             if mtype == "text_message":
@@ -593,29 +615,41 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                         to_lang = room.host_lang or "tr"
 
                 try:
-                    forced = maybe_translate_with_idiom_override(original_text, from_lang, to_lang)
+                    forced = maybe_translate_with_idiom_override(
+                        original_text, from_lang, to_lang
+                    )
                     if forced:
                         translated = forced
                     else:
-                        translated = await translate_with_gemini(original_text, from_lang, to_lang)
+                        translated = await translate_with_gemini(
+                            original_text, from_lang, to_lang
+                        )
                 except Exception as e:
                     logger.exception("INTERPRETER_TRANSLATE_FAIL %s", e)
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": f"Translation failed: {e}",
-                        "ts": now_ts(),
-                    }, ensure_ascii=False))
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "error",
+                                "message": f"Translation failed: {e}",
+                                "ts": now_ts(),
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
                     continue
 
-                await broadcast(room, {
-                    "type": "translated_message",
-                    "sender": role,
-                    "original_text": original_text,
-                    "translated_text": translated,
-                    "from_lang": from_lang,
-                    "to_lang": to_lang,
-                    "ts": now_ts(),
-                })
+                await broadcast(
+                    room,
+                    {
+                        "type": "translated_message",
+                        "sender": role,
+                        "original_text": original_text,
+                        "translated_text": translated,
+                        "from_lang": from_lang,
+                        "to_lang": to_lang,
+                        "ts": now_ts(),
+                    },
+                )
 
     except WebSocketDisconnect:
         room.sockets.discard(websocket)
@@ -632,12 +666,15 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
                     HOST_ACTIVE_ROOM.pop(room.host_code, None)
 
-        await broadcast(room, {
-            "type": "peer_left",
-            "sender": role,
-            "message": "Karşı taraf odadan ayrıldı.",
-            "ts": now_ts(),
-        })
+        await broadcast(
+            room,
+            {
+                "type": "peer_left",
+                "sender": role,
+                "message": "Karşı taraf odadan ayrıldı.",
+                "ts": now_ts(),
+            },
+        )
 
     except Exception as e:
         logger.exception("INTERPRETER_WS_ERROR %s", e)
