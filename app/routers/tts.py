@@ -75,39 +75,6 @@ def canon_tone(value: Optional[str]) -> str:
     return "neutral"
 
 
-def tone_to_cartesia_controls(tone: str) -> dict:
-    t = canon_tone(tone)
-
-    if t == "happy":
-        return {
-            "speed": "fast",
-            "emotion": ["positivity:high", "curiosity:medium"],
-        }
-
-    if t == "angry":
-        return {
-            "speed": "fast",
-            "emotion": ["anger:high", "positivity:low"],
-        }
-
-    if t == "sad":
-        return {
-            "speed": "slow",
-            "emotion": ["sadness:high", "positivity:low"],
-        }
-
-    if t == "excited":
-        return {
-            "speed": "fast",
-            "emotion": ["excitement:high", "positivity:high"],
-        }
-
-    return {
-        "speed": "normal",
-        "emotion": ["positivity:medium"],
-    }
-
-
 class FlexibleModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -115,12 +82,12 @@ class FlexibleModel(BaseModel):
 class TTSRequest(FlexibleModel):
     text: str
     lang: str = "tr"
-    voice: Optional[str] = None   # auto / male / female / clone
-    tone: Optional[str] = "neutral"  # neutral / happy / angry / sad / excited
+    voice: Optional[str] = None
+    tone: Optional[str] = "neutral"
     speaking_rate: float = 1.0
     pitch: float = 0.0
     user_id: Optional[str] = None
-    module: str = "facetoface"    # facetoface / interpreter / walkie / chat
+    module: str = "facetoface"
 
 
 class TTSResponse(FlexibleModel):
@@ -179,13 +146,10 @@ def tone_to_google_adjustments(tone: str, speaking_rate: float, pitch: float) ->
 
     if t == "happy":
         return min(rate + 0.05, 1.25), min(pit + 1.0, 6.0)
-
     if t == "angry":
-        return min(rate + 0.08, 1.3), min(pit + 0.3, 6.0)
-
+        return min(rate + 0.08, 1.30), min(pit + 0.3, 6.0)
     if t == "sad":
-        return max(rate - 0.08, 0.7), max(pit - 1.0, -6.0)
-
+        return max(rate - 0.08, 0.70), max(pit - 1.0, -6.0)
     if t == "excited":
         return min(rate + 0.12, 1.35), min(pit + 1.5, 6.0)
 
@@ -198,7 +162,7 @@ async def google_tts(
     voice: Optional[str],
     tone: Optional[str],
     speaking_rate: float,
-    pitch: float
+    pitch: float,
 ) -> Optional[str]:
     if not GOOGLE_API_KEY:
         logger.warning("TTS_GOOGLE: GOOGLE_API_KEY missing")
@@ -241,12 +205,11 @@ async def google_tts(
         return None
 
 
-async def cartesia_tts(text: str, lang: str, voice_id: str, tone: Optional[str]) -> Optional[str]:
+async def cartesia_tts(text: str, lang: str, voice_id: str) -> Optional[str]:
     if not CARTESIA_API_KEY or not voice_id:
         return None
 
-    controls = tone_to_cartesia_controls(tone)
-
+    # Clone sesi bozmayalım diye eski çalışan sade payload
     payload = {
         "model_id": CARTESIA_MODEL_ID,
         "transcript": text,
@@ -260,8 +223,6 @@ async def cartesia_tts(text: str, lang: str, voice_id: str, tone: Optional[str])
             "sample_rate": 44100,
         },
         "language": lang_base(lang),
-        "duration": controls["speed"],
-        "emotion": controls["emotion"],
     }
 
     try:
@@ -302,9 +263,9 @@ async def tts(req: TTSRequest) -> TTSResponse:
     voice_id = str((profile or {}).get("tts_voice_id") or "").strip()
 
     profile_pref = canon_voice(
-        (profile or {}).get("tts_voice_preference") or
-        (profile or {}).get("tts_voice") or
-        "auto"
+        (profile or {}).get("tts_voice_preference")
+        or (profile or {}).get("tts_voice")
+        or "auto"
     )
 
     effective_voice = requested_voice if requested_voice != "auto" else profile_pref
@@ -315,7 +276,6 @@ async def tts(req: TTSRequest) -> TTSResponse:
             text=text,
             lang=req.lang,
             voice_id=voice_id,
-            tone=tone,
         )
         if audio:
             return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-clone")
@@ -326,7 +286,6 @@ async def tts(req: TTSRequest) -> TTSResponse:
             text=text,
             lang=req.lang,
             voice_id=voice_id,
-            tone=tone,
         )
         if audio:
             return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia")
@@ -338,7 +297,7 @@ async def tts(req: TTSRequest) -> TTSResponse:
         voice=effective_voice,
         tone=tone,
         speaking_rate=req.speaking_rate,
-        pitch=req.pitch
+        pitch=req.pitch,
     )
     if g:
         return TTSResponse(ok=True, audio_base64=g, provider_used="google")
