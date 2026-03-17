@@ -26,6 +26,8 @@ GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").str
 _translate_client: Optional[translate_v3.TranslationServiceClient] = None
 _translate_project_id: Optional[str] = None
 
+SAFE_TRANSLATION_ERROR = "Çeviri şu anda kullanılamıyor."
+
 
 def _load_credentials_info() -> dict:
     if GOOGLE_CREDS_JSON:
@@ -199,6 +201,16 @@ Text:
 """.strip()
 
 
+def post_clean_translation(text: str) -> str:
+    value = str(text or "").strip()
+    value = " ".join(value.split())
+
+    if value and value[-1] not in ".!?":
+        value += "."
+
+    return value
+
+
 async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
     value = (text or "").strip()
     if not value:
@@ -214,7 +226,7 @@ async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
     model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY missing")
+        raise RuntimeError("Translation provider key missing")
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
@@ -248,23 +260,29 @@ async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
         "Content-Type": "application/json",
     }
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, headers=headers, json=body)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, headers=headers, json=body)
+    except Exception as e:
+        raise RuntimeError("Translation provider request failed") from e
 
     if resp.status_code >= 400:
-        raise RuntimeError(f"Gemini API error: {resp.status_code} {resp.text}")
+        raise RuntimeError(f"Translation provider HTTP {resp.status_code}")
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise RuntimeError("Translation provider returned invalid JSON") from e
 
     try:
         out = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
-        raise RuntimeError("Gemini returned empty response")
+    except Exception as e:
+        raise RuntimeError("Translation provider returned empty response") from e
 
     if not out:
-        raise RuntimeError("Gemini returned blank translation")
+        raise RuntimeError("Translation provider returned blank translation")
 
-    return out
+    return post_clean_translation(out)
 
 
 @dataclass
@@ -630,7 +648,7 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                         json.dumps(
                             {
                                 "type": "error",
-                                "message": f"Translation failed: {e}",
+                                "message": SAFE_TRANSLATION_ERROR,
                                 "ts": now_ts(),
                             },
                             ensure_ascii=False,
