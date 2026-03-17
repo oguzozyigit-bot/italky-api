@@ -34,19 +34,26 @@ def parse_dt(value) -> datetime | None:
         return None
 
 
+def norm_file_name(value: str) -> str:
+    return str(value or "").strip().lower().replace("_", "-")
+
+
 # =========================
 # DOSYA AKTİF ET / YENİLE
+# sadece EK DİL lisansı için kullanılır
+# örnek: fr, de, es
+# base paketler burada ücretlendirilmez
 # =========================
 @router.post("/api/offline/files/activate")
 async def activate_file(req: OfflineFileReq):
     user_id = (req.user_id or "").strip()
-    file_name = (req.file_name or "").strip()
+    file_name = norm_file_name(req.file_name)
 
     if not user_id:
-        raise HTTPException(status_code=422, detail="user_id required")
+      raise HTTPException(status_code=422, detail="user_id required")
 
     if not file_name:
-        raise HTTPException(status_code=422, detail="file_name required")
+      raise HTTPException(status_code=422, detail="file_name required")
 
     prof = (
         supabase.table("profiles")
@@ -71,7 +78,7 @@ async def activate_file(req: OfflineFileReq):
         .execute()
     )
 
-    # Aktif lisans varsa tekrar ücret alma
+    # aktif lisans varsa tekrar ücret alma
     if existing.data:
         row = existing.data[0]
         current_exp = parse_dt(row.get("expires_at"))
@@ -83,7 +90,8 @@ async def activate_file(req: OfflineFileReq):
                 "tokens": tokens,
                 "price_tokens": OFFLINE_PRICE_TOKENS,
                 "expires_at": current_exp.isoformat(),
-                "duration_days": OFFLINE_DURATION_DAYS
+                "duration_days": OFFLINE_DURATION_DAYS,
+                "file_name": file_name
             }
 
     if tokens < OFFLINE_PRICE_TOKENS:
@@ -114,15 +122,20 @@ async def activate_file(req: OfflineFileReq):
         "tokens": next_tokens,
         "price_tokens": OFFLINE_PRICE_TOKENS,
         "expires_at": expires.isoformat(),
-        "duration_days": OFFLINE_DURATION_DAYS
+        "duration_days": OFFLINE_DURATION_DAYS,
+        "file_name": file_name
     }
 
 
 # =========================
 # DOSYA LİSTESİ
+# sadece ücretli EK DİL lisanslarını döner
+# base kurulum burada tutulmak zorunda değil
 # =========================
 @router.get("/api/offline/files/list")
 async def list_files(user_id: str):
+    user_id = (user_id or "").strip()
+
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
 
