@@ -633,37 +633,54 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 )
                 continue
 
-            if mtype == "text_message":
-                original_text = str(data.get("text") or "").strip()
-                from_lang = str(data.get("from_lang") or my_lang).strip().lower()
-                to_lang = str(data.get("to_lang") or "").strip().lower()
-                sender_user_id = str(data.get("user_id") or "").strip()
+    if mtype == "text_message":
+    original_text = str(data.get("text") or "").strip()
+    from_lang = str(data.get("from_lang") or my_lang).strip().lower()
+    to_lang = str(data.get("to_lang") or "").strip().lower()
+    sender_user_id = str(data.get("user_id") or "").strip()
+    sender_client_session_id = str(data.get("client_session_id") or "").strip()
 
-                if not original_text:
-                    continue
+    if not original_text:
+        continue
 
-                if not to_lang:
-                    if role == "host":
-                        to_lang = room.guest_lang or "en"
-                    else:
-                        to_lang = room.host_lang or "tr"
+    if not to_lang:
+        if role == "host":
+            to_lang = room.guest_lang or "en"
+        else:
+            to_lang = room.host_lang or "tr"
 
-                try:
-                    translated = await translate_with_fallback(
-                        original_text, from_lang, to_lang
-                    )
-                except Exception as e:
-                    logger.exception("INTERPRETER_TRANSLATE_FAIL %s", e)
-                    await websocket.send_text(
-                        json.dumps(
-                            {
-                                "type": "error",
-                                "message": SAFE_TRANSLATION_ERROR,
-                                "ts": now_ts(),
-                            },
-                            ensure_ascii=False,
-                        )
-                    )
+    try:
+        translated = await translate_with_fallback(
+            original_text, from_lang, to_lang
+        )
+    except Exception as e:
+        logger.exception("INTERPRETER_TRANSLATE_FAIL %s", e)
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": SAFE_TRANSLATION_ERROR,
+                    "ts": now_ts(),
+                },
+                ensure_ascii=False,
+            )
+        )
+        continue
+
+    await broadcast(
+        room,
+        {
+            "type": "translated_message",
+            "sender": role,
+            "user_id": sender_user_id,
+            "client_session_id": sender_client_session_id,
+            "original_text": original_text,
+            "translated_text": translated,
+            "from_lang": from_lang,
+            "to_lang": to_lang,
+            "ts": now_ts(),
+        },
+    )
                     continue
 
                 await broadcast(
