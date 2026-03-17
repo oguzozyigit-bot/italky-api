@@ -22,7 +22,7 @@ CARTESIA_VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01").strip()
 
 GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 CARTESIA_TTS_URL = "https://api.cartesia.ai/tts/bytes"
-CARTESIA_MODEL_ID = "sonic-2"
+CARTESIA_MODEL_ID = "sonic-3"
 
 LANG_BCP47 = {
     "tr": "tr-TR",
@@ -73,6 +73,21 @@ def canon_tone(value: Optional[str]) -> str:
     if v in ("happy", "angry", "sad", "excited", "neutral"):
         return v
     return "neutral"
+
+
+def tone_to_cartesia_generation_config(tone: Optional[str]) -> dict:
+    t = canon_tone(tone)
+
+    if t == "happy":
+        return {"speed": 1.05, "volume": 1.0, "emotion": "happy"}
+    if t == "angry":
+        return {"speed": 1.08, "volume": 1.02, "emotion": "anger"}
+    if t == "sad":
+        return {"speed": 0.92, "volume": 0.96, "emotion": "sadness"}
+    if t == "excited":
+        return {"speed": 1.12, "volume": 1.02, "emotion": "excitement"}
+
+    return {"speed": 1.0, "volume": 1.0, "emotion": "neutral"}
 
 
 class FlexibleModel(BaseModel):
@@ -205,12 +220,17 @@ async def google_tts(
         return None
 
 
-async def cartesia_tts(text: str, lang: str, voice_id: str) -> Optional[str]:
+async def cartesia_tts(
+    text: str,
+    lang: str,
+    voice_id: str,
+    tone: Optional[str] = None,
+    apply_tone: bool = True,
+) -> Optional[str]:
     if not CARTESIA_API_KEY or not voice_id:
         return None
 
-    # Clone sesi bozmayalım diye eski çalışan sade payload
-    payload = {
+    payload: Dict[str, Any] = {
         "model_id": CARTESIA_MODEL_ID,
         "transcript": text,
         "voice": {
@@ -224,6 +244,9 @@ async def cartesia_tts(text: str, lang: str, voice_id: str) -> Optional[str]:
         },
         "language": lang_base(lang),
     }
+
+    if apply_tone:
+        payload["generation_config"] = tone_to_cartesia_generation_config(tone)
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -270,22 +293,47 @@ async def tts(req: TTSRequest) -> TTSResponse:
 
     effective_voice = requested_voice if requested_voice != "auto" else profile_pref
 
-    # 1) Kullanıcı clone istediyse ve özel ses hazırsa önce onu dene
+    # 1) Kullanıcı clone istediyse tone'lu clone dene
     if effective_voice == "clone" and voice_ready and voice_id:
         audio = await cartesia_tts(
             text=text,
             lang=req.lang,
             voice_id=voice_id,
+            tone=tone,
+            apply_tone=True,
+        )
+        if audio:
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-clone-tone")
+
+        # tone'lu clone olmazsa sade clone dene
+        audio = await cartesia_tts(
+            text=text,
+            lang=req.lang,
+            voice_id=voice_id,
+            tone="neutral",
+            apply_tone=False,
         )
         if audio:
             return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-clone")
 
-    # 2) FaceToFace / Interpreter için auto olsa bile profilde clone varsa özel sesi öncelikle dene
+    # 2) FaceToFace / Interpreter için auto olsa bile clone varsa önce onu dene
     if module in ("facetoface", "interpreter") and voice_ready and voice_id and effective_voice in ("auto", "clone"):
         audio = await cartesia_tts(
             text=text,
             lang=req.lang,
             voice_id=voice_id,
+            tone=tone,
+            apply_tone=True,
+        )
+        if audio:
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia-tone")
+
+        audio = await cartesia_tts(
+            text=text,
+            lang=req.lang,
+            voice_id=voice_id,
+            tone="neutral",
+            apply_tone=False,
         )
         if audio:
             return TTSResponse(ok=True, audio_base64=audio, provider_used="cartesia")
