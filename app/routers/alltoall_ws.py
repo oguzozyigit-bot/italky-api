@@ -7,6 +7,7 @@ import secrets
 import time
 from typing import Dict, Any, Optional, List
 
+import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from google.oauth2 import service_account
 from google.cloud import translate as translate_v3
@@ -19,6 +20,9 @@ MAX_PARTICIPANTS = 50
 
 GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
 GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
+
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or "").strip()
+GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
 
 _translate_client: Optional[translate_v3.TranslationServiceClient] = None
 _translate_project_id: Optional[str] = None
@@ -226,6 +230,130 @@ def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
     return out
 
 
+def post_clean_translation(text: str) -> str:
+    value = str(text or "").strip()
+    value = " ".join(value.split())
+    if value and value[-1] not in ".!?":
+        value += "."
+    return value
+
+
+def build_meaning_prompt(text: str, from_lang: str, to_lang: str) -> str:
+    return f"""
+You are an expert live interpreter for a multilingual meeting.
+
+Task:
+- Understand the intended meaning, even if there are spelling mistakes, slang, short fragments, or informal speech.
+- Translate by meaning, not word-for-word.
+- Keep the output natural, short, and complete.
+- Never explain your answer.
+- Return exactly one final translated sentence only.
+
+Rules:
+- Do not add extra friendliness.
+- Do not over-dramatize.
+- Prefer the most natural everyday equivalent in the target language.
+- If the source already matches the target language, return it naturally.
+- Make the output a complete sentence when possible.
+
+Source language: {from_lang}
+Target language: {to_lang}
+
+Text:
+{text}
+""".strip()
+
+
+async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
+    value = (text or "").strip()
+    if not value:
+        return ""
+
+    src = (from_lang or "auto").strip().lower()
+    dst = (to_lang or "tr").strip().lower()
+
+    if src == dst:
+        return value
+
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Gemini API key missing")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+    body = {
+        "system_instruction": {
+            "parts": [
+                {
+                    "text": "You are a professional live interpreter. Always return one complete natural translated sentence only."
+                }
+            ]
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": build_meaning_prompt(value, src, dst)
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.0,
+            "topP": 0.8,
+            "maxOutputTokens": 160,
+        },
+    }
+
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(url, headers=headers, json=body)
+    except Exception as e:
+        raise RuntimeError("Gemini request failed") from e
+
+    if resp.status_code >= 400:
+        raise RuntimeError(f"Gemini HTTP {resp.status_code}")
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise RuntimeError("Gemini invalid JSON") from e
+
+    try:
+        out = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        raise RuntimeError("Gemini empty response") from e
+
+    if not out:
+        raise RuntimeError("Gemini blank translation")
+
+    return post_clean_translation(out)
+
+
+async def translate_with_fallback(text: str, from_lang: str, to_lang: str) -> str:
+    value = (text or "").strip()
+    if not value:
+        return ""
+
+    src = clean_lang(from_lang, "auto")
+    dst = clean_lang(to_lang, "tr")
+
+    if src == dst:
+        return value
+
+    try:
+        return await translate_with_gemini(value, src, dst)
+    except Exception as gemini_error:
+        logger.warning("ALLTOALL_GEMINI_FAILED_FALLBACK_GOOGLE: %s", gemini_error)
+
+    return post_clean_translation(translate_with_google(value, src, dst))
+
+
 async def fanout_translated(room: Dict[str, Any], sender_ws: WebSocket, original_text: str, from_lang: str):
     meta = room.get("meta") or {}
     sender_meta = meta.get(sender_ws, {}) or {}
@@ -243,7 +371,7 @@ async def fanout_translated(room: Dict[str, Any], sender_ws: WebSocket, original
         to_lang = clean_lang(target_meta.get("me_lang"), "tr")
 
         try:
-            translated = translate_with_google(original_text, from_lang, to_lang)
+            translated = await translate_with_fallback(original_text, from_lang, to_lang)
         except Exception as e:
             logger.exception("ALLTOALL_TRANSLATE_FAIL %s", e)
             translated = original_text
