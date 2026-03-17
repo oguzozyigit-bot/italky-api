@@ -281,6 +281,25 @@ async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
     return post_clean_translation(out)
 
 
+async def translate_with_fallback(text: str, from_lang: str, to_lang: str) -> str:
+    forced = maybe_translate_with_idiom_override(text, from_lang, to_lang)
+    if forced:
+        return forced
+
+    try:
+        return await translate_with_gemini(text, from_lang, to_lang)
+    except Exception as gemini_error:
+        logger.warning("PRIMARY_TRANSLATION_FAILED_FALLING_BACK: %s", gemini_error)
+
+    try:
+        return post_clean_translation(
+            translate_with_google(text, from_lang, to_lang)
+        )
+    except Exception as google_error:
+        logger.exception("FALLBACK_TRANSLATION_FAILED: %s", google_error)
+        raise RuntimeError("all_translation_providers_failed") from google_error
+
+
 @dataclass
 class PeerState:
     role: str
@@ -629,15 +648,9 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                         to_lang = room.host_lang or "tr"
 
                 try:
-                    forced = maybe_translate_with_idiom_override(
+                    translated = await translate_with_fallback(
                         original_text, from_lang, to_lang
                     )
-                    if forced:
-                        translated = forced
-                    else:
-                        translated = await translate_with_gemini(
-                            original_text, from_lang, to_lang
-                        )
                 except Exception as e:
                     logger.exception("INTERPRETER_TRANSLATE_FAIL %s", e)
                     await websocket.send_text(
