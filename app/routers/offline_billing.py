@@ -16,14 +16,25 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+# 🔥 YENİ MODEL
+OFFLINE_PRICE = 5          # 5 jeton
+OFFLINE_DURATION = 365     # 12 ay
+
 
 class OfflineFileReq(BaseModel):
     user_id: str
     file_name: str
 
 
+def parse_dt(value):
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except:
+        return None
+
+
 # =========================
-# DOSYA AKTİF ET / YENİLE
+# AKTİVASYON
 # =========================
 @router.post("/api/offline/files/activate")
 async def activate_file(req: OfflineFileReq):
@@ -50,14 +61,9 @@ async def activate_file(req: OfflineFileReq):
         raise HTTPException(status_code=404, detail="profile not found")
 
     tokens = int((prof.data[0] or {}).get("tokens") or 0)
-
-    if tokens < 1:
-        raise HTTPException(status_code=402, detail="insufficient_tokens")
-
     now = datetime.now(timezone.utc)
-    expires = now + timedelta(days=30)
 
-    # dosya var mı
+    # mevcut kayıt
     existing = (
         supabase.table("offline_files")
         .select("*")
@@ -67,24 +73,40 @@ async def activate_file(req: OfflineFileReq):
         .execute()
     )
 
+    # 🔥 AKTİFSE ÜCRET ALMA
     if existing.data:
+        row = existing.data[0]
+        exp = parse_dt(row.get("expires_at"))
 
-        # sadece süre uzat
+        if exp and exp > now:
+            return {
+                "ok": True,
+                "already_active": True,
+                "tokens": tokens,
+                "price": OFFLINE_PRICE,
+                "expires_at": exp.isoformat(),
+                "duration_days": OFFLINE_DURATION
+            }
+
+    # 🔥 TOKEN KONTROL (5 jeton)
+    if tokens < OFFLINE_PRICE:
+        raise HTTPException(status_code=402, detail="insufficient_tokens")
+
+    expires = now + timedelta(days=OFFLINE_DURATION)
+
+    if existing.data:
         supabase.table("offline_files").update({
             "expires_at": expires.isoformat()
         }).eq("id", existing.data[0]["id"]).execute()
-
     else:
-
-        # yeni dosya
         supabase.table("offline_files").insert({
             "user_id": user_id,
             "file_name": file_name,
             "expires_at": expires.isoformat()
         }).execute()
 
-    # kontör düş
-    next_tokens = tokens - 1
+    # 🔥 5 jeton düş
+    next_tokens = tokens - OFFLINE_PRICE
 
     supabase.table("profiles").update({
         "tokens": next_tokens
@@ -92,13 +114,16 @@ async def activate_file(req: OfflineFileReq):
 
     return {
         "ok": True,
+        "already_active": False,
         "tokens": next_tokens,
-        "expires_at": expires.isoformat()
+        "price": OFFLINE_PRICE,
+        "expires_at": expires.isoformat(),
+        "duration_days": OFFLINE_DURATION
     }
 
 
 # =========================
-# DOSYA LİSTESİ
+# LİSTE
 # =========================
 @router.get("/api/offline/files/list")
 async def list_files(user_id: str):
@@ -118,14 +143,8 @@ async def list_files(user_id: str):
     items = []
 
     for r in rows.data or []:
-
-        expires = r.get("expires_at")
-
-        try:
-            exp = datetime.fromisoformat(str(expires).replace("Z","+00:00"))
-            active = exp > now
-        except:
-            active = False
+        exp = parse_dt(r.get("expires_at"))
+        active = bool(exp and exp > now)
 
         items.append({
             **r,
@@ -134,5 +153,7 @@ async def list_files(user_id: str):
 
     return {
         "ok": True,
-        "items": items
+        "items": items,
+        "price": OFFLINE_PRICE,
+        "duration_days": OFFLINE_DURATION
     }
