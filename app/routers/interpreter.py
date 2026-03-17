@@ -99,28 +99,94 @@ def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
     return out
 
 
+IDIOM_OVERRIDES = {
+    ("tr", "en"): {
+        "ensemde boza pişiriyorsun": "You're really getting on my nerves.",
+        "ensemde boza pisiriyorsun": "You're really getting on my nerves.",
+        "bu site anamı ağlattı": "This site is driving me crazy.",
+        "bu site anami aglatti": "This site is driving me crazy.",
+        "anamı ağlattı": "It drove me crazy.",
+        "anami aglatti": "It drove me crazy.",
+        "kafa ütülüyor": "It's really getting on my nerves.",
+        "kafa utuluyor": "It's really getting on my nerves.",
+        "kafayı yedim": "I'm losing my mind.",
+        "kafayi yedim": "I'm losing my mind.",
+        "içim dışıma çıktı": "I'm exhausted.",
+        "icim disima cikti": "I'm exhausted.",
+        "kan beynime sıçradı": "I got really mad.",
+        "kan beynime sicradi": "I got really mad.",
+    }
+}
+
+
+def normalize_text_for_idiom_match(text: str) -> str:
+    value = str(text or "").strip().lower()
+    replacements = {
+        "â": "a",
+        "î": "i",
+        "û": "u",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "…": "...",
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+
+    value = " ".join(value.split())
+    return value
+
+
+def maybe_translate_with_idiom_override(text: str, from_lang: str, to_lang: str) -> Optional[str]:
+    src = (from_lang or "").strip().lower()
+    dst = (to_lang or "").strip().lower()
+    key = (src, dst)
+
+    table = IDIOM_OVERRIDES.get(key) or {}
+    norm = normalize_text_for_idiom_match(text)
+
+    if norm in table:
+        return table[norm]
+
+    for phrase, translated in table.items():
+        if phrase in norm:
+            return translated
+
+    return None
+
+
 def build_meaning_prompt(text: str, from_lang: str, to_lang: str) -> str:
     return f"""
-You are an expert live interpreter.
+You are an expert live interpreter for real-world conversation.
 
-Your job:
-- Understand the user's intended meaning, even with spelling mistakes, slang, or incomplete sentences.
-- Fix the meaning silently if needed.
-- Do NOT translate word-for-word.
-- Translate naturally as a native speaker would say it.
+Task:
+- Understand the intended meaning, even if there are spelling mistakes, slang, missing words, or idioms.
+- Translate by meaning, not word-for-word.
+- Keep the translation natural, short, and complete.
+- Never return a partial sentence.
+- Never explain your answer.
+- Return exactly one final translated sentence only.
 
 Rules:
-- Do NOT add extra words that are not in the original meaning.
-- Do NOT add "buddy", "bro", names, or personal expressions unless clearly present.
-- Keep tone natural but neutral unless emotion is clearly expressed.
-- Keep the sentence clean and concise.
-- Do not exaggerate or over-interpret.
-- Do not explain anything.
+- Do not add extra friendliness such as buddy, bro, dear, my friend.
+- Do not over-dramatize.
+- Prefer the most natural everyday equivalent in the target language.
+- If the source is an idiom, use the closest natural idiom in the target language.
+- Make sure the output is a COMPLETE sentence.
+- Always finish the sentence properly.
 
-Output:
-- Return ONLY the final translated sentence.
-- No quotes.
-- No extra text.
+Examples:
+Turkish: "Bu site anamı ağlattı"
+English: "This site is driving me crazy."
+
+Turkish: "Ensemde boza pişiriyorsun"
+English: "You're really getting on my nerves."
+
+Turkish: "Kanka yarın uğrayayım mı"
+English: "Should I drop by tomorrow?"
+
+Turkish: "Yarın gelcem sana da uygunsa"
+English: "I'll come tomorrow if that works for you."
 
 Source language: {from_lang}
 Target language: {to_lang}
@@ -150,6 +216,13 @@ async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
     body = {
+        "system_instruction": {
+            "parts": [
+                {
+                    "text": "You are a professional interpreter. Always return one complete natural translated sentence only."
+                }
+            ]
+        },
         "contents": [
             {
                 "role": "user",
@@ -161,9 +234,9 @@ async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
             }
         ],
         "generationConfig": {
-            "temperature": 0.2,
-            "topP": 0.9,
-            "maxOutputTokens": 200
+            "temperature": 0.0,
+            "topP": 0.8,
+            "maxOutputTokens": 160
         }
     }
 
@@ -520,7 +593,11 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                         to_lang = room.host_lang or "tr"
 
                 try:
-                    translated = await translate_with_gemini(original_text, from_lang, to_lang)
+                    forced = maybe_translate_with_idiom_override(original_text, from_lang, to_lang)
+                    if forced:
+                        translated = forced
+                    else:
+                        translated = await translate_with_gemini(original_text, from_lang, to_lang)
                 except Exception as e:
                     logger.exception("INTERPRETER_TRANSLATE_FAIL %s", e)
                     await websocket.send_text(json.dumps({
