@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers import alltoall_ws
 from app.routers import onetoall_ws
+from app.routers import italky_ai_translate
 
 # CORE ROUTERS
 from app.routers import chat_ai
@@ -108,6 +109,7 @@ app.include_router(voice_enroll.router, prefix="/api")
 app.include_router(chat_ai.router, prefix="/api")
 app.include_router(alltoall_ws.router, prefix="/api")
 app.include_router(onetoall_ws.router, prefix="/api")
+app.include_router(italky_ai_translate.router, prefix="/api")
 
 # UI TRANSLATE
 app.include_router(ui_translate_router, prefix="/api")
