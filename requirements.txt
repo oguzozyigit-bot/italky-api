@@ -19,3 +19,5 @@ edge-tts==6.1.12
 google-cloud-translate==3.16.0
 google-cloud-speech==2.26.0
 google-cloud-vision==3.7.2
+groq==0.18.0
+sentence-transformers==3.4.1
