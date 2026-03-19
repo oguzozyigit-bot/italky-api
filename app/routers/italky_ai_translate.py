@@ -1,169 +1,120 @@
-# app/models/italky_translate.py
+# app/routers/italky_ai_translate.py
+from __future__ import annotations
 import os
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from app.core.db_sa import get_db
+import logging
+import httpx
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 from groq import Groq
 from sentence_transformers import SentenceTransformer
-import httpx
 
-router = APIRouter()
+# Senin tts.py içindeki çalışan fonksiyonları kullanıyoruz
+from app.routers.tts import cartesia_tts, get_user_profile
 
-# Ayarlar
+logger = logging.getLogger("uvicorn.error")
+router = APIRouter(tags=["italky-ai-engine"])
+
+# AYARLAR (Render Environment Variables)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-# Not: Embedding modeli ilk açılışta 100-200MB indirebilir, Render'da cache'lenir.
-embed_model = SentenceTransformer('all-MiniLM-L6-v2') 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+# Modeller
+embed_model = SentenceTransformer('all-MiniLM-L6-v2')
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-@router.post("/italky/translate")
-async def italky_cultural_translate(req: dict, db: Session = Depends(get_db)):
-    source_text = req.get("text", "").strip()
-    target_lang = req.get("target_lang", "en").strip()
+class CulturalTranslateRequest(BaseModel):
+    text: str
+    target_lang: str = "en"
+    user_id: str = None
+    tone: str = "neutral"
 
-    if not source_text:
-        return {"error": "Metin boş olamaz evladım."}
-
-    # 1. ANLAMSAL VEKTÖR OLUŞTUR
-    query_vector = embed_model.encode(source_text).tolist()
-
-    # 2. SUPABASE HAFIZA KONTROLÜ (Daha önce kurduğumuz SQL fonksiyonunu çağırıyoruz)
-    # Not: Doğrudan SQL execute ile hafızaya bakıyoruz
-    try:
-        from sqlalchemy import text as sa_text
-        # match_cultural_memory fonksiyonunu çağırıyoruz
-        sql = sa_text("SELECT * FROM match_cultural_memory(:vec, 0.85, 1)")
-        result = db.execute(sql, {"vec": query_vector}).fetchone()
-        
-        if result:
-            return {
-                "result": result.cultural_output,
-                "source": "italky_memory",
-                "explanation": result.meaning_description
-            }
-    except Exception as e:
-        print(f"Hafıza arama hatası: {e}")
-
-    # 3. HAFIZADA YOKSA GROQ (LLAMA 3.2) İLE KÜLTÜREL ÇEVİRİ
-    if not groq_client:
-        return {"error": "Groq API anahtarı ayarlanmamış."}
-
-    prompt = f"""Sen bir kültürel çeviri uzmanısın. 
-    Kaynak Metin: "{source_text}"
-    Hedef Dil: {target_lang}
-    Görevin: Bu metni hedef dile kelime kelime değil, o kültürdeki en yakın karşılığıyla çevir. 
-    Eğer bir atasözü veya deyimse, o kültürdeki tam karşılığını bul.
-    Sadece çeviriyi ve varsa çok kısa açıklamasını yaz."""
-
-    try:
-        chat_completion = groq_client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.2-3b-preview", # Aldığın key ile çalışan hızlı model
-            temperature=0.3
-        )
-        ai_response = chat_completion.choices[0].message.content.strip()
-
-        # 4. YENİ BİLGİYİ HAFIZAYA KAYDET (Öğrenen Yapı)
-        try:
-            insert_sql = sa_text("""
-                INSERT INTO italky_cultural_memory (source_text, target_lang, cultural_output, embedding)
-                VALUES (:txt, :lang, :out, :vec)
-                ON CONFLICT (source_text, target_lang) DO NOTHING
-            """)
-            db.execute(insert_sql, {
-                "txt": source_text, 
-                "lang": target_lang, 
-                "out": ai_response, 
-                "vec": query_vector
-            })
-            db.commit()
-        except:
-            db.rollback()
-
-        return {"result": ai_response, "source": "italky_ai_engine"}
-
-    except Exception as e:
-        return {"error": f"AI motoru hatası: {str(e)}"}# app/models/italky_translate.py
-import os
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from app.core.db_sa import get_db
-from groq import Groq
-from sentence_transformers import SentenceTransformer
-import httpx
-
-router = APIRouter()
-
-# Ayarlar
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
-# Not: Embedding modeli ilk açılışta 100-200MB indirebilir, Render'da cache'lenir.
-embed_model = SentenceTransformer('all-MiniLM-L6-v2') 
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-
-@router.post("/italky/translate")
-async def italky_cultural_translate(req: dict, db: Session = Depends(get_db)):
-    source_text = req.get("text", "").strip()
-    target_lang = req.get("target_lang", "en").strip()
-
-    if not source_text:
-        return {"error": "Metin boş olamaz evladım."}
+@router.post("/italky/cultural-translate-voice")
+async def italky_cultural_translate_voice(req: CulturalTranslateRequest):
+    if not req.text:
+        raise HTTPException(status_code=400, detail="Text is required")
 
     # 1. ANLAMSAL VEKTÖR OLUŞTUR
-    query_vector = embed_model.encode(source_text).tolist()
+    query_vector = embed_model.encode(req.text).tolist()
 
-    # 2. SUPABASE HAFIZA KONTROLÜ (Daha önce kurduğumuz SQL fonksiyonunu çağırıyoruz)
-    # Not: Doğrudan SQL execute ile hafızaya bakıyoruz
+    # 2. SUPABASE HAFIZA KONTROLÜ (Requests ile - app.core bağımlılığı olmadan)
+    memory_result = None
     try:
-        from sqlalchemy import text as sa_text
-        # match_cultural_memory fonksiyonunu çağırıyoruz
-        sql = sa_text("SELECT * FROM match_cultural_memory(:vec, 0.85, 1)")
-        result = db.execute(sql, {"vec": query_vector}).fetchone()
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            rpc_resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/rpc/match_cultural_memory",
+                json={
+                    "query_embedding": query_vector,
+                    "match_threshold": 0.88,
+                    "match_count": 1
+                },
+                headers={
+                    "apikey": SUPABASE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_KEY}",
+                }
+            )
+            if rpc_resp.status_code == 200:
+                data = rpc_resp.json()
+                if data:
+                    memory_result = data[0]
+    except Exception as e:
+        logger.error(f"Hafiza hatasi: {str(e)}")
+
+    # 3. ÇEVİRİ MANTIĞI
+    translated_text = ""
+    source_info = ""
+
+    if memory_result:
+        translated_text = memory_result['cultural_output']
+        source_info = "italky_memory"
+    else:
+        if not groq_client:
+            raise HTTPException(status_code=500, detail="Groq API Key missing")
+
+        prompt = f"Sen bir kültürel çeviri uzmanısın. '{req.text}' ifadesini {req.target_lang} diline kültürel karşılığıyla çevir. Sadece sonucu yaz."
         
-        if result:
-            return {
-                "result": result.cultural_output,
-                "source": "italky_memory",
-                "explanation": result.meaning_description
-            }
-    except Exception as e:
-        print(f"Hafıza arama hatası: {e}")
-
-    # 3. HAFIZADA YOKSA GROQ (LLAMA 3.2) İLE KÜLTÜREL ÇEVİRİ
-    if not groq_client:
-        return {"error": "Groq API anahtarı ayarlanmamış."}
-
-    prompt = f"""Sen bir kültürel çeviri uzmanısın. 
-    Kaynak Metin: "{source_text}"
-    Hedef Dil: {target_lang}
-    Görevin: Bu metni hedef dile kelime kelime değil, o kültürdeki en yakın karşılığıyla çevir. 
-    Eğer bir atasözü veya deyimse, o kültürdeki tam karşılığını bul.
-    Sadece çeviriyi ve varsa çok kısa açıklamasını yaz."""
-
-    try:
-        chat_completion = groq_client.chat.completions.create(
+        chat = groq_client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama-3.2-3b-preview", # Aldığın key ile çalışan hızlı model
-            temperature=0.3
+            model="llama-3.2-3b-preview",
+            temperature=0.2,
         )
-        ai_response = chat_completion.choices[0].message.content.strip()
+        translated_text = chat.choices[0].message.content.strip()
+        source_info = "italky_ai_engine"
 
-        # 4. YENİ BİLGİYİ HAFIZAYA KAYDET (Öğrenen Yapı)
+        # Kayıt (Async)
         try:
-            insert_sql = sa_text("""
-                INSERT INTO italky_cultural_memory (source_text, target_lang, cultural_output, embedding)
-                VALUES (:txt, :lang, :out, :vec)
-                ON CONFLICT (source_text, target_lang) DO NOTHING
-            """)
-            db.execute(insert_sql, {
-                "txt": source_text, 
-                "lang": target_lang, 
-                "out": ai_response, 
-                "vec": query_vector
-            })
-            db.commit()
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{SUPABASE_URL}/rest/v1/italky_cultural_memory",
+                    json={
+                        "source_text": req.text,
+                        "target_lang": req.target_lang,
+                        "cultural_output": translated_text,
+                        "embedding": query_vector
+                    },
+                    headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+                )
         except:
-            db.rollback()
+            pass
 
-        return {"result": ai_response, "source": "italky_ai_engine"}
+    # 4. SESLENDİRME (TTS)
+    audio_base64 = None
+    profile = await get_user_profile(req.user_id)
+    voice_id = (profile or {}).get("tts_voice_id")
+    voice_ready = bool(profile and profile.get("tts_voice_ready"))
 
-    except Exception as e:
-        return {"error": f"AI motoru hatası: {str(e)}"}
+    if voice_ready and voice_id:
+        audio_base64 = await cartesia_tts(
+            text=translated_text,
+            lang=req.target_lang,
+            voice_id=voice_id,
+            tone=req.tone,
+            use_tone=True
+        )
+
+    return {
+        "ok": True,
+        "source": source_info,
+        "output": translated_text,
+        "audio_base64": audio_base64
+    }
