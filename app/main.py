@@ -8,10 +8,13 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+
+# ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers import alltoall_ws
 from app.routers import onetoall_ws
 from app.routers import italky_ai_translate
+from app.routers import proximity_match  # <--- YENİ EKLEDİK
 
 # CORE ROUTERS
 from app.routers import chat_ai
@@ -65,15 +68,11 @@ app = FastAPI(
     redirect_slashes=False,
 )
 
-# ===============================
 # STATIC
-# ===============================
 os.makedirs("static", exist_ok=True)
 app.mount("/assets", StaticFiles(directory="static"), name="assets")
 
-# ===============================
 # CORS
-# ===============================
 ALLOWED_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
@@ -94,7 +93,7 @@ app.add_middleware(
 )
 
 # ===============================
-# CORE ROUTERS
+# ROUTER REGISTRATION
 # ===============================
 app.include_router(translate.router, prefix="/api")
 app.include_router(translate_ai.router, prefix="/api")
@@ -111,122 +110,67 @@ app.include_router(alltoall_ws.router, prefix="/api")
 app.include_router(onetoall_ws.router, prefix="/api")
 app.include_router(italky_ai_translate.router, prefix="/api")
 
+# YENİ SALLA-BAĞLAN RADAR MODÜLÜ
+app.include_router(proximity_match.router, prefix="/api") # <--- YENİ EKLEDİK
+
 # UI TRANSLATE
 app.include_router(ui_translate_router, prefix="/api")
 
-# ===============================
-# BILLING ROUTERS
-# ===============================
+# BILLING
 app.include_router(billing_google_router)
 app.include_router(offline_billing_router)
 app.include_router(usage_billing_router)
 app.include_router(interpreter_billing_router)
 app.include_router(meeting_billing_router)
 
-# ===============================
-# OPTIONAL ROUTERS
-# ===============================
+# OPTIONAL
 if has_offline:
     app.include_router(offline.router, prefix="/api")
-
 if has_exam_pro:
     app.include_router(exam_pro.router, prefix="/api")
-
 if has_level_test:
     app.include_router(level_test.router, prefix="/api")
-
 if has_ocr:
     app.include_router(ocr.router, prefix="/api")
 
-# ===============================
-# HEALTH
-# ===============================
+# HEALTH CHECK
 @app.get("/")
 def root():
-    return {
-        "status": "online",
-        "service": "italky-academy-api",
-        "version": APP_VERSION
-    }
-
+    return {"status": "online", "service": "italky-academy-api", "version": APP_VERSION}
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
 
-
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
 
-
-# ===============================
-# HARD ACCOUNT DELETE
-# ===============================
+# ACCOUNT DELETE LOGIC (Aynen korundu...)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-
 def _get_bearer(auth_header: str | None) -> str:
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
+    if not auth_header: raise HTTPException(status_code=401, detail="Missing Authorization header")
     parts = auth_header.split(" ", 1)
-
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Invalid Authorization header")
-
+    if len(parts) != 2 or parts[0].lower() != "bearer": raise HTTPException(status_code=401, detail="Invalid Authorization header")
     token = parts[1].strip()
-
-    if not token:
-        raise HTTPException(status_code=401, detail="Empty token")
-
+    if not token: raise HTTPException(status_code=401, detail="Empty token")
     return token
-
 
 @app.post("/api/account/delete")
 def delete_account(authorization: str | None = Header(default=None)):
-
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
-        raise HTTPException(status_code=500, detail="Supabase not configured")
-
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE: raise HTTPException(status_code=500, detail="Supabase not configured")
     access_token = _get_bearer(authorization)
-
     try:
-        user_resp = requests.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "apikey": SUPABASE_SERVICE_ROLE,
-            },
-            timeout=20,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-    if user_resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
+        user_resp = requests.get(f"{SUPABASE_URL}/auth/v1/user", headers={"Authorization": f"Bearer {access_token}", "apikey": SUPABASE_SERVICE_ROLE}, timeout=20)
+    except Exception as e: raise HTTPException(status_code=502, detail=str(e))
+    if user_resp.status_code != 200: raise HTTPException(status_code=401, detail="Invalid session")
     user_data = user_resp.json()
     user_id = user_data.get("id")
-
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User id missing")
-
+    if not user_id: raise HTTPException(status_code=401, detail="User id missing")
     try:
-        del_resp = requests.delete(
-            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
-            headers={
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-                "apikey": SUPABASE_SERVICE_ROLE,
-                "Content-Type": "application/json",
-            },
-            timeout=20,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-    if del_resp.status_code not in (200, 204):
-        raise HTTPException(status_code=500, detail="Delete failed")
-
+        del_resp = requests.delete(f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}", headers={"Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}", "apikey": SUPABASE_SERVICE_ROLE, "Content-Type": "application/json"}, timeout=20)
+    except Exception as e: raise HTTPException(status_code=502, detail=str(e))
+    if del_resp.status_code not in (200, 204): raise HTTPException(status_code=500, detail="Delete failed")
     return {"ok": True}
