@@ -76,6 +76,7 @@ class SearchState:
     updated_at: float = field(default_factory=time.time)
     expires_at: float = field(default_factory=lambda: time.time() + SEARCH_TTL_SECONDS)
     matched_at: Optional[float] = None
+    client_role: Optional[str] = None
 
 
 # =========================================================
@@ -168,6 +169,7 @@ def search_to_matched_payload(search: SearchState) -> dict:
         "match_id": search.match_id,
         "room_id": search.room_id,
         "peer_id": search.peer_id,
+        "client_role": search.client_role or "guest",
         "join_url": build_join_url(search.room_id),
         "ws_url": build_ws_url(search.room_id),
         "matched_at": int(search.matched_at or time.time()),
@@ -345,21 +347,22 @@ async def shake_match(req: ShakeMatchRequest):
             matched_at = time.time()
 
             current_search.status = "matched"
-            current_search.room_id = room_id
-            current_search.peer_id = peer_search.user_id
-            current_search.match_id = match_id
-            current_search.matched_at = matched_at
-            current_search.expires_at = matched_at + MATCH_TTL_SECONDS
-            current_search.updated_at = matched_at
+current_search.room_id = room_id
+current_search.peer_id = peer_search.user_id
+current_search.match_id = match_id
+current_search.client_role = "guest"
+current_search.matched_at = matched_at
+current_search.expires_at = matched_at + MATCH_TTL_SECONDS
+current_search.updated_at = matched_at
 
-            peer_search.status = "matched"
-            peer_search.room_id = room_id
-            peer_search.peer_id = current_search.user_id
-            peer_search.match_id = match_id
-            peer_search.matched_at = matched_at
-            peer_search.expires_at = matched_at + MATCH_TTL_SECONDS
-            peer_search.updated_at = matched_at
-
+peer_search.status = "matched"
+peer_search.room_id = room_id
+peer_search.peer_id = current_search.user_id
+peer_search.match_id = match_id
+peer_search.client_role = "host"
+peer_search.matched_at = matched_at
+peer_search.expires_at = matched_at + MATCH_TTL_SECONDS
+peer_search.updated_at = matched_at
             ACTIVE_SEARCH_ID_BY_USER.pop(current_search.user_id, None)
             ACTIVE_SEARCH_ID_BY_USER.pop(peer_search.user_id, None)
 
