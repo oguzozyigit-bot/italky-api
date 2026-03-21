@@ -123,9 +123,6 @@ def normalize_lang(value: Optional[str], fallback: str = "tr") -> str:
 
 
 def get_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    İki koordinat arasındaki mesafeyi metre cinsinden hesaplar.
-    """
     r = 6371000.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -146,7 +143,7 @@ def search_to_searching_payload(search: SearchState) -> dict:
         "search_id": search.search_id,
         "expires_in_ms": remaining_ms,
         "poll_after_ms": SEARCH_POLL_MS,
-        "message": "Yakınlarda sallanan cihaz aranıyor...",
+        "message": "Yakınlarda uygun cihaz aranıyor...",
     }
 
 
@@ -196,10 +193,6 @@ async def ensure_interpreter_room_for_match(
     guest_user_id: str,
     guest_lang: str,
 ) -> str:
-    """
-    interpreter.py içindeki oda sistemini kullanır.
-    Manuel kod girmeden aynı room_id'yi iki kullanıcıya verir.
-    """
     room_id = secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:12]
     host_code = new_host_code()
 
@@ -298,13 +291,6 @@ def find_best_peer(req: ShakeMatchRequest) -> Optional[tuple[SearchState, float]
 
 @router.post("/italky/shake-match")
 async def shake_match(req: ShakeMatchRequest):
-    """
-    Akış:
-    1) eski kayıtları temizle
-    2) aynı user çok hızlı üst üste vuruyorsa mevcut aramayı döndür
-    3) uygun peer varsa aynı room_id ile iki tarafı matched yap
-    4) yoksa searching dön
-    """
     if not req.user_id.strip():
         raise HTTPException(status_code=422, detail="user_id is required")
 
@@ -347,22 +333,23 @@ async def shake_match(req: ShakeMatchRequest):
             matched_at = time.time()
 
             current_search.status = "matched"
-current_search.room_id = room_id
-current_search.peer_id = peer_search.user_id
-current_search.match_id = match_id
-current_search.client_role = "guest"
-current_search.matched_at = matched_at
-current_search.expires_at = matched_at + MATCH_TTL_SECONDS
-current_search.updated_at = matched_at
+            current_search.room_id = room_id
+            current_search.peer_id = peer_search.user_id
+            current_search.match_id = match_id
+            current_search.client_role = "guest"
+            current_search.matched_at = matched_at
+            current_search.expires_at = matched_at + MATCH_TTL_SECONDS
+            current_search.updated_at = matched_at
 
-peer_search.status = "matched"
-peer_search.room_id = room_id
-peer_search.peer_id = current_search.user_id
-peer_search.match_id = match_id
-peer_search.client_role = "host"
-peer_search.matched_at = matched_at
-peer_search.expires_at = matched_at + MATCH_TTL_SECONDS
-peer_search.updated_at = matched_at
+            peer_search.status = "matched"
+            peer_search.room_id = room_id
+            peer_search.peer_id = current_search.user_id
+            peer_search.match_id = match_id
+            peer_search.client_role = "host"
+            peer_search.matched_at = matched_at
+            peer_search.expires_at = matched_at + MATCH_TTL_SECONDS
+            peer_search.updated_at = matched_at
+
             ACTIVE_SEARCH_ID_BY_USER.pop(current_search.user_id, None)
             ACTIVE_SEARCH_ID_BY_USER.pop(peer_search.user_id, None)
 
@@ -388,9 +375,6 @@ peer_search.updated_at = matched_at
 
 @router.get("/italky/shake-status/{search_id}")
 async def shake_status(search_id: str, user_id: Optional[str] = Query(default=None)):
-    """
-    İlk sallayan kullanıcı sonradan match oldu mu diye buradan poll eder.
-    """
     async with MATCH_LOCK:
         prune_expired_states()
 
@@ -421,11 +405,6 @@ async def create_guest_link(
     room_id: Optional[str] = Query(default=None),
     my_lang: str = Query(default="tr"),
 ):
-    """
-    Uygulaması olmayan arkadaş için interpreter room linki üretir.
-    room_id verilirse mevcut odayı kullanır.
-    room_id verilmezse yeni interpreter room açar.
-    """
     user_id = user_id.strip()
     my_lang = normalize_lang(my_lang, "tr")
 
