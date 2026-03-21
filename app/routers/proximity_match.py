@@ -16,7 +16,7 @@ from supabase import create_client
 from app.push import send_push_v1
 
 logger = logging.getLogger("italky-proximity")
-router = APIRouter(tags=["italky-proximity"])
+router = APIRouter(prefix="/italky", tags=["italky-proximity"])
 
 
 # =========================================================
