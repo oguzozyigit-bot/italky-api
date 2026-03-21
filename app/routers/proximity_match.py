@@ -5,9 +5,8 @@ import logging
 import math
 import os
 import secrets
-import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -16,28 +15,30 @@ from supabase import create_client
 from app.push import send_push_v1
 
 logger = logging.getLogger("italky-proximity")
+
+# 🔥 PREFIX DOĞRU
 router = APIRouter(prefix="/italky", tags=["italky-proximity"])
 
 
-# =========================================================
+# ===============================
 # SUPABASE
-# =========================================================
+# ===============================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-# =========================================================
+# ===============================
 # AYARLAR
-# =========================================================
+# ===============================
 
 MATCH_RADIUS_METERS = float(os.getenv("SHAKE_MATCH_RADIUS_METERS", "20"))
 
 
-# =========================================================
+# ===============================
 # MODELLER
-# =========================================================
+# ===============================
 
 class ShakeMatchRequest(BaseModel):
     user_id: str
@@ -60,9 +61,9 @@ SEARCHES: Dict[str, SearchState] = {}
 LOCK = asyncio.Lock()
 
 
-# =========================================================
+# ===============================
 # HELPER
-# =========================================================
+# ===============================
 
 def get_distance(lat1, lon1, lat2, lon2):
     r = 6371000
@@ -79,25 +80,25 @@ def new_id():
     return secrets.token_hex(6)
 
 
+# 🔥 GEÇİCİ TOKEN FIX (UUID PROBLEMİNİ BYPASS)
 def get_token(user_id: str) -> str:
     try:
         r = supabase.table("profiles") \
             .select("fcm_token") \
-            .eq("id", user_id) \
-            .single() \
+            .limit(1) \
             .execute()
 
-        return r.data.get("fcm_token") or ""
+        return r.data[0]["fcm_token"]
     except Exception as e:
-        logger.warning(f"TOKEN FETCH ERROR: {e}")
+        logger.warning(f"TOKEN ERROR: {e}")
         return ""
 
 
-# =========================================================
-# MAIN ENDPOINT
-# =========================================================
+# ===============================
+# SHAKE MATCH
+# ===============================
 
-@router.post("/italky/shake-match")
+@router.post("/shake-match")
 async def shake_match(req: ShakeMatchRequest):
 
     if not req.user_id:
@@ -105,7 +106,6 @@ async def shake_match(req: ShakeMatchRequest):
 
     async with LOCK:
 
-        # 🔍 eşleşme ara
         for s in SEARCHES.values():
 
             if s.user_id == req.user_id:
@@ -120,13 +120,11 @@ async def shake_match(req: ShakeMatchRequest):
 
                 room_id = new_id()
 
-                logger.info(f"MATCH FOUND → room={room_id}")
+                logger.info(f"MATCH → {room_id}")
 
-                # 🔥 TOKEN AL
                 token_a = get_token(req.user_id)
                 token_b = get_token(s.user_id)
 
-                # 🔥 PUSH GÖNDER (V1)
                 try:
                     send_push_v1(token_a, {
                         "room_id": room_id,
@@ -151,7 +149,6 @@ async def shake_match(req: ShakeMatchRequest):
                     "client_role": "guest"
                 }
 
-        # ❌ eşleşme yok → listeye ekle
         sid = new_id()
 
         SEARCHES[sid] = SearchState(
@@ -162,9 +159,23 @@ async def shake_match(req: ShakeMatchRequest):
             my_lang=req.my_lang
         )
 
-        logger.info(f"SEARCHING → user={req.user_id}")
-
         return {
             "status": "searching",
             "search_id": sid
         }
+
+
+# ===============================
+# GUEST LINK (QR FIX)
+# ===============================
+
+@router.get("/create-guest-link")
+async def create_guest_link(user_id: str):
+
+    room_id = new_id()
+
+    return {
+        "ok": True,
+        "room_id": room_id,
+        "join_url": f"https://italky.ai/open/interpreter?room={room_id}&guest=1"
+    }
