@@ -6,33 +6,26 @@ import math
 import os
 import secrets
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, Optional
 
-import requests
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
-from app.routers.interpreter import (
-    HOST_ACTIVE_ROOM,
-    ROOMS,
-    ROOM_LOCK,
-    PeerState,
-    RoomState,
-)
-
-# 🔥 SUPABASE
 from supabase import create_client
+from app.push import send_push_v1
+
+logger = logging.getLogger("italky-proximity")
+router = APIRouter(tags=["italky-proximity"])
+
+
+# =========================================================
+# SUPABASE
+# =========================================================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# 🔥 FCM
-FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "")
-
-logger = logging.getLogger("italky-proximity")
-router = APIRouter(tags=["italky-proximity"])
 
 
 # =========================================================
@@ -40,9 +33,6 @@ router = APIRouter(tags=["italky-proximity"])
 # =========================================================
 
 MATCH_RADIUS_METERS = float(os.getenv("SHAKE_MATCH_RADIUS_METERS", "20"))
-MATCH_WINDOW_SECONDS = int(os.getenv("SHAKE_MATCH_WINDOW_SECONDS", "5"))
-
-FRONTEND_BASE_URL = "https://italky.ai"
 
 
 # =========================================================
@@ -64,7 +54,6 @@ class SearchState:
     lon: float
     my_lang: str
     status: str = "searching"
-    room_id: Optional[str] = None
 
 
 SEARCHES: Dict[str, SearchState] = {}
@@ -90,39 +79,18 @@ def new_id():
     return secrets.token_hex(6)
 
 
-def get_token(user_id):
+def get_token(user_id: str) -> str:
     try:
-        r = supabase.table("profiles").select("fcm_token").eq("id", user_id).single().execute()
+        r = supabase.table("profiles") \
+            .select("fcm_token") \
+            .eq("id", user_id) \
+            .single() \
+            .execute()
+
         return r.data.get("fcm_token") or ""
-    except:
+    except Exception as e:
+        logger.warning(f"TOKEN FETCH ERROR: {e}")
         return ""
-
-
-def send_push(token, room_id, role, my_lang, peer_lang):
-    if not token:
-        return
-
-    requests.post(
-        "https://fcm.googleapis.com/fcm/send",
-        headers={
-            "Authorization": f"key={FCM_SERVER_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "to": token,
-            "priority": "high",
-            "data": {
-                "room_id": room_id,
-                "role": role,
-                "my_lang": my_lang,
-                "peer_lang": peer_lang
-            },
-            "notification": {
-                "title": "italkyAI",
-                "body": "Bağlantı isteği geldi"
-            }
-        }
-    )
 
 
 # =========================================================
@@ -132,25 +100,50 @@ def send_push(token, room_id, role, my_lang, peer_lang):
 @router.post("/italky/shake-match")
 async def shake_match(req: ShakeMatchRequest):
 
+    if not req.user_id:
+        raise HTTPException(status_code=422, detail="user_id required")
+
     async with LOCK:
 
-        # 🔍 uygun peer bul
+        # 🔍 eşleşme ara
         for s in SEARCHES.values():
+
             if s.user_id == req.user_id:
                 continue
 
             if s.status != "searching":
                 continue
 
-            dist = get_distance(req.lat, req.lon, s.lat, s.lon)
+            distance = get_distance(req.lat, req.lon, s.lat, s.lon)
 
-            if dist <= MATCH_RADIUS_METERS:
+            if distance <= MATCH_RADIUS_METERS:
 
                 room_id = new_id()
 
-                # 🔥 PUSH GÖNDER
-                send_push(get_token(req.user_id), room_id, "guest", req.my_lang, s.my_lang)
-                send_push(get_token(s.user_id), room_id, "host", s.my_lang, req.my_lang)
+                logger.info(f"MATCH FOUND → room={room_id}")
+
+                # 🔥 TOKEN AL
+                token_a = get_token(req.user_id)
+                token_b = get_token(s.user_id)
+
+                # 🔥 PUSH GÖNDER (V1)
+                try:
+                    send_push_v1(token_a, {
+                        "room_id": room_id,
+                        "role": "guest",
+                        "my_lang": req.my_lang,
+                        "peer_lang": s.my_lang
+                    })
+
+                    send_push_v1(token_b, {
+                        "room_id": room_id,
+                        "role": "host",
+                        "my_lang": s.my_lang,
+                        "peer_lang": req.my_lang
+                    })
+
+                except Exception as e:
+                    logger.warning(f"PUSH ERROR: {e}")
 
                 return {
                     "status": "matched",
@@ -158,8 +151,9 @@ async def shake_match(req: ShakeMatchRequest):
                     "client_role": "guest"
                 }
 
-        # ❌ eşleşme yok → search ekle
+        # ❌ eşleşme yok → listeye ekle
         sid = new_id()
+
         SEARCHES[sid] = SearchState(
             search_id=sid,
             user_id=req.user_id,
@@ -167,6 +161,8 @@ async def shake_match(req: ShakeMatchRequest):
             lon=req.lon,
             my_lang=req.my_lang
         )
+
+        logger.info(f"SEARCHING → user={req.user_id}")
 
         return {
             "status": "searching",
