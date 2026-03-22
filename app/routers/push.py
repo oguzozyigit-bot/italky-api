@@ -128,3 +128,12 @@ def send_push_v1(token: str, data: dict):
 
     except Exception as e:
         print("❌ PUSH HTTP ERROR:", e)
+        @router.get("/test-save")
+def test_save():
+    try:
+        supabase.table("profiles").update({
+            "fcm_token": "TEST_TOKEN_123"
+        }).neq("id", "").execute()
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
