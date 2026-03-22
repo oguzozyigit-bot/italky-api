@@ -15,46 +15,82 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-PROJECT_ID = "italkyai-new"  # 🔥 BURAYA PROJE ID YAZ
+PROJECT_ID = "italkyai-new"
 
 
 class TokenBody(BaseModel):
     token: str
 
 
+# ===============================
+# TOKEN SAVE
+# ===============================
+
 @router.post("/save-token")
 def save_token(body: TokenBody):
+    try:
+        token = body.token
 
-    supabase.table("profiles").update({
-        "fcm_token": body.token
-    }).neq("id", "").execute()
+        if not token:
+            return {"ok": False, "error": "empty token"}
 
-    return {"ok": True}
+        supabase.table("profiles").update({
+            "fcm_token": token
+        }).neq("id", "").execute()
+
+        print("TOKEN SAVED:", token)
+
+        return {"ok": True}
+
+    except Exception as e:
+        print("SAVE TOKEN ERROR:", e)
+        return {"ok": False, "error": str(e)}
 
 
 # ===============================
-# 🔥 V1 PUSH
+# ACCESS TOKEN
 # ===============================
 
 def get_access_token():
-    creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-    creds_dict = json.loads(creds_json)
+    try:
+        creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 
-    creds = service_account.Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/firebase.messaging"]
-    )
+        if not creds_json:
+            raise Exception("GOOGLE_APPLICATION_CREDENTIALS_JSON empty")
 
-    creds.refresh(Request())
-    return creds.token
+        creds_dict = json.loads(creds_json)
 
+        creds = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+        )
+
+        creds.refresh(Request())
+
+        print("ACCESS TOKEN OK")
+
+        return creds.token
+
+    except Exception as e:
+        print("ACCESS TOKEN ERROR:", e)
+        return None
+
+
+# ===============================
+# PUSH SEND
+# ===============================
 
 def send_push_v1(token: str, data: dict):
 
     if not token:
+        print("PUSH SKIPPED: token empty")
         return
 
     access_token = get_access_token()
+
+    if not access_token:
+        print("PUSH ERROR: no access token")
+        return
 
     url = f"https://fcm.googleapis.com/v1/projects/{PROJECT_ID}/messages:send"
 
@@ -69,11 +105,18 @@ def send_push_v1(token: str, data: dict):
         }
     }
 
-    requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        },
-        json=body
-    )
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json"
+            },
+            json=body
+        )
+
+        print("PUSH STATUS:", response.status_code)
+        print("PUSH RESPONSE:", response.text)
+
+    except Exception as e:
+        print("PUSH ERROR:", e)
