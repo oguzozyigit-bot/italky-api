@@ -9,9 +9,6 @@ from google.auth.transport.requests import Request
 
 router = APIRouter()
 
-# ===============================
-# CONFIG
-# ===============================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -19,17 +16,11 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 PROJECT_ID = "italkyai-new"
 
 
-# ===============================
-# MODEL
-# ===============================
 class TokenBody(BaseModel):
     user_id: str
     token: str
 
 
-# ===============================
-# TOKEN SAVE
-# ===============================
 @router.post("/save-token")
 def save_token(body: TokenBody):
     try:
@@ -43,18 +34,15 @@ def save_token(body: TokenBody):
             "fcm_token": token
         }).eq("id", user_id).execute()
 
-        print(f"✅ TOKEN SAVED: {user_id}")
+        print(f"TOKEN SAVED: {user_id}")
 
         return {"ok": True}
 
     except Exception as e:
-        print("❌ SAVE TOKEN ERROR:", e)
+        print("SAVE TOKEN ERROR:", e)
         return {"ok": False, "error": str(e)}
 
 
-# ===============================
-# TEST ENDPOINT (DEBUG)
-# ===============================
 @router.get("/test-save")
 def test_save():
     try:
@@ -62,24 +50,21 @@ def test_save():
             "fcm_token": "TEST_TOKEN_123"
         }).neq("id", "").execute()
 
-        print("✅ TEST TOKEN WRITTEN")
+        print("TEST TOKEN WRITTEN")
 
         return {"ok": True}
 
     except Exception as e:
-        print("❌ TEST SAVE ERROR:", e)
+        print("TEST SAVE ERROR:", e)
         return {"ok": False, "error": str(e)}
 
 
-# ===============================
-# GOOGLE ACCESS TOKEN
-# ===============================
 def get_access_token():
     try:
         creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 
         if not creds_json:
-            print("❌ GOOGLE_APPLICATION_CREDENTIALS_JSON EMPTY")
+            print("GOOGLE_APPLICATION_CREDENTIALS_JSON EMPTY")
             return None
 
         creds_dict = json.loads(creds_json)
@@ -94,23 +79,19 @@ def get_access_token():
         return creds.token
 
     except Exception as e:
-        print("❌ ACCESS TOKEN ERROR:", e)
+        print("ACCESS TOKEN ERROR:", e)
         return None
 
 
-# ===============================
-# PUSH SEND
-# ===============================
 def send_push_v1(token: str, data: dict):
-
     if not token:
-        print("⚠️ PUSH SKIPPED: token empty")
+        print("PUSH SKIPPED: token empty")
         return
 
     access_token = get_access_token()
 
     if not access_token:
-        print("❌ PUSH ERROR: no access token")
+        print("PUSH ERROR: no access token")
         return
 
     url = f"https://fcm.googleapis.com/v1/projects/{PROJECT_ID}/messages:send"
@@ -143,7 +124,7 @@ def send_push_v1(token: str, data: dict):
             json=body
         )
 
-        print("📨 PUSH RESULT:", response.status_code, response.text)
+        print("PUSH RESULT:", response.status_code, response.text)
 
     except Exception as e:
-        print("❌ PUSH HTTP ERROR:", e)
+        print("PUSH HTTP ERROR:", e)
