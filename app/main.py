@@ -8,6 +8,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+from app.routers import push
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
@@ -109,6 +110,7 @@ app.include_router(chat_ai.router, prefix="/api")
 app.include_router(alltoall_ws.router, prefix="/api")
 app.include_router(onetoall_ws.router, prefix="/api")
 app.include_router(italky_ai_translate.router, prefix="/api")
+app.include_router(push.router, prefix="/api")
 
 # YENİ SALLA-BAĞLAN RADAR MODÜLÜ
 app.include_router(proximity_match.router, prefix="/api") # <--- YENİ EKLEDİK
