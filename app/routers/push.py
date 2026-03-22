@@ -16,7 +16,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-PROJECT_ID = "italkyai-new"  # Firebase Project ID
+PROJECT_ID = "italkyai-new"
 
 
 # ===============================
@@ -53,7 +53,26 @@ def save_token(body: TokenBody):
 
 
 # ===============================
-# GOOGLE ACCESS TOKEN (FCM V1)
+# TEST ENDPOINT (DEBUG)
+# ===============================
+@router.get("/test-save")
+def test_save():
+    try:
+        supabase.table("profiles").update({
+            "fcm_token": "TEST_TOKEN_123"
+        }).neq("id", "").execute()
+
+        print("✅ TEST TOKEN WRITTEN")
+
+        return {"ok": True}
+
+    except Exception as e:
+        print("❌ TEST SAVE ERROR:", e)
+        return {"ok": False, "error": str(e)}
+
+
+# ===============================
+# GOOGLE ACCESS TOKEN
 # ===============================
 def get_access_token():
     try:
@@ -80,7 +99,7 @@ def get_access_token():
 
 
 # ===============================
-# PUSH GÖNDER
+# PUSH SEND
 # ===============================
 def send_push_v1(token: str, data: dict):
 
@@ -128,12 +147,3 @@ def send_push_v1(token: str, data: dict):
 
     except Exception as e:
         print("❌ PUSH HTTP ERROR:", e)
-        @router.get("/test-save")
-def test_save():
-    try:
-        supabase.table("profiles").update({
-            "fcm_token": "TEST_TOKEN_123"
-        }).neq("id", "").execute()
-        return {"ok": True}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
