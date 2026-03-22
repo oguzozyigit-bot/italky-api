@@ -12,8 +12,3 @@ from . import f2f_ws
 from . import tts
 from . import stt
 from . import ocr_translate
-from . import push
-
-
-# OPTIONALS are imported inside main.py with try/except as you already do:
-# exam_pro, level_test, voice_openai, ocr, offline
