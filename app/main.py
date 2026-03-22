@@ -8,7 +8,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from app.routers import push
+from app.routers.push import router as push_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
