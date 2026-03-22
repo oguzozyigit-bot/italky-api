@@ -16,7 +16,6 @@ from app.push import send_push_v1
 
 logger = logging.getLogger("italky-proximity")
 
-# 🔥 PREFIX DOĞRU
 router = APIRouter(prefix="/italky", tags=["italky-proximity"])
 
 
@@ -80,7 +79,7 @@ def new_id():
     return secrets.token_hex(6)
 
 
-# 🔥 GEÇİCİ TOKEN FIX (UUID PROBLEMİNİ BYPASS)
+# 🔥 TOKEN (şimdilik ilk user – sonra düzelteceğiz)
 def get_token(user_id: str) -> str:
     try:
         r = supabase.table("profiles") \
@@ -89,13 +88,12 @@ def get_token(user_id: str) -> str:
             .execute()
 
         return r.data[0]["fcm_token"]
-    except Exception as e:
-        logger.warning(f"TOKEN ERROR: {e}")
+    except:
         return ""
 
 
 # ===============================
-# SHAKE MATCH
+# TEK TARAFLI SHAKE MATCH
 # ===============================
 
 @router.post("/shake-match")
@@ -106,6 +104,7 @@ async def shake_match(req: ShakeMatchRequest):
 
     async with LOCK:
 
+        # 🔍 çevrede cihaz var mı?
         for s in SEARCHES.values():
 
             if s.user_id == req.user_id:
@@ -120,35 +119,30 @@ async def shake_match(req: ShakeMatchRequest):
 
                 room_id = new_id()
 
-                logger.info(f"MATCH → {room_id}")
+                logger.info(f"SINGLE MATCH → {room_id}")
 
-                token_a = get_token(req.user_id)
-                token_b = get_token(s.user_id)
+                # 🔥 SADECE KARŞI TARAFA PUSH
+                target_token = get_token(s.user_id)
 
                 try:
-                    send_push_v1(token_a, {
+                    send_push_v1(target_token, {
                         "room_id": room_id,
                         "role": "guest",
-                        "my_lang": req.my_lang,
-                        "peer_lang": s.my_lang
-                    })
-
-                    send_push_v1(token_b, {
-                        "room_id": room_id,
-                        "role": "host",
                         "my_lang": s.my_lang,
-                        "peer_lang": req.my_lang
+                        "peer_lang": req.my_lang,
+                        "auto": "1"
                     })
-
                 except Exception as e:
                     logger.warning(f"PUSH ERROR: {e}")
 
+                # 🔥 SALLAYAN ANINDA HOST OLUR
                 return {
                     "status": "matched",
                     "room_id": room_id,
-                    "client_role": "guest"
+                    "client_role": "host"
                 }
 
+        # ❌ kimse yok → search ekle
         sid = new_id()
 
         SEARCHES[sid] = SearchState(
@@ -166,7 +160,7 @@ async def shake_match(req: ShakeMatchRequest):
 
 
 # ===============================
-# GUEST LINK (QR FIX)
+# GUEST LINK (QR FALLBACK)
 # ===============================
 
 @router.get("/create-guest-link")
