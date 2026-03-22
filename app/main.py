@@ -110,7 +110,7 @@ app.include_router(chat_ai.router, prefix="/api")
 app.include_router(alltoall_ws.router, prefix="/api")
 app.include_router(onetoall_ws.router, prefix="/api")
 app.include_router(italky_ai_translate.router, prefix="/api")
-app.include_router(push.router, prefix="/api")
+app.include_router(push_router, prefix="/api")
 
 # YENİ SALLA-BAĞLAN RADAR MODÜLÜ
 app.include_router(proximity_match.router, prefix="/api") # <--- YENİ EKLEDİK
