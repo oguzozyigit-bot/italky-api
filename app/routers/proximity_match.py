@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import os
 import secrets
-import time
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
@@ -26,14 +24,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 # ===============================
-# AYARLAR
-# ===============================
-
-MATCH_RADIUS_METERS = float(os.getenv("SHAKE_MATCH_RADIUS_METERS", "200"))  # genişlettik
-USER_TTL = 10  # saniye
-
-
-# ===============================
 # MODELLER
 # ===============================
 
@@ -44,11 +34,6 @@ class ShakeMatchRequest(BaseModel):
     my_lang: str = "tr"
 
 
-# ===============================
-# MEMORY
-# ===============================
-
-ACTIVE_USERS = {}
 LOCK = asyncio.Lock()
 
 
@@ -60,47 +45,17 @@ def new_id():
     return secrets.token_hex(6)
 
 
-def get_distance(lat1, lon1, lat2, lon2):
-    r = 6371000
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
-    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
-
-def get_token(user_id: str) -> str:
+def get_all_tokens():
     try:
-        r = supabase.table("profiles") \
-            .select("fcm_token") \
-            .eq("id", user_id) \
-            .execute()
-
-        if r.data and len(r.data) > 0:
-            return r.data[0].get("fcm_token") or ""
-
-        return ""
+        r = supabase.table("profiles").select("fcm_token").execute()
+        return [x["fcm_token"] for x in r.data if x.get("fcm_token")]
     except Exception as e:
-        logger.warning(f"TOKEN ERROR: {e}")
-        return ""
-
-
-def clean_old_users():
-    now = time.time()
-    to_delete = []
-
-    for uid, data in ACTIVE_USERS.items():
-        if now - data["ts"] > USER_TTL:
-            to_delete.append(uid)
-
-    for uid in to_delete:
-        del ACTIVE_USERS[uid]
+        logger.warning(f"TOKEN FETCH ERROR: {e}")
+        return []
 
 
 # ===============================
-# MAIN MATCH
+# SHAKE MATCH (FORCED VERSION)
 # ===============================
 
 @router.post("/shake-match")
@@ -111,66 +66,36 @@ async def shake_match(req: ShakeMatchRequest):
 
     async with LOCK:
 
-        clean_old_users()
+        # 🔥 HER ZAMAN ROOM OLUŞTUR
+        room_id = new_id()
 
-        # 🔥 kendini kaydet
-        ACTIVE_USERS[req.user_id] = {
-            "lat": req.lat,
-            "lon": req.lon,
-            "ts": time.time(),
-            "lang": req.my_lang
-        }
+        logger.info(f"FORCED MATCH → {room_id}")
 
-        # 🔍 en yakın kullanıcıyı bul
-        closest_user = None
-        closest_distance = 999999
+        # 🔥 TÜM TOKENLARI AL
+        tokens = get_all_tokens()
 
-        for uid, data in ACTIVE_USERS.items():
-
-            if uid == req.user_id:
-                continue
-
-            distance = get_distance(req.lat, req.lon, data["lat"], data["lon"])
-
-            if distance < closest_distance:
-                closest_distance = distance
-                closest_user = uid
-
-        # 🔥 EŞLEŞME
-        if closest_user and closest_distance <= MATCH_RADIUS_METERS:
-
-            room_id = new_id()
-
-            logger.info(f"MATCH → {req.user_id} <-> {closest_user} | {room_id}")
-
-            # 🔥 PUSH (karşı tarafa)
-            target_token = get_token(closest_user)
-
+        # 🔥 HERKESE PUSH GÖNDER (TEST MOD)
+        for token in tokens:
             try:
-                send_push_v1(target_token, {
+                send_push_v1(token, {
                     "room_id": room_id,
                     "role": "guest",
-                    "my_lang": ACTIVE_USERS[closest_user]["lang"],
-                    "peer_lang": req.my_lang,
+                    "my_lang": req.my_lang,
+                    "peer_lang": "en",
                     "auto": "1"
                 })
             except Exception as e:
                 logger.warning(f"PUSH ERROR: {e}")
 
-            return {
-                "status": "matched",
-                "room_id": room_id,
-                "client_role": "host"
-            }
-
-        # 🔄 BEKLEME
         return {
-            "status": "searching"
+            "status": "matched",
+            "room_id": room_id,
+            "client_role": "host"
         }
 
 
 # ===============================
-# GUEST LINK
+# GUEST LINK (QR FALLBACK)
 # ===============================
 
 @router.get("/create-guest-link")
