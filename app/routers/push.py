@@ -16,14 +16,15 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# 🔥 KRİTİK: Firebase Console > Proje Ayarları'ndaki Project ID ile aynı olmalı
 PROJECT_ID = "italkyai-new"
 
 class TokenBody(BaseModel):
-    user_id: str  # Android'den gelen Supabase UID
+    user_id: str  # Android'den gelen Supabase UID (Artık TEXT formatında)
     token: str    # FCM Token
 
 # ===============================
-# TOKEN SAVE (DÜZELTİLMİŞ)
+# TOKEN SAVE (UID UYUMLU)
 # ===============================
 @router.post("/save-token")
 def save_token(body: TokenBody):
@@ -34,8 +35,7 @@ def save_token(body: TokenBody):
         if not token or not user_id:
             return {"ok": False, "error": "UID or Token is empty"}
 
-        # 🔥 KRİTİK DÜZELTME: Sadece ilgili kullanıcıyı güncelle (.eq kullanıyoruz)
-        # Eskiden .neq("id", "") olduğu için herkesi eziyordu.
+        # Veritabanında ilgili kullanıcıyı bul ve token'ını güncelle
         supabase.table("profiles").update({
             "fcm_token": token
         }).eq("id", user_id).execute()
@@ -71,7 +71,7 @@ def get_access_token():
         return None
 
 # ===============================
-# PUSH SEND (OPTIMIZE EDİLMİŞ)
+# PUSH SEND (YAMALI & GARANTİ SÜRÜM)
 # ===============================
 def send_push_v1(token: str, data: dict):
     if not token:
@@ -85,18 +85,19 @@ def send_push_v1(token: str, data: dict):
 
     url = f"https://fcm.googleapis.com/v1/projects/{PROJECT_ID}/messages:send"
 
-    # Android tarafındaki intent.getStringExtra("push_room_id") vb. ile tam uyumlu yapı
+    # 🔥 YAMALANMIŞ BODY YAPISI
     body = {
         "message": {
             "token": token,
-            "data": data, # Gelen tüm veriyi (room_id, role vb.) buraya basıyoruz
             "notification": {
                 "title": "italkyAI",
-                "body": "Yakınında bir italky oturumu başladı!"
+                "body": "Yakınında bir italky oturumu başladı! 👋"
             },
+            "data": data, # room_id, role vb. buraya basıyoruz
             "android": {
                 "priority": "high",
                 "notification": {
+                    "channel_id": "default", # 🔥 Android kanalı için kritik
                     "sound": "default",
                     "click_action": "OPEN_MAIN_ACTIVITY"
                 }
@@ -113,6 +114,7 @@ def send_push_v1(token: str, data: dict):
             },
             json=body
         )
-        print(f"PUSH STATUS: {response.status_code} | RESPONSE: {response.text}")
+        # Loglarda tam sonucu görelim:
+        print(f"FCM RESULT: {response.status_code} | {response.text}")
     except Exception as e:
-        print("PUSH ERROR:", e)
+        print("PUSH HTTP ERROR:", e)
