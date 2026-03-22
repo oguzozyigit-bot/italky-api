@@ -10,21 +10,25 @@ from google.auth.transport.requests import Request
 router = APIRouter()
 
 # ===============================
-# CONFIG & SUPABASE
+# CONFIG
 # ===============================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# 🔥 KRİTİK: Firebase Console > Proje Ayarları'ndaki Project ID ile aynı olmalı
-PROJECT_ID = "italkyai-new"
+PROJECT_ID = "italkyai-new"  # Firebase Project ID
 
-class TokenBody(BaseModel):
-    user_id: str  # Android'den gelen Supabase UID (Artık TEXT formatında)
-    token: str    # FCM Token
 
 # ===============================
-# TOKEN SAVE (UID UYUMLU)
+# MODEL
+# ===============================
+class TokenBody(BaseModel):
+    user_id: str
+    token: str
+
+
+# ===============================
+# TOKEN SAVE
 # ===============================
 @router.post("/save-token")
 def save_token(body: TokenBody):
@@ -33,73 +37,78 @@ def save_token(body: TokenBody):
         token = body.token
 
         if not token or not user_id:
-            return {"ok": False, "error": "UID or Token is empty"}
+            return {"ok": False, "error": "UID or Token empty"}
 
-        # Veritabanında ilgili kullanıcıyı bul ve token'ını güncelle
         supabase.table("profiles").update({
             "fcm_token": token
         }).eq("id", user_id).execute()
 
-        print(f"TOKEN SAVED: User {user_id} -> {token[:10]}...")
+        print(f"✅ TOKEN SAVED: {user_id}")
+
         return {"ok": True}
 
     except Exception as e:
-        print("SAVE TOKEN ERROR:", e)
+        print("❌ SAVE TOKEN ERROR:", e)
         return {"ok": False, "error": str(e)}
 
+
 # ===============================
-# ACCESS TOKEN (GOOGLE v1)
+# GOOGLE ACCESS TOKEN (FCM V1)
 # ===============================
 def get_access_token():
     try:
         creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+
         if not creds_json:
-            raise Exception("GOOGLE_APPLICATION_CREDENTIALS_JSON is empty")
+            print("❌ GOOGLE_APPLICATION_CREDENTIALS_JSON EMPTY")
+            return None
 
         creds_dict = json.loads(creds_json)
+
         creds = service_account.Credentials.from_service_account_info(
             creds_dict,
             scopes=["https://www.googleapis.com/auth/firebase.messaging"]
         )
-        
-        # Token'ı yenile ve al
+
         creds.refresh(Request())
+
         return creds.token
 
     except Exception as e:
-        print("ACCESS TOKEN ERROR:", e)
+        print("❌ ACCESS TOKEN ERROR:", e)
         return None
 
+
 # ===============================
-# PUSH SEND (YAMALI & GARANTİ SÜRÜM)
+# PUSH GÖNDER
 # ===============================
 def send_push_v1(token: str, data: dict):
+
     if not token:
-        print("PUSH SKIPPED: token empty")
+        print("⚠️ PUSH SKIPPED: token empty")
         return
 
     access_token = get_access_token()
+
     if not access_token:
-        print("PUSH ERROR: no access token")
+        print("❌ PUSH ERROR: no access token")
         return
 
     url = f"https://fcm.googleapis.com/v1/projects/{PROJECT_ID}/messages:send"
 
-    # 🔥 YAMALANMIŞ BODY YAPISI
     body = {
         "message": {
             "token": token,
             "notification": {
                 "title": "italkyAI",
-                "body": "Yakınında bir italky oturumu başladı! 👋"
+                "body": "Bağlantı isteği geldi 👋"
             },
-            "data": data, # room_id, role vb. buraya basıyoruz
+            "data": data,
             "android": {
                 "priority": "high",
                 "notification": {
-                    "channel_id": "default", # 🔥 Android kanalı için kritik
-                    "sound": "default",
-                    "click_action": "OPEN_MAIN_ACTIVITY"
+                    "channel_id": "default",
+                    "sound": "default"
                 }
             }
         }
@@ -114,7 +123,8 @@ def send_push_v1(token: str, data: dict):
             },
             json=body
         )
-        # Loglarda tam sonucu görelim:
-        print(f"FCM RESULT: {response.status_code} | {response.text}")
+
+        print("📨 PUSH RESULT:", response.status_code, response.text)
+
     except Exception as e:
-        print("PUSH HTTP ERROR:", e)
+        print("❌ PUSH HTTP ERROR:", e)
