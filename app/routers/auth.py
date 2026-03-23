@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from supabase import create_client
 import os
 
@@ -13,7 +13,7 @@ supabase = create_client(
 class RegisterBody(BaseModel):
     id: str
     full_name: str
-    email: EmailStr
+    email: str
     phone: str | None = None
     uid: str | None = None
     login_type: str | None = "google"
