@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from app.routers.push import router as push_router
+from app.routers import auth
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
@@ -111,6 +112,7 @@ app.include_router(alltoall_ws.router, prefix="/api")
 app.include_router(onetoall_ws.router, prefix="/api")
 app.include_router(italky_ai_translate.router, prefix="/api")
 app.include_router(push_router, prefix="/api")
+app.include_router(auth.router)
 
 # YENİ SALLA-BAĞLAN RADAR MODÜLÜ
 app.include_router(proximity_match.router, prefix="/api") # <--- YENİ EKLEDİK
@@ -124,6 +126,7 @@ app.include_router(offline_billing_router)
 app.include_router(usage_billing_router)
 app.include_router(interpreter_billing_router)
 app.include_router(meeting_billing_router)
+
 
 # OPTIONAL
 if has_offline:
