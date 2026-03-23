@@ -24,11 +24,19 @@ class TokenBody(BaseModel):
 @router.post("/save-token")
 def save_token(body: TokenBody):
     try:
-        user_id = body.user_id
-        token = body.token
+        user_id = str(body.user_id or "").strip()
+        token = str(body.token or "").strip()
 
-        if not token or not user_id:
-            return {"ok": False, "error": "UID or Token empty"}
+        print("SAVE TOKEN REQUEST:", {
+            "user_id": user_id,
+            "token_len": len(token)
+        })
+
+        if not user_id:
+            return {"ok": False, "error": "user_id_empty"}
+
+        if not token:
+            return {"ok": False, "error": "token_empty"}
 
         supabase.table("profiles").update({
             "fcm_token": token
@@ -36,7 +44,10 @@ def save_token(body: TokenBody):
 
         print(f"TOKEN SAVED: {user_id}")
 
-        return {"ok": True}
+        return {
+            "ok": True,
+            "user_id": user_id
+        }
 
     except Exception as e:
         print("SAVE TOKEN ERROR:", e)
@@ -84,6 +95,8 @@ def get_access_token():
 
 
 def send_push_v1(token: str, data: dict):
+    token = str(token or "").strip()
+
     if not token:
         print("PUSH SKIPPED: token empty")
         return
@@ -103,7 +116,7 @@ def send_push_v1(token: str, data: dict):
                 "title": "italkyAI",
                 "body": "Bağlantı isteği geldi 👋"
             },
-            "data": data,
+            "data": data or {},
             "android": {
                 "priority": "high",
                 "notification": {
@@ -121,7 +134,8 @@ def send_push_v1(token: str, data: dict):
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json"
             },
-            json=body
+            json=body,
+            timeout=20
         )
 
         print("PUSH RESULT:", response.status_code, response.text)
