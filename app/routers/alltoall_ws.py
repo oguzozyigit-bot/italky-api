@@ -10,7 +10,6 @@ from typing import Dict, Any, Optional, List
 import httpx
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from google.oauth2 import service_account
-from google.cloud import translate as translate_v3
 
 router = APIRouter(tags=["alltoall-ws"])
 logger = logging.getLogger("italky-alltoall")
