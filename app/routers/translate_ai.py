@@ -222,12 +222,12 @@ Text:
     return out
 
 
-@router.get("/api/translate_ai/health")
+@router.get("/translate_ai/health")
 def translate_ai_health():
     return {"ok": True, "service": "translate_ai"}
 
 
-@router.post("/api/translate_ai")
+@router.post("/translate_ai")
 def translate_ai(body: TranslateBody):
     text = normalize_text(body.text)
     source = canonical(body.from_lang)
@@ -235,6 +235,15 @@ def translate_ai(body: TranslateBody):
     mode = str(body.mode or "normal").strip().lower()
     tone = canonical_tone(body.tone or "neutral")
     style = canonical_style(body.style or "balanced")
+
+    print("[translate_ai] request:", {
+        "text": text,
+        "source": source,
+        "target": target,
+        "mode": mode,
+        "tone": tone,
+        "style": style,
+    })
 
     if not text:
         return {"ok": False, "error": "empty_text"}
@@ -276,6 +285,7 @@ def translate_ai(body: TranslateBody):
 
     if mode == "cultural":
         try:
+            print("[translate_ai] trying gemini cultural")
             translated = gemini_cultural_translate(text, source, target, tone, style)
             if translated:
                 return {
@@ -286,6 +296,7 @@ def translate_ai(body: TranslateBody):
             print("[translate_ai] gemini failed:", e1)
 
         try:
+            print("[translate_ai] trying google official fallback")
             translated = google_translate_official(text, source, target)
             if translated:
                 return {
@@ -296,6 +307,7 @@ def translate_ai(body: TranslateBody):
             print("[translate_ai] google_official fallback failed:", e2)
 
         try:
+            print("[translate_ai] trying google free fallback")
             translated = google_translate_free(text, source, target)
             if translated:
                 return {
