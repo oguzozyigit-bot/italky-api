@@ -19,6 +19,7 @@ class TranslateBody(BaseModel):
     to_lang: str
     mode: Optional[str] = "normal"      # normal | cultural
     tone: Optional[str] = "neutral"     # neutral | happy | angry | sad | excited
+    style: Optional[str] = "balanced"   # balanced | warm | clear | social
 
 
 def canonical(code: str) -> str:
@@ -34,6 +35,13 @@ def canonical_tone(tone: str) -> str:
     if v in {"neutral", "happy", "angry", "sad", "excited"}:
         return v
     return "neutral"
+
+
+def canonical_style(style: str) -> str:
+    v = str(style or "balanced").strip().lower()
+    if v in {"balanced", "warm", "clear", "social"}:
+        return v
+    return "balanced"
 
 
 def detect_register_hint(text: str) -> str:
@@ -106,11 +114,18 @@ def google_translate_official(text: str, source: str, target: str) -> str:
     return str(translated).strip()
 
 
-def gemini_cultural_translate(text: str, source: str, target: str, tone: str = "neutral") -> str:
+def gemini_cultural_translate(
+    text: str,
+    source: str,
+    target: str,
+    tone: str = "neutral",
+    style: str = "balanced"
+) -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing")
 
     tone = canonical_tone(tone)
+    style = canonical_style(style)
     register_hint = detect_register_hint(text)
 
     tone_map = {
@@ -121,6 +136,13 @@ def gemini_cultural_translate(text: str, source: str, target: str, tone: str = "
         "excited": "Keep the tone energetic, vivid, enthusiastic and natural."
     }
 
+    style_map = {
+        "balanced": "Use balanced, natural, everyday phrasing.",
+        "warm": "Prefer warmer, softer, more human phrasing when possible.",
+        "clear": "Prefer simpler, clearer, easier-to-understand phrasing.",
+        "social": "Prefer slightly more conversational spoken-language phrasing."
+    }
+
     register_map = {
         "formal": "If the source sounds formal, keep it respectful but do not make it stiff or robotic.",
         "casual": "If the source sounds casual, keep it relaxed, natural and conversational.",
@@ -128,6 +150,7 @@ def gemini_cultural_translate(text: str, source: str, target: str, tone: str = "
     }
 
     tone_rule = tone_map.get(tone, tone_map["neutral"])
+    style_rule = style_map.get(style, style_map["balanced"])
     register_rule = register_map.get(register_hint, register_map["neutral"])
 
     prompt = f"""
@@ -152,6 +175,9 @@ Core rules:
 Tone guidance:
 {tone_rule}
 
+Style guidance:
+{style_rule}
+
 Register guidance:
 {register_rule}
 
@@ -173,7 +199,7 @@ Text:
             }
         ],
         "generationConfig": {
-            "temperature": 0.5,
+            "temperature": 0.52,
             "topP": 0.9,
             "maxOutputTokens": 1024
         }
@@ -208,6 +234,7 @@ def translate_ai(body: TranslateBody):
     target = canonical(body.to_lang)
     mode = str(body.mode or "normal").strip().lower()
     tone = canonical_tone(body.tone or "neutral")
+    style = canonical_style(body.style or "balanced")
 
     if not text:
         return {"ok": False, "error": "empty_text"}
@@ -249,7 +276,7 @@ def translate_ai(body: TranslateBody):
 
     if mode == "cultural":
         try:
-            translated = gemini_cultural_translate(text, source, target, tone)
+            translated = gemini_cultural_translate(text, source, target, tone, style)
             if translated:
                 return {
                     "ok": True,
