@@ -14,7 +14,6 @@ from app.routers import auth
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
-from app.routers import alltoall_ws
 from app.routers import onetoall_ws
 from app.routers import italky_ai_translate
 from app.routers import proximity_match
@@ -22,7 +21,7 @@ from app.routers import proximity_match
 # CORE ROUTERS
 from app.routers import chat_ai
 from app.routers import translate_ai, command_parse
-from app.routers import admin, f2f_ws, tts, stt, ocr_translate
+from app.routers import admin, f2f_ws, tts, ocr_translate
 from app.routers import interpreter
 from app.routers import voice_enroll
 
@@ -105,14 +104,12 @@ app.add_middleware(
 app.include_router(translate_ai.router, prefix="/api")
 app.include_router(command_parse.router, prefix="/api")
 app.include_router(tts.router, prefix="/api")
-app.include_router(stt.router, prefix="/api")
 app.include_router(f2f_ws.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 app.include_router(ocr_translate.router, prefix="/api")
 app.include_router(interpreter.router, prefix="/api")
 app.include_router(voice_enroll.router, prefix="/api")
 app.include_router(chat_ai.router, prefix="/api")
-app.include_router(alltoall_ws.router, prefix="/api")
 app.include_router(onetoall_ws.router, prefix="/api")
 app.include_router(italky_ai_translate.router, prefix="/api")
 app.include_router(push_router, prefix="/api")
