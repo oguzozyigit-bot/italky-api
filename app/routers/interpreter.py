@@ -1,4 +1,3 @@
-# FILE: app/routers/interpreter.py
 from __future__ import annotations
 
 import asyncio
@@ -11,92 +10,51 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional, Set
 
 import httpx
+import requests
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from google.oauth2 import service_account
 logger = logging.getLogger("italky-interpreter")
 router = APIRouter(tags=["interpreter"])
-
-GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
-GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
-
-_translate_client: Optional[translate_v3.TranslationServiceClient] = None
-_translate_project_id: Optional[str] = None
 
 SAFE_TRANSLATION_ERROR = "Çeviri şu anda kullanılamıyor."
 
 
-def _load_credentials_info() -> dict:
-    if GOOGLE_CREDS_JSON:
-        try:
-            return json.loads(GOOGLE_CREDS_JSON)
-        except Exception as e:
-            raise RuntimeError(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
-
-    if GOOGLE_CREDS_PATH:
-        if not os.path.exists(GOOGLE_CREDS_PATH):
-            raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
-        try:
-            with open(GOOGLE_CREDS_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            raise RuntimeError(f"Could not read credentials file: {e}")
-
-    raise RuntimeError("Missing Google credentials.")
-
-
-def _get_translate_client_and_project():
-    global _translate_client, _translate_project_id
-
-    info = _load_credentials_info()
-
-    if _translate_client is None:
-        creds = service_account.Credentials.from_service_account_info(info)
-        _translate_client = translate_v3.TranslationServiceClient(credentials=creds)
-
-    if not _translate_project_id:
-        _translate_project_id = str(info.get("project_id") or "").strip()
-        if not _translate_project_id:
-            raise RuntimeError("project_id missing in Google credentials JSON")
-
-    return _translate_client, _translate_project_id
-
-
-def translate_with_google(text: str, from_lang: str, to_lang: str) -> str:
-    value = (text or "").strip()
+def google_translate_free(text: str, source: str, target: str) -> str:
+    value = str(text or "").strip()
     if not value:
         return ""
 
-    src = (from_lang or "auto").strip().lower()
-    dst = (to_lang or "tr").strip().lower()
+    src = str(source or "auto").strip().lower()
+    dst = str(target or "tr").strip().lower()
 
     if src == dst:
         return value
 
-    client, project_id = _get_translate_client_and_project()
-    parent = f"projects/{project_id}/locations/global"
-
-    payload = {
-        "parent": parent,
-        "contents": [value],
-        "target_language_code": dst,
-        "mime_type": "text/plain",
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {
+        "client": "gtx",
+        "sl": src,
+        "tl": dst,
+        "dt": "t",
+        "q": value,
     }
 
-    if src and src != "auto":
-        payload["source_language_code"] = src
+    r = requests.get(url, params=params, timeout=25)
+    r.raise_for_status()
+    data = r.json()
 
-    resp = client.translate_text(request=payload, timeout=3.0)
+    translated = ""
+    if isinstance(data, list) and data and isinstance(data[0], list):
+        for item in data[0]:
+            if isinstance(item, list) and item:
+                translated += str(item[0] or "")
 
-    out = ""
-    if resp.translations:
-        out = (resp.translations[0].translated_text or "").strip()
+    translated = translated.strip()
+    if not translated:
+        raise RuntimeError("Google free translate returned empty response")
 
-    if not out:
-        raise RuntimeError("Google Translate returned empty response")
-
-    return out
+    return translated
 
 
 IDIOM_OVERRIDES: Dict[tuple[str, str], Dict[str, str]] = {
@@ -140,8 +98,8 @@ def normalize_text_for_idiom_match(text: str) -> str:
 def maybe_translate_with_idiom_override(
     text: str, from_lang: str, to_lang: str
 ) -> Optional[str]:
-    src = (from_lang or "").strip().lower()
-    dst = (to_lang or "").strip().lower()
+    src = str(from_lang or "").strip().lower()
+    dst = str(to_lang or "").strip().lower()
     table = IDIOM_OVERRIDES.get((src, dst)) or {}
 
     norm = normalize_text_for_idiom_match(text)
@@ -206,18 +164,18 @@ def post_clean_translation(text: str) -> str:
 
 
 async def translate_with_gemini(text: str, from_lang: str, to_lang: str) -> str:
-    value = (text or "").strip()
+    value = str(text or "").strip()
     if not value:
         return ""
 
-    src = (from_lang or "auto").strip().lower()
-    dst = (to_lang or "tr").strip().lower()
+    src = str(from_lang or "auto").strip().lower()
+    dst = str(to_lang or "tr").strip().lower()
 
     if src == dst:
         return value
 
-    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
-    model = (os.getenv("GEMINI_MODEL") or "gemini-2.5-flash").strip()
+    api_key = str(os.getenv("GEMINI_API_KEY") or "").strip()
+    model = str(os.getenv("GEMINI_MODEL") or "gemini-1.5-flash").strip()
 
     if not api_key:
         raise RuntimeError("Translation provider key missing")
@@ -291,7 +249,7 @@ async def translate_with_fallback(text: str, from_lang: str, to_lang: str) -> st
 
     try:
         return post_clean_translation(
-            translate_with_google(text, from_lang, to_lang)
+            google_translate_free(text, from_lang, to_lang)
         )
     except Exception as google_error:
         logger.exception("FALLBACK_TRANSLATION_FAILED: %s", google_error)
@@ -425,9 +383,9 @@ class RoomResp(BaseModel):
 @router.post("/interpreter/create-room", response_model=CreateRoomResp)
 async def create_room(req: CreateRoomReq):
     room_id = new_room_id()
-    host_lang = (req.my_lang or "tr").strip().lower()
-    host_code = (req.host_code or "HOME-HOST").strip().upper()
-    mode = (req.mode or "interpreter").strip().lower()
+    host_lang = str(req.my_lang or "tr").strip().lower()
+    host_code = str(req.host_code or "HOME-HOST").strip().upper()
+    mode = str(req.mode or "interpreter").strip().lower()
 
     async with ROOM_LOCK:
         room = RoomState(
@@ -455,9 +413,9 @@ async def create_room(req: CreateRoomReq):
 
 @router.post("/interpreter/resolve-room", response_model=ResolveRoomResp)
 async def resolve_room(req: ResolveRoomReq):
-    host_code = (req.host_code or "").strip().upper()
-    my_lang = (req.my_lang or "tr").strip().lower()
-    mode = (req.mode or "interpreter").strip().lower()
+    host_code = str(req.host_code or "").strip().upper()
+    my_lang = str(req.my_lang or "tr").strip().lower()
+    mode = str(req.mode or "interpreter").strip().lower()
 
     if not host_code:
         raise HTTPException(status_code=422, detail="host_code is required")
@@ -501,8 +459,8 @@ async def resolve_room(req: ResolveRoomReq):
 
 @router.post("/interpreter/join-room", response_model=JoinRoomResp)
 async def join_room(req: JoinRoomReq):
-    room_id = (req.room_id or "").strip()
-    guest_lang = (req.my_lang or "en").strip().lower()
+    room_id = str(req.room_id or "").strip()
+    guest_lang = str(req.my_lang or "en").strip().lower()
 
     if not room_id:
         raise HTTPException(status_code=422, detail="room_id is required")
@@ -556,8 +514,8 @@ async def interpreter_health():
 async def interpreter_ws(websocket: WebSocket, room_id: str):
     await websocket.accept()
 
-    role = (websocket.query_params.get("role") or "guest").strip().lower()
-    my_lang = (websocket.query_params.get("lang") or "en").strip().lower()
+    role = str(websocket.query_params.get("role") or "guest").strip().lower()
+    my_lang = str(websocket.query_params.get("lang") or "en").strip().lower()
 
     room = ROOMS.get(room_id)
     if not room:
