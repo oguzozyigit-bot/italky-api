@@ -8,8 +8,6 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-
-from app.routers.push import router as push_router
 from app.routers.auth import router as auth_router
 
 # ROUTER IMPORTS
@@ -24,7 +22,6 @@ from app.routers.command_parse import router as command_parse_router
 from app.routers.admin import router as admin_router
 from app.routers.f2f_ws import router as f2f_ws_router
 from app.routers.tts import router as tts_router
-from app.routers.ocr_translate import router as ocr_translate_router
 from app.routers.interpreter import router as interpreter_router
 from app.routers.voice_enroll import router as voice_enroll_router
 
@@ -109,12 +106,10 @@ app.include_router(command_parse_router, prefix="/api")
 app.include_router(tts_router, prefix="/api")
 app.include_router(f2f_ws_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
-app.include_router(ocr_translate_router, prefix="/api")
 app.include_router(interpreter_router, prefix="/api")
 app.include_router(voice_enroll_router, prefix="/api")
 app.include_router(chat_ai_router, prefix="/api")
 app.include_router(onetoall_ws_router, prefix="/api")
-app.include_router(push_router, prefix="/api")
 app.include_router(proximity_match_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
 
