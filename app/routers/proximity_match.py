@@ -6,8 +6,6 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
 
-# 🔥 SADE IMPORT
-from app.routers.push import send_push_v1
 
 logger = logging.getLogger("italky-proximity")
 
