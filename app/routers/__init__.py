@@ -5,7 +5,6 @@ from . import chat_ai
 from . import command_parse
 from . import f2f_ws
 from . import interpreter
-from . import italky_ai_translate
 from . import ocr_translate
 from . import onetoall_ws
 from . import push
