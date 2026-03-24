@@ -10,19 +10,23 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from app.routers.push import router as push_router
-from app.routers import auth
+from app.routers.auth import router as auth_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
-from app.routers import onetoall_ws
-from app.routers import proximity_match
+from app.routers.onetoall_ws import router as onetoall_ws_router
+from app.routers.proximity_match import router as proximity_match_router
 
 # CORE ROUTERS
-from app.routers import chat_ai
-from app.routers import translate_ai, command_parse
-from app.routers import admin, f2f_ws, tts, ocr_translate
-from app.routers import interpreter
-from app.routers import voice_enroll
+from app.routers.chat_ai import router as chat_ai_router
+from app.routers.translate_ai import router as translate_ai_router
+from app.routers.command_parse import router as command_parse_router
+from app.routers.admin import router as admin_router
+from app.routers.f2f_ws import router as f2f_ws_router
+from app.routers.tts import router as tts_router
+from app.routers.ocr_translate import router as ocr_translate_router
+from app.routers.interpreter import router as interpreter_router
+from app.routers.voice_enroll import router as voice_enroll_router
 
 # BILLING ROUTERS
 from app.routers.billing_google import router as billing_google_router
@@ -33,31 +37,31 @@ from app.routers.meeting_billing import router as meeting_billing_router
 
 # OPTIONAL ROUTERS
 try:
-    from app.routers import exam_pro
+    from app.routers.exam_pro import router as exam_pro_router
     has_exam_pro = True
 except Exception:
-    exam_pro = None
+    exam_pro_router = None
     has_exam_pro = False
 
 try:
-    from app.routers import level_test
+    from app.routers.level_test import router as level_test_router
     has_level_test = True
 except Exception:
-    level_test = None
+    level_test_router = None
     has_level_test = False
 
 try:
-    from app.routers import ocr
+    from app.routers.ocr import router as ocr_router
     has_ocr = True
 except Exception:
-    ocr = None
+    ocr_router = None
     has_ocr = False
 
 try:
-    from app.routers import offline
+    from app.routers.offline import router as offline_router
     has_offline = True
 except Exception:
-    offline = None
+    offline_router = None
     has_offline = False
 
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.3").strip()
@@ -100,22 +104,22 @@ app.add_middleware(
 # ===============================
 # ROUTERS
 # ===============================
-app.include_router(translate_ai.router, prefix="/api")
-app.include_router(command_parse.router, prefix="/api")
-app.include_router(tts.router, prefix="/api")
-app.include_router(f2f_ws.router, prefix="/api")
-app.include_router(admin.router, prefix="/api")
-app.include_router(ocr_translate.router, prefix="/api")
-app.include_router(interpreter.router, prefix="/api")
-app.include_router(voice_enroll.router, prefix="/api")
-app.include_router(chat_ai.router, prefix="/api")
-app.include_router(onetoall_ws.router, prefix="/api")
+app.include_router(translate_ai_router, prefix="/api")
+app.include_router(command_parse_router, prefix="/api")
+app.include_router(tts_router, prefix="/api")
+app.include_router(f2f_ws_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
+app.include_router(ocr_translate_router, prefix="/api")
+app.include_router(interpreter_router, prefix="/api")
+app.include_router(voice_enroll_router, prefix="/api")
+app.include_router(chat_ai_router, prefix="/api")
+app.include_router(onetoall_ws_router, prefix="/api")
 app.include_router(push_router, prefix="/api")
-app.include_router(proximity_match.router, prefix="/api")
+app.include_router(proximity_match_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
 
 # AUTH
-app.include_router(auth.router)
+app.include_router(auth_router)
 
 # BILLING
 app.include_router(billing_google_router)
@@ -125,17 +129,17 @@ app.include_router(interpreter_billing_router)
 app.include_router(meeting_billing_router)
 
 # OPTIONAL
-if has_offline:
-    app.include_router(offline.router, prefix="/api")
+if has_offline and offline_router:
+    app.include_router(offline_router, prefix="/api")
 
-if has_exam_pro:
-    app.include_router(exam_pro.router, prefix="/api")
+if has_exam_pro and exam_pro_router:
+    app.include_router(exam_pro_router, prefix="/api")
 
-if has_level_test:
-    app.include_router(level_test.router, prefix="/api")
+if has_level_test and level_test_router:
+    app.include_router(level_test_router, prefix="/api")
 
-if has_ocr:
-    app.include_router(ocr.router, prefix="/api")
+if has_ocr and ocr_router:
+    app.include_router(ocr_router, prefix="/api")
 
 # ===============================
 # HEALTH
@@ -196,7 +200,6 @@ def delete_account(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=401, detail="Invalid session")
 
     user_id = user_resp.json().get("id")
-
     if not user_id:
         raise HTTPException(status_code=401, detail="User id missing")
 
