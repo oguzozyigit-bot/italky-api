@@ -15,7 +15,6 @@ from app.routers import auth
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers import onetoall_ws
-from app.routers import italky_ai_translate
 from app.routers import proximity_match
 
 # CORE ROUTERS
@@ -111,7 +110,6 @@ app.include_router(interpreter.router, prefix="/api")
 app.include_router(voice_enroll.router, prefix="/api")
 app.include_router(chat_ai.router, prefix="/api")
 app.include_router(onetoall_ws.router, prefix="/api")
-app.include_router(italky_ai_translate.router, prefix="/api")
 app.include_router(push_router, prefix="/api")
 app.include_router(proximity_match.router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
