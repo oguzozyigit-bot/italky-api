@@ -125,14 +125,8 @@ app.include_router(meeting_billing_router)
 if has_offline and offline_router:
     app.include_router(offline_router, prefix="/api")
 
-if has_exam_pro and exam_pro_router:
-    app.include_router(exam_pro_router, prefix="/api")
-
 if has_level_test and level_test_router:
     app.include_router(level_test_router, prefix="/api")
-
-if has_ocr and ocr_router:
-    app.include_router(ocr_router, prefix="/api")
 
 # ===============================
 # HEALTH
