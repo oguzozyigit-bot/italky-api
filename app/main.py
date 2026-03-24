@@ -21,7 +21,7 @@ from app.routers import proximity_match
 
 # CORE ROUTERS
 from app.routers import chat_ai
-from app.routers import translate, translate_ai, command_parse
+from app.routers import translate_ai, command_parse
 from app.routers import admin, f2f_ws, tts, stt, ocr_translate
 from app.routers import interpreter
 from app.routers import voice_enroll
@@ -62,7 +62,7 @@ except Exception:
     offline = None
     has_offline = False
 
-APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.2").strip()
+APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.3").strip()
 
 app = FastAPI(
     title="italky Academy API",
@@ -100,10 +100,9 @@ app.add_middleware(
 )
 
 # ===============================
-# ROUTER REGISTRATION
+# ROUTERS
 # ===============================
-# Bunlarda endpointler router içinde /api olmadan tanımlıysa prefix="/api" doğrudur
-app.include_router(translate.router, prefix="/api")
+app.include_router(translate_ai.router, prefix="/api")
 app.include_router(command_parse.router, prefix="/api")
 app.include_router(tts.router, prefix="/api")
 app.include_router(stt.router, prefix="/api")
@@ -119,9 +118,6 @@ app.include_router(italky_ai_translate.router, prefix="/api")
 app.include_router(push_router, prefix="/api")
 app.include_router(proximity_match.router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
-
-# translate_ai.py içinde path zaten /api/... ile başlıyorsa prefix VERME
-app.include_router(translate_ai.router)
 
 # AUTH
 app.include_router(auth.router)
@@ -147,7 +143,7 @@ if has_ocr:
     app.include_router(ocr.router, prefix="/api")
 
 # ===============================
-# HEALTH CHECK
+# HEALTH
 # ===============================
 @app.get("/")
 def root():
@@ -166,7 +162,7 @@ async def favicon():
     return Response(status_code=204)
 
 # ===============================
-# ACCOUNT DELETE LOGIC
+# ACCOUNT DELETE
 # ===============================
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
@@ -192,39 +188,32 @@ def delete_account(authorization: str | None = Header(default=None)):
 
     access_token = _get_bearer(authorization)
 
-    try:
-        user_resp = requests.get(
-            f"{SUPABASE_URL}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "apikey": SUPABASE_SERVICE_ROLE,
-            },
-            timeout=20,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    user_resp = requests.get(
+        f"{SUPABASE_URL}/auth/v1/user",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "apikey": SUPABASE_SERVICE_ROLE,
+        },
+        timeout=20,
+    )
 
     if user_resp.status_code != 200:
         raise HTTPException(status_code=401, detail="Invalid session")
 
-    user_data = user_resp.json()
-    user_id = user_data.get("id")
+    user_id = user_resp.json().get("id")
 
     if not user_id:
         raise HTTPException(status_code=401, detail="User id missing")
 
-    try:
-        del_resp = requests.delete(
-            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
-            headers={
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-                "apikey": SUPABASE_SERVICE_ROLE,
-                "Content-Type": "application/json",
-            },
-            timeout=20,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+    del_resp = requests.delete(
+        f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+        headers={
+            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+            "apikey": SUPABASE_SERVICE_ROLE,
+            "Content-Type": "application/json",
+        },
+        timeout=20,
+    )
 
     if del_resp.status_code not in (200, 204):
         raise HTTPException(status_code=500, detail="Delete failed")
