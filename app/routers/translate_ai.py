@@ -17,7 +17,8 @@ class TranslateBody(BaseModel):
     text: str
     from_lang: str
     to_lang: str
-    mode: Optional[str] = "normal"   # normal | cultural
+    mode: Optional[str] = "normal"      # normal | cultural
+    tone: Optional[str] = "neutral"     # neutral | happy | angry | sad | excited
 
 
 def canonical(code: str) -> str:
@@ -28,12 +29,38 @@ def normalize_text(text: str) -> str:
     return str(text or "").strip()
 
 
+def canonical_tone(tone: str) -> str:
+    v = str(tone or "neutral").strip().lower()
+    if v in {"neutral", "happy", "angry", "sad", "excited"}:
+        return v
+    return "neutral"
+
+
+def detect_register_hint(text: str) -> str:
+    s = normalize_text(text).lower()
+
+    formal_markers = [
+        "sayın", "saygılarımla", "arz ederim", "rica ederim", "teşekkür ederim",
+        "lütfen", "bilginize", "tarafınıza", "konu hakkında", "gerekmektedir",
+        "uygundur", "hususunda", "talep ediyorum", "değerlendirmenizi"
+    ]
+
+    casual_markers = [
+        "ya", "abi", "abla", "kanka", "bence", "hadi", "vallahi", "valla",
+        "tamam", "olur", "aynen", "şöyle", "şoyle", "yani", "off", "wow"
+    ]
+
+    formal_score = sum(1 for x in formal_markers if x in s)
+    casual_score = sum(1 for x in casual_markers if x in s)
+
+    if formal_score >= casual_score + 2:
+        return "formal"
+    if casual_score >= formal_score + 1:
+        return "casual"
+    return "neutral"
+
+
 def google_translate_free(text: str, source: str, target: str) -> str:
-    """
-    Google public translate endpoint.
-    API key gerektirmez.
-    Stabilite %100 garanti değil ama fallback için çok işe yarar.
-    """
     url = "https://translate.googleapis.com/translate_a/single"
     params = {
         "client": "gtx",
@@ -47,8 +74,6 @@ def google_translate_free(text: str, source: str, target: str) -> str:
     r.raise_for_status()
     data = r.json()
 
-    # Beklenen format:
-    # [[["Merhaba","Hello",...], ...], ...]
     translated = ""
     if isinstance(data, list) and data and isinstance(data[0], list):
         for item in data[0]:
@@ -58,9 +83,6 @@ def google_translate_free(text: str, source: str, target: str) -> str:
 
 
 def google_translate_official(text: str, source: str, target: str) -> str:
-    """
-    Cloud Translation API key varsa onu kullan.
-    """
     if not GOOGLE_TRANSLATE_API_KEY:
         raise RuntimeError("GOOGLE_TRANSLATE_API_KEY missing")
 
@@ -84,26 +106,54 @@ def google_translate_official(text: str, source: str, target: str) -> str:
     return str(translated).strip()
 
 
-def gemini_cultural_translate(text: str, source: str, target: str) -> str:
-    """
-    Kültürel / doğal çeviri için Gemini.
-    """
+def gemini_cultural_translate(text: str, source: str, target: str, tone: str = "neutral") -> str:
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY missing")
 
-    prompt = f"""
-You are a high quality translator.
+    tone = canonical_tone(tone)
+    register_hint = detect_register_hint(text)
 
-Task:
+    tone_map = {
+        "neutral": "Keep the tone natural, clear, smooth and human.",
+        "happy": "Keep the tone warm, friendly, positive and lively.",
+        "angry": "Keep the emotional intensity, but make it sound natural, socially appropriate and human.",
+        "sad": "Keep the tone soft, sincere, empathetic and emotionally gentle.",
+        "excited": "Keep the tone energetic, vivid, enthusiastic and natural."
+    }
+
+    register_map = {
+        "formal": "If the source sounds formal, keep it respectful but do not make it stiff or robotic.",
+        "casual": "If the source sounds casual, keep it relaxed, natural and conversational.",
+        "neutral": "Prefer natural daily phrasing over overly formal or rigid wording."
+    }
+
+    tone_rule = tone_map.get(tone, tone_map["neutral"])
+    register_rule = register_map.get(register_hint, register_map["neutral"])
+
+    prompt = f"""
+You are a highly natural conversational translator.
+
 Translate the following text from "{source}" to "{target}".
 
-Rules:
-- Preserve meaning exactly.
-- Make the output natural, fluent and culturally appropriate.
-- Keep the emotional tone.
-- Do not explain anything.
+Core rules:
+- Preserve the exact meaning.
+- Do not sound robotic, stiff, or overly literal.
+- Make the result feel like something a real person would naturally say.
+- Keep the speaker's emotional tone.
+- Keep the social intent and politeness level.
+- Prefer fluent, human, culturally appropriate phrasing.
+- If a sentence sounds too formal in the target language, soften it slightly into natural spoken language without losing meaning.
+- If the source is already casual, keep it casual and natural.
+- Do not add extra explanation.
 - Do not add quotation marks.
+- Do not mention translation systems, AI tools, model names, brands, or technology.
 - Return only the translated text.
+
+Tone guidance:
+{tone_rule}
+
+Register guidance:
+{register_rule}
 
 Text:
 {text}
@@ -123,7 +173,7 @@ Text:
             }
         ],
         "generationConfig": {
-            "temperature": 0.35,
+            "temperature": 0.5,
             "topP": 0.9,
             "maxOutputTokens": 1024
         }
@@ -137,13 +187,9 @@ Text:
     if not candidates:
         raise RuntimeError("Gemini empty candidates")
 
-    parts = (
-        candidates[0]
-        .get("content", {})
-        .get("parts", [])
-    )
-
+    parts = candidates[0].get("content", {}).get("parts", [])
     out = "".join(str(p.get("text", "")) for p in parts).strip()
+
     if not out:
         raise RuntimeError("Gemini empty text")
 
@@ -161,6 +207,7 @@ def translate_ai(body: TranslateBody):
     source = canonical(body.from_lang)
     target = canonical(body.to_lang)
     mode = str(body.mode or "normal").strip().lower()
+    tone = canonical_tone(body.tone or "neutral")
 
     if not text:
         return {"ok": False, "error": "empty_text"}
@@ -171,19 +218,16 @@ def translate_ai(body: TranslateBody):
     if source == target:
         return {
             "ok": True,
-            "translated": text,
-            "engine": "identity"
+            "translated": text
         }
 
-    # 1) NORMAL MOD = direkt Google Translate
     if mode == "normal":
         try:
             translated = google_translate_official(text, source, target)
             if translated:
                 return {
                     "ok": True,
-                    "translated": translated,
-                    "engine": "google_official"
+                    "translated": translated
                 }
         except Exception as e1:
             print("[translate_ai] google_official failed:", e1)
@@ -193,8 +237,7 @@ def translate_ai(body: TranslateBody):
             if translated:
                 return {
                     "ok": True,
-                    "translated": translated,
-                    "engine": "google_free"
+                    "translated": translated
                 }
         except Exception as e2:
             print("[translate_ai] google_free failed:", e2)
@@ -204,15 +247,13 @@ def translate_ai(body: TranslateBody):
             "error": "normal_translate_failed"
         }
 
-    # 2) CULTURAL MOD = önce Gemini, patlarsa Google Translate
     if mode == "cultural":
         try:
-            translated = gemini_cultural_translate(text, source, target)
+            translated = gemini_cultural_translate(text, source, target, tone)
             if translated:
                 return {
                     "ok": True,
-                    "translated": translated,
-                    "engine": "gemini"
+                    "translated": translated
                 }
         except Exception as e1:
             print("[translate_ai] gemini failed:", e1)
@@ -222,8 +263,7 @@ def translate_ai(body: TranslateBody):
             if translated:
                 return {
                     "ok": True,
-                    "translated": translated,
-                    "engine": "google_official_fallback"
+                    "translated": translated
                 }
         except Exception as e2:
             print("[translate_ai] google_official fallback failed:", e2)
@@ -233,8 +273,7 @@ def translate_ai(body: TranslateBody):
             if translated:
                 return {
                     "ok": True,
-                    "translated": translated,
-                    "engine": "google_free_fallback"
+                    "translated": translated
                 }
         except Exception as e3:
             print("[translate_ai] google_free fallback failed:", e3)
