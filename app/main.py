@@ -102,8 +102,8 @@ app.add_middleware(
 # ===============================
 # ROUTER REGISTRATION
 # ===============================
+# Bunlarda endpointler router içinde /api olmadan tanımlıysa prefix="/api" doğrudur
 app.include_router(translate.router, prefix="/api")
-app.include_router(translate_ai.router, prefix="/api")
 app.include_router(command_parse.router, prefix="/api")
 app.include_router(tts.router, prefix="/api")
 app.include_router(stt.router, prefix="/api")
@@ -119,6 +119,9 @@ app.include_router(italky_ai_translate.router, prefix="/api")
 app.include_router(push_router, prefix="/api")
 app.include_router(proximity_match.router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
+
+# translate_ai.py içinde path zaten /api/... ile başlıyorsa prefix VERME
+app.include_router(translate_ai.router)
 
 # AUTH
 app.include_router(auth.router)
