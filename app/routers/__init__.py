@@ -1,5 +1,4 @@
 from . import admin
-from . import alltoall_ws
 from . import auth
 from . import chat_ai
 from . import command_parse
