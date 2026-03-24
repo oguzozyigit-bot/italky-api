@@ -13,7 +13,6 @@ from app.routers.auth import router as auth_router
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers.onetoall_ws import router as onetoall_ws_router
-from app.routers.proximity_match import router as proximity_match_router
 
 # CORE ROUTERS
 from app.routers.chat_ai import router as chat_ai_router
@@ -110,7 +109,6 @@ app.include_router(interpreter_router, prefix="/api")
 app.include_router(voice_enroll_router, prefix="/api")
 app.include_router(chat_ai_router, prefix="/api")
 app.include_router(onetoall_ws_router, prefix="/api")
-app.include_router(proximity_match_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
 
 # AUTH
