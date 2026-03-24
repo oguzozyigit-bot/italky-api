@@ -15,7 +15,6 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from google.oauth2 import service_account
-from google.cloud import translate as translate_v3
 
 logger = logging.getLogger("italky-interpreter")
 router = APIRouter(tags=["interpreter"])
