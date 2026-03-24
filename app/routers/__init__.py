@@ -1,14 +1,17 @@
-# FILE: app/routers/__init__.py
-# ✅ Keep this file OpenAI-free. Do NOT import openai-based routers here.
-
-from . import chat_ai
-from . import lang_pool
-from . import teacher_chat
-from . import translate
-from . import translate_ai
-from . import command_parse
 from . import admin
+from . import alltoall_ws
+from . import auth
+from . import chat_ai
+from . import command_parse
 from . import f2f_ws
-from . import tts
-from . import stt
+from . import interpreter
+from . import italky_ai_translate
 from . import ocr_translate
+from . import onetoall_ws
+from . import push
+from . import stt
+from . import translate_ai
+from . import tts
+from . import ui_translate
+from . import voice_enroll
+from . import proximity_match
