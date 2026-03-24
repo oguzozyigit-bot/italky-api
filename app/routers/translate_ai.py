@@ -1,150 +1,250 @@
 from __future__ import annotations
 
 import os
-import json
-import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+import requests
+from fastapi import APIRouter
 from pydantic import BaseModel
 
-from google.oauth2 import service_account
-from google.cloud import translate as translate_v3
+router = APIRouter(tags=["translate_ai"])
 
-logger = logging.getLogger("italky-translate")
-router = APIRouter(tags=["translate-ai"])
-
-GOOGLE_CREDS_PATH = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or "").strip()
-GOOGLE_CREDS_JSON = (os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON") or "").strip()
-
-_client: Optional[translate_v3.TranslationServiceClient] = None
-_project_id: Optional[str] = None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
 
 
-def _load_json_from_string(raw: str) -> dict:
-    try:
-        return json.loads(raw)
-    except Exception as e:
-        raise RuntimeError(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON: {e}")
+class TranslateBody(BaseModel):
+    text: str
+    from_lang: str
+    to_lang: str
+    mode: Optional[str] = "normal"   # normal | cultural
 
 
-def _load_json_from_file(path: str) -> dict:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        raise RuntimeError(f"Could not read credentials file: {e}")
+def canonical(code: str) -> str:
+    return str(code or "").strip().lower().split("-")[0]
 
 
-def _resolve_credentials_info() -> dict:
-    if GOOGLE_CREDS_JSON:
-        return _load_json_from_string(GOOGLE_CREDS_JSON)
+def normalize_text(text: str) -> str:
+    return str(text or "").strip()
 
-    if GOOGLE_CREDS_PATH:
-        if not os.path.exists(GOOGLE_CREDS_PATH):
-            raise RuntimeError(f"Credentials file not found: {GOOGLE_CREDS_PATH}")
-        return _load_json_from_file(GOOGLE_CREDS_PATH)
 
-    raise RuntimeError(
-        "Missing Google credentials. Set GOOGLE_APPLICATION_CREDENTIALS_JSON or GOOGLE_APPLICATION_CREDENTIALS"
+def google_translate_free(text: str, source: str, target: str) -> str:
+    """
+    Google public translate endpoint.
+    API key gerektirmez.
+    Stabilite %100 garanti değil ama fallback için çok işe yarar.
+    """
+    url = "https://translate.googleapis.com/translate_a/single"
+    params = {
+        "client": "gtx",
+        "sl": source,
+        "tl": target,
+        "dt": "t",
+        "q": text,
+    }
+
+    r = requests.get(url, params=params, timeout=25)
+    r.raise_for_status()
+    data = r.json()
+
+    # Beklenen format:
+    # [[["Merhaba","Hello",...], ...], ...]
+    translated = ""
+    if isinstance(data, list) and data and isinstance(data[0], list):
+        for item in data[0]:
+            if isinstance(item, list) and item:
+                translated += str(item[0] or "")
+    return translated.strip()
+
+
+def google_translate_official(text: str, source: str, target: str) -> str:
+    """
+    Cloud Translation API key varsa onu kullan.
+    """
+    if not GOOGLE_TRANSLATE_API_KEY:
+        raise RuntimeError("GOOGLE_TRANSLATE_API_KEY missing")
+
+    url = "https://translation.googleapis.com/language/translate/v2"
+    payload = {
+        "q": text,
+        "source": source,
+        "target": target,
+        "format": "text",
+        "key": GOOGLE_TRANSLATE_API_KEY,
+    }
+
+    r = requests.post(url, data=payload, timeout=25)
+    r.raise_for_status()
+    data = r.json()
+    translated = (
+        data.get("data", {})
+        .get("translations", [{}])[0]
+        .get("translatedText", "")
+    )
+    return str(translated).strip()
+
+
+def gemini_cultural_translate(text: str, source: str, target: str) -> str:
+    """
+    Kültürel / doğal çeviri için Gemini.
+    """
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY missing")
+
+    prompt = f"""
+You are a high quality translator.
+
+Task:
+Translate the following text from "{source}" to "{target}".
+
+Rules:
+- Preserve meaning exactly.
+- Make the output natural, fluent and culturally appropriate.
+- Keep the emotional tone.
+- Do not explain anything.
+- Do not add quotation marks.
+- Return only the translated text.
+
+Text:
+{text}
+""".strip()
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     )
 
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.35,
+            "topP": 0.9,
+            "maxOutputTokens": 1024
+        }
+    }
 
-def _get_client_and_project():
-    global _client, _project_id
+    r = requests.post(url, json=payload, timeout=40)
+    r.raise_for_status()
+    data = r.json()
 
-    info = _resolve_credentials_info()
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("Gemini empty candidates")
 
-    if _client is None:
-        creds = service_account.Credentials.from_service_account_info(info)
-        _client = translate_v3.TranslationServiceClient(credentials=creds)
+    parts = (
+        candidates[0]
+        .get("content", {})
+        .get("parts", [])
+    )
 
-    if not _project_id:
-        _project_id = str(info.get("project_id") or "").strip()
-        if not _project_id:
-            raise RuntimeError("project_id missing in Google credentials JSON")
+    out = "".join(str(p.get("text", "")) for p in parts).strip()
+    if not out:
+        raise RuntimeError("Gemini empty text")
 
-    return _client, _project_id
-
-
-class TranslateReq(BaseModel):
-    text: str
-    from_lang: Optional[str] = "auto"
-    to_lang: str = "tr"
+    return out
 
 
-class TranslateResp(BaseModel):
-    ok: bool
-    provider: str
-    translated: str
+@router.get("/api/translate_ai/health")
+def translate_ai_health():
+    return {"ok": True, "service": "translate_ai"}
 
 
-@router.get("/translate_ai/health")
-async def translate_ai_health():
-    try:
-        info = _resolve_credentials_info()
+@router.post("/api/translate_ai")
+def translate_ai(body: TranslateBody):
+    text = normalize_text(body.text)
+    source = canonical(body.from_lang)
+    target = canonical(body.to_lang)
+    mode = str(body.mode or "normal").strip().lower()
+
+    if not text:
+        return {"ok": False, "error": "empty_text"}
+
+    if not source or not target:
+        return {"ok": False, "error": "missing_lang"}
+
+    if source == target:
         return {
             "ok": True,
-            "project_id": str(info.get("project_id") or ""),
-            "has_private_key": bool(info.get("private_key")),
-            "mode": "json_env" if GOOGLE_CREDS_JSON else "file_path",
+            "translated": text,
+            "engine": "identity"
         }
-    except Exception as e:
+
+    # 1) NORMAL MOD = direkt Google Translate
+    if mode == "normal":
+        try:
+            translated = google_translate_official(text, source, target)
+            if translated:
+                return {
+                    "ok": True,
+                    "translated": translated,
+                    "engine": "google_official"
+                }
+        except Exception as e1:
+            print("[translate_ai] google_official failed:", e1)
+
+        try:
+            translated = google_translate_free(text, source, target)
+            if translated:
+                return {
+                    "ok": True,
+                    "translated": translated,
+                    "engine": "google_free"
+                }
+        except Exception as e2:
+            print("[translate_ai] google_free failed:", e2)
+
         return {
             "ok": False,
-            "error": str(e),
+            "error": "normal_translate_failed"
         }
 
+    # 2) CULTURAL MOD = önce Gemini, patlarsa Google Translate
+    if mode == "cultural":
+        try:
+            translated = gemini_cultural_translate(text, source, target)
+            if translated:
+                return {
+                    "ok": True,
+                    "translated": translated,
+                    "engine": "gemini"
+                }
+        except Exception as e1:
+            print("[translate_ai] gemini failed:", e1)
 
-@router.post("/translate_ai", response_model=TranslateResp)
-async def translate_ai(req: TranslateReq):
-    text = (req.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="text is required")
+        try:
+            translated = google_translate_official(text, source, target)
+            if translated:
+                return {
+                    "ok": True,
+                    "translated": translated,
+                    "engine": "google_official_fallback"
+                }
+        except Exception as e2:
+            print("[translate_ai] google_official fallback failed:", e2)
 
-    source = (req.from_lang or "auto").strip().lower()
-    target = (req.to_lang or "tr").strip().lower()
+        try:
+            translated = google_translate_free(text, source, target)
+            if translated:
+                return {
+                    "ok": True,
+                    "translated": translated,
+                    "engine": "google_free_fallback"
+                }
+        except Exception as e3:
+            print("[translate_ai] google_free fallback failed:", e3)
 
-    try:
-        client, project_id = _get_client_and_project()
-        parent = f"projects/{project_id}/locations/global"
-
-        payload = {
-            "parent": parent,
-            "contents": [text],
-            "target_language_code": target,
-            "mime_type": "text/plain",
+        return {
+            "ok": False,
+            "error": "cultural_translate_failed"
         }
 
-        if source and source != "auto":
-            payload["source_language_code"] = source
-
-        resp = client.translate_text(
-            request=payload,
-            timeout=2.0,
-        )
-
-        out = ""
-        if resp.translations:
-            out = (resp.translations[0].translated_text or "").strip()
-
-        if not out:
-            raise HTTPException(
-                status_code=502,
-                detail="Google Translate returned empty response",
-            )
-
-        return TranslateResp(
-            ok=True,
-            provider="google",
-            translated=out,
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("GOOGLE_TRANSLATE_V3_FAIL %s", e)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Google Translate v3 failed: {e}",
-        )
+    return {
+        "ok": False,
+        "error": "invalid_mode"
+    }
