@@ -19,6 +19,21 @@ router = APIRouter(tags=["interpreter"])
 
 SAFE_TRANSLATION_ERROR = "Çeviri şu anda kullanılamıyor."
 
+SUPABASE_URL = str(os.getenv("SUPABASE_URL") or "").rstrip("/")
+SUPABASE_SERVICE_ROLE = str(os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+SUPABASE_TABLE_URL = f"{SUPABASE_URL}/rest/v1/interpreter_rooms" if SUPABASE_URL else ""
+
+
+def sb_headers() -> dict:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
+        raise RuntimeError("Supabase is not configured")
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation",
+    }
+
 
 def google_translate_free(text: str, source: str, target: str) -> str:
     value = str(text or "").strip()
@@ -278,7 +293,6 @@ class RoomState:
 
 
 ROOMS: Dict[str, RoomState] = {}
-HOST_ACTIVE_ROOM: Dict[str, str] = {}
 ROOM_LOCK = asyncio.Lock()
 
 
@@ -294,6 +308,111 @@ def get_room_or_404(room_id: str) -> RoomState:
     room = ROOMS.get(room_id)
     if not room:
         raise HTTPException(status_code=404, detail="Room not found")
+    return room
+
+
+def db_upsert_room(
+    host_code: str,
+    room_id: str,
+    mode: str,
+    host_lang: str,
+    guest_lang: Optional[str],
+    status: str,
+):
+    payload = {
+        "host_code": host_code,
+        "room_id": room_id,
+        "mode": mode,
+        "host_lang": host_lang,
+        "guest_lang": guest_lang,
+        "status": status,
+        "updated_at": "now()",
+    }
+
+    headers = sb_headers().copy()
+    headers["Prefer"] = "resolution=merge-duplicates,return=representation"
+
+    r = requests.post(
+        f"{SUPABASE_TABLE_URL}?on_conflict=host_code",
+        headers=headers,
+        json=payload,
+        timeout=20,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"db_upsert_room failed: {r.status_code} {r.text}")
+
+
+def db_get_room_by_host_code(host_code: str) -> Optional[dict]:
+    r = requests.get(
+        SUPABASE_TABLE_URL,
+        headers=sb_headers(),
+        params={
+            "host_code": f"eq.{host_code}",
+            "select": "*",
+            "limit": 1,
+        },
+        timeout=20,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"db_get_room_by_host_code failed: {r.status_code} {r.text}")
+
+    rows = r.json()
+    return rows[0] if rows else None
+
+
+def db_get_room_by_room_id(room_id: str) -> Optional[dict]:
+    r = requests.get(
+        SUPABASE_TABLE_URL,
+        headers=sb_headers(),
+        params={
+            "room_id": f"eq.{room_id}",
+            "select": "*",
+            "limit": 1,
+        },
+        timeout=20,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"db_get_room_by_room_id failed: {r.status_code} {r.text}")
+
+    rows = r.json()
+    return rows[0] if rows else None
+
+
+def db_update_room_fields(host_code: str, patch: dict):
+    payload = dict(patch)
+    r = requests.patch(
+        f"{SUPABASE_TABLE_URL}?host_code=eq.{host_code}",
+        headers=sb_headers(),
+        json=payload,
+        timeout=20,
+    )
+    if r.status_code >= 400:
+        raise RuntimeError(f"db_update_room_fields failed: {r.status_code} {r.text}")
+
+
+def load_room_from_db_if_needed(room_id: str) -> Optional[RoomState]:
+    room = ROOMS.get(room_id)
+    if room:
+        return room
+
+    row = db_get_room_by_room_id(room_id)
+    if not row:
+        return None
+
+    room = RoomState(
+        room_id=str(row["room_id"]).strip(),
+        host_code=str(row["host_code"]).strip().upper(),
+        mode=str(row.get("mode") or "interpreter").strip().lower(),
+        host_lang=str(row.get("host_lang") or "tr").strip().lower(),
+        guest_lang=(str(row["guest_lang"]).strip().lower() if row.get("guest_lang") else None),
+        status=str(row.get("status") or "waiting").strip().lower(),
+    )
+
+    room.peers["host"] = PeerState(role="host", lang=room.host_lang)
+    if room.guest_lang:
+        room.peers["guest"] = PeerState(role="guest", lang=room.guest_lang)
+
+    ROOMS[room_id] = room
     return room
 
 
@@ -325,43 +444,6 @@ async def broadcast_except_sender(room: RoomState, payload: dict, sender_ws: Web
 
     for ws in dead:
         room.sockets.discard(ws)
-
-
-async def broadcast_presence(room: RoomState):
-    await broadcast(
-        room,
-        {
-            "type": "presence",
-            "room_id": room.room_id,
-            "host_code": room.host_code,
-            "mode": room.mode,
-            "status": room.status,
-            "host_lang": room.host_lang,
-            "guest_lang": room.guest_lang,
-            "peer_count": len(room.peers),
-            "peer_connected": bool(room.guest_lang),
-            "ts": now_ts(),
-        },
-    )
-
-
-async def mark_guest_joined(room: RoomState, guest_lang: str):
-    room.guest_lang = guest_lang
-    room.peers["guest"] = PeerState(role="guest", lang=guest_lang)
-    room.status = "active"
-    room.updated_at = time.time()
-
-    await broadcast(
-        room,
-        {
-            "type": "peer_joined",
-            "room_id": room.room_id,
-            "status": room.status,
-            "guest_lang": guest_lang,
-            "ts": now_ts(),
-        },
-    )
-    await broadcast_presence(room)
 
 
 class CreateRoomReq(BaseModel):
@@ -419,22 +501,12 @@ class RoomResp(BaseModel):
 
 @router.post("/interpreter/create-room", response_model=CreateRoomResp)
 async def create_room(req: CreateRoomReq):
+    room_id = new_room_id()
     host_lang = str(req.my_lang or "tr").strip().lower()
     host_code = str(req.host_code or "HOME-HOST").strip().upper()
     mode = str(req.mode or "interpreter").strip().lower()
 
     async with ROOM_LOCK:
-        old_room_id = HOST_ACTIVE_ROOM.get(host_code)
-        if old_room_id:
-            old_room = ROOMS.pop(old_room_id, None)
-            if old_room:
-                for ws in list(old_room.sockets):
-                    try:
-                        await ws.close()
-                    except Exception:
-                        pass
-
-        room_id = new_room_id()
         room = RoomState(
             room_id=room_id,
             host_code=host_code,
@@ -443,7 +515,15 @@ async def create_room(req: CreateRoomReq):
         )
         room.peers["host"] = PeerState(role="host", lang=host_lang)
         ROOMS[room_id] = room
-        HOST_ACTIVE_ROOM[host_code] = room_id
+
+        db_upsert_room(
+            host_code=host_code,
+            room_id=room_id,
+            mode=mode,
+            host_lang=host_lang,
+            guest_lang=None,
+            status="waiting",
+        )
 
     join_url = f"https://italky.ai/open/interpreter?room={room_id}&v=1"
     ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room_id}"
@@ -465,29 +545,25 @@ async def resolve_room(req: ResolveRoomReq):
     if not host_code:
         raise HTTPException(status_code=422, detail="host_code is required")
 
-    async with ROOM_LOCK:
-        room_id = HOST_ACTIVE_ROOM.get(host_code)
-        room: Optional[RoomState] = None
+    row = db_get_room_by_host_code(host_code)
+    if not row:
+        raise HTTPException(status_code=404, detail="Room not found")
 
-        if room_id:
-            room = ROOMS.get(room_id)
-            if not room:
-                HOST_ACTIVE_ROOM.pop(host_code, None)
+    room_id = str(row["room_id"]).strip()
+    mode = str(row.get("mode") or "interpreter").strip().lower()
+    status = str(row.get("status") or "waiting").strip().lower()
 
-        if not room:
-            raise HTTPException(status_code=404, detail="Room not found")
+    load_room_from_db_if_needed(room_id)
 
-        room.updated_at = time.time()
-
-    join_url = f"https://italky.ai/open/interpreter?room={room.room_id}&v=1"
-    ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room.room_id}"
+    join_url = f"https://italky.ai/open/interpreter?room={room_id}&v=1"
+    ws_url = f"wss://italky-api.onrender.com/api/ws/interpreter/{room_id}"
 
     return ResolveRoomResp(
         ok=True,
-        room_id=room.room_id,
+        room_id=room_id,
         host_code=host_code,
-        status=room.status,
-        mode=room.mode,
+        status=status,
+        mode=mode,
         join_url=join_url,
         ws_url=ws_url,
     )
@@ -502,15 +578,44 @@ async def join_room(req: JoinRoomReq):
         raise HTTPException(status_code=422, detail="room_id is required")
 
     async with ROOM_LOCK:
-        room = get_room_or_404(room_id)
-        await mark_guest_joined(room, guest_lang)
+        room = load_room_from_db_if_needed(room_id)
+        if not room:
+            raise HTTPException(status_code=404, detail="Room not found")
+
+        room.guest_lang = guest_lang
+        room.peers["guest"] = PeerState(role="guest", lang=guest_lang)
+        room.status = "active"
+        room.updated_at = time.time()
+
+        db_update_room_fields(
+            room.host_code,
+            {
+                "guest_lang": guest_lang,
+                "status": "active",
+            },
+        )
+
+    await broadcast(
+        room,
+        {
+            "type": "peer_joined",
+            "room_id": room_id,
+            "status": room.status,
+            "guest_lang": guest_lang,
+            "peer_connected": True,
+            "ts": now_ts(),
+        },
+    )
 
     return JoinRoomResp(ok=True, room_id=room_id, status=room.status)
 
 
 @router.get("/interpreter/room/{room_id}", response_model=RoomResp)
 async def get_room(room_id: str):
-    room = get_room_or_404(room_id)
+    room = load_room_from_db_if_needed(room_id)
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
     return RoomResp(
         ok=True,
         room_id=room.room_id,
@@ -528,7 +633,6 @@ async def interpreter_health():
     return {
         "ok": True,
         "rooms": len(ROOMS),
-        "active_hosts": len(HOST_ACTIVE_ROOM),
     }
 
 
@@ -539,7 +643,7 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
     role = str(websocket.query_params.get("role") or "guest").strip().lower()
     my_lang = str(websocket.query_params.get("lang") or "en").strip().lower()
 
-    room = ROOMS.get(room_id)
+    room = load_room_from_db_if_needed(room_id)
     if not room:
         await websocket.send_text(
             json.dumps(
@@ -557,22 +661,45 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
     room.sockets.add(websocket)
     room.updated_at = time.time()
 
-    async with ROOM_LOCK:
-        if role == "host":
-            room.host_lang = my_lang
-            room.peers["host"] = PeerState(role="host", lang=my_lang)
+    if role not in room.peers:
+        room.peers[role] = PeerState(role=role, lang=my_lang)
 
-        elif role == "guest":
-            await mark_guest_joined(room, my_lang)
+    if role == "host":
+        room.host_lang = my_lang
+        try:
+            db_update_room_fields(room.host_code, {"host_lang": my_lang})
+        except Exception as e:
+            logger.warning("db host_lang update failed: %s", e)
 
-        elif role == "host-preview":
-            room.peers["host-preview"] = PeerState(role="host-preview", lang=my_lang)
+    if role == "guest":
+        room.guest_lang = my_lang
+        room.status = "active"
+        try:
+            db_update_room_fields(
+                room.host_code,
+                {
+                    "guest_lang": my_lang,
+                    "status": "active",
+                },
+            )
+        except Exception as e:
+            logger.warning("db guest_lang update failed: %s", e)
 
-        else:
-            room.peers[role] = PeerState(role=role, lang=my_lang)
-            room.updated_at = time.time()
-
-    await broadcast_presence(room)
+    await broadcast(
+        room,
+        {
+            "type": "presence",
+            "room_id": room_id,
+            "host_code": room.host_code,
+            "mode": room.mode,
+            "status": room.status,
+            "host_lang": room.host_lang,
+            "guest_lang": room.guest_lang,
+            "peer_count": len(room.peers),
+            "peer_connected": bool(room.guest_lang),
+            "ts": now_ts(),
+        },
+    )
 
     try:
         while True:
@@ -604,13 +731,29 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 async with ROOM_LOCK:
                     if role == "host":
                         room.host_lang = new_lang
-                    elif role == "guest":
+                        db_update_room_fields(room.host_code, {"host_lang": new_lang})
+                    else:
                         room.guest_lang = new_lang
+                        db_update_room_fields(room.host_code, {"guest_lang": new_lang})
 
                     room.peers[role] = PeerState(role=role, lang=new_lang)
                     room.updated_at = time.time()
 
-                await broadcast_presence(room)
+                await broadcast(
+                    room,
+                    {
+                        "type": "presence",
+                        "room_id": room_id,
+                        "host_code": room.host_code,
+                        "mode": room.mode,
+                        "status": room.status,
+                        "host_lang": room.host_lang,
+                        "guest_lang": room.guest_lang,
+                        "peer_count": len(room.peers),
+                        "peer_connected": bool(room.guest_lang),
+                        "ts": now_ts(),
+                    },
+                )
                 continue
 
             if mtype == "text_message":
@@ -676,27 +819,26 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
             if role == "guest":
                 room.guest_lang = None
                 room.status = "waiting"
+                try:
+                    db_update_room_fields(
+                        room.host_code,
+                        {
+                            "guest_lang": None,
+                            "status": "waiting",
+                        },
+                    )
+                except Exception as e:
+                    logger.warning("db guest disconnect update failed: %s", e)
 
-            if role == "host":
-                room.status = "waiting"
-
-            if not room.sockets:
-                if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
-                    HOST_ACTIVE_ROOM.pop(room.host_code, None)
-                ROOMS.pop(room.room_id, None)
-            else:
-                await broadcast_presence(room)
-
-        if room_id in ROOMS:
-            await broadcast(
-                room,
-                {
-                    "type": "peer_left",
-                    "sender": role,
-                    "message": "Karşı taraf odadan ayrıldı.",
-                    "ts": now_ts(),
-                },
-            )
+        await broadcast(
+            room,
+            {
+                "type": "peer_left",
+                "sender": role,
+                "message": "Karşı taraf odadan ayrıldı.",
+                "ts": now_ts(),
+            },
+        )
 
     except Exception as e:
         logger.exception("INTERPRETER_WS_ERROR %s", e)
