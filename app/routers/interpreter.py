@@ -668,47 +668,61 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
     room.sockets.add(websocket)
     room.updated_at = time.time()
 
-    if not is_preview and effective_role not in room.peers:
-        room.peers[effective_role] = PeerState(role=effective_role, lang=my_lang)
+    async with ROOM_LOCK:
+        if not is_preview and effective_role == "host":
+            room.host_lang = my_lang
+            room.peers["host"] = PeerState(role="host", lang=my_lang)
+            try:
+                db_update_room_fields(room.host_code, {"host_lang": my_lang})
+            except Exception as e:
+                logger.warning("db host_lang update failed: %s", e)
 
-    if not is_preview and effective_role == "host":
-        room.host_lang = my_lang
-        try:
-            db_update_room_fields(room.host_code, {"host_lang": my_lang})
-        except Exception as e:
-            logger.warning("db host_lang update failed: %s", e)
+        elif effective_role == "guest":
+            room.guest_lang = my_lang
+            room.status = "active"
+            room.peers["guest"] = PeerState(role="guest", lang=my_lang)
+            try:
+                db_update_room_fields(
+                    room.host_code,
+                    {
+                        "guest_lang": my_lang,
+                        "status": "active",
+                    },
+                )
+            except Exception as e:
+                logger.warning("db guest_lang update failed: %s", e)
+
+        elif not is_preview:
+            room.peers[effective_role] = PeerState(role=effective_role, lang=my_lang)
+
+        room.updated_at = time.time()
+
+    presence_payload = {
+        "type": "presence",
+        "room_id": room_id,
+        "host_code": room.host_code,
+        "mode": room.mode,
+        "status": room.status,
+        "host_lang": room.host_lang,
+        "guest_lang": room.guest_lang,
+        "peer_count": len([p for p in room.peers.keys() if p in ("host", "guest")]),
+        "peer_connected": bool(room.guest_lang),
+        "ts": now_ts(),
+    }
+
+    await broadcast(room, presence_payload)
 
     if effective_role == "guest":
-        room.guest_lang = my_lang
-        room.status = "active"
-        if "guest" not in room.peers:
-            room.peers["guest"] = PeerState(role="guest", lang=my_lang)
-        try:
-            db_update_room_fields(
-                room.host_code,
-                {
-                    "guest_lang": my_lang,
-                    "status": "active",
-                },
-            )
-        except Exception as e:
-            logger.warning("db guest_lang update failed: %s", e)
-
-    await broadcast(
-        room,
-        {
-            "type": "presence",
-            "room_id": room_id,
-            "host_code": room.host_code,
-            "mode": room.mode,
-            "status": room.status,
-            "host_lang": room.host_lang,
-            "guest_lang": room.guest_lang,
-            "peer_count": len([p for p in room.peers.keys() if p in ("host", "guest")]),
-            "peer_connected": bool(room.guest_lang),
-            "ts": now_ts(),
-        },
-    )
+        await broadcast(
+            room,
+            {
+                "type": "peer_joined",
+                "room_id": room_id,
+                "status": room.status,
+                "guest_lang": room.guest_lang,
+                "ts": now_ts(),
+            },
+        )
 
     try:
         while True:
@@ -741,13 +755,32 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     if effective_role == "host":
                         room.host_lang = new_lang
                         if not is_preview:
-                            db_update_room_fields(room.host_code, {"host_lang": new_lang})
+                            room.peers["host"] = PeerState(role="host", lang=new_lang)
+                            try:
+                                db_update_room_fields(room.host_code, {"host_lang": new_lang})
+                            except Exception as e:
+                                logger.warning("db host lang update failed: %s", e)
+
                     elif effective_role == "guest":
                         room.guest_lang = new_lang
-                        db_update_room_fields(room.host_code, {"guest_lang": new_lang})
+                        room.status = "active"
+                        room.peers["guest"] = PeerState(role="guest", lang=new_lang)
+                        try:
+                            db_update_room_fields(
+                                room.host_code,
+                                {
+                                    "guest_lang": new_lang,
+                                    "status": "active",
+                                },
+                            )
+                        except Exception as e:
+                            logger.warning("db guest lang update failed: %s", e)
 
-                    if not is_preview:
-                        room.peers[effective_role] = PeerState(role=effective_role, lang=new_lang)
+                    elif not is_preview:
+                        room.peers[effective_role] = PeerState(
+                            role=effective_role,
+                            lang=new_lang,
+                        )
 
                     room.updated_at = time.time()
 
@@ -825,13 +858,15 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
         room.sockets.discard(websocket)
         room.updated_at = time.time()
 
+        should_broadcast_peer_left = False
+
         async with ROOM_LOCK:
             if not is_preview:
-                room.peers.pop(effective_role, None)
-
                 if effective_role == "guest":
+                    room.peers.pop("guest", None)
                     room.guest_lang = None
                     room.status = "waiting"
+                    should_broadcast_peer_left = True
                     try:
                         db_update_room_fields(
                             room.host_code,
@@ -843,15 +878,20 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     except Exception as e:
                         logger.warning("db guest disconnect update failed: %s", e)
 
-                await broadcast(
-                    room,
-                    {
-                        "type": "peer_left",
-                        "sender": effective_role,
-                        "message": "Karşı taraf odadan ayrıldı.",
-                        "ts": now_ts(),
-                    },
-                )
+                elif effective_role == "host":
+                    room.peers.pop("host", None)
+                    should_broadcast_peer_left = True
+
+        if should_broadcast_peer_left:
+            await broadcast(
+                room,
+                {
+                    "type": "peer_left",
+                    "sender": effective_role,
+                    "message": "Karşı taraf odadan ayrıldı.",
+                    "ts": now_ts(),
+                },
+            )
 
     except Exception as e:
         logger.exception("INTERPRETER_WS_ERROR %s", e)
