@@ -596,16 +596,20 @@ async def join_room(req: JoinRoomReq):
         )
 
     await broadcast(
-        room,
-        {
-            "type": "peer_joined",
-            "room_id": room_id,
-            "status": room.status,
-            "guest_lang": guest_lang,
-            "peer_connected": True,
-            "ts": now_ts(),
-        },
-    )
+    room,
+    {
+        "type": "presence",
+        "room_id": room_id,
+        "host_code": room.host_code,
+        "mode": room.mode,
+        "status": room.status,
+        "host_lang": room.host_lang,
+        "guest_lang": room.guest_lang,
+        "peer_count": len(room.sockets),
+        "peer_connected": bool(room.guest_lang) or len(room.sockets) >= 2,
+        "ts": now_ts(),
+    },
+)
 
     return JoinRoomResp(ok=True, room_id=room_id, status=room.status)
 
