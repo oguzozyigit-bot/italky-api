@@ -327,6 +327,43 @@ async def broadcast_except_sender(room: RoomState, payload: dict, sender_ws: Web
         room.sockets.discard(ws)
 
 
+async def broadcast_presence(room: RoomState):
+    await broadcast(
+        room,
+        {
+            "type": "presence",
+            "room_id": room.room_id,
+            "host_code": room.host_code,
+            "mode": room.mode,
+            "status": room.status,
+            "host_lang": room.host_lang,
+            "guest_lang": room.guest_lang,
+            "peer_count": len(room.peers),
+            "peer_connected": bool(room.guest_lang),
+            "ts": now_ts(),
+        },
+    )
+
+
+async def mark_guest_joined(room: RoomState, guest_lang: str):
+    room.guest_lang = guest_lang
+    room.peers["guest"] = PeerState(role="guest", lang=guest_lang)
+    room.status = "active"
+    room.updated_at = time.time()
+
+    await broadcast(
+        room,
+        {
+            "type": "peer_joined",
+            "room_id": room.room_id,
+            "status": room.status,
+            "guest_lang": guest_lang,
+            "ts": now_ts(),
+        },
+    )
+    await broadcast_presence(room)
+
+
 class CreateRoomReq(BaseModel):
     my_lang: str = "tr"
     host_code: str = "HOME-HOST"
@@ -382,12 +419,22 @@ class RoomResp(BaseModel):
 
 @router.post("/interpreter/create-room", response_model=CreateRoomResp)
 async def create_room(req: CreateRoomReq):
-    room_id = new_room_id()
     host_lang = str(req.my_lang or "tr").strip().lower()
     host_code = str(req.host_code or "HOME-HOST").strip().upper()
     mode = str(req.mode or "interpreter").strip().lower()
 
     async with ROOM_LOCK:
+        old_room_id = HOST_ACTIVE_ROOM.get(host_code)
+        if old_room_id:
+            old_room = ROOMS.pop(old_room_id, None)
+            if old_room:
+                for ws in list(old_room.sockets):
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+
+        room_id = new_room_id()
         room = RoomState(
             room_id=room_id,
             host_code=host_code,
@@ -414,8 +461,6 @@ async def create_room(req: CreateRoomReq):
 @router.post("/interpreter/resolve-room", response_model=ResolveRoomResp)
 async def resolve_room(req: ResolveRoomReq):
     host_code = str(req.host_code or "").strip().upper()
-    my_lang = str(req.my_lang or "tr").strip().lower()
-    mode = str(req.mode or "interpreter").strip().lower()
 
     if not host_code:
         raise HTTPException(status_code=422, detail="host_code is required")
@@ -430,16 +475,7 @@ async def resolve_room(req: ResolveRoomReq):
                 HOST_ACTIVE_ROOM.pop(host_code, None)
 
         if not room:
-            room_id = new_room_id()
-            room = RoomState(
-                room_id=room_id,
-                host_code=host_code,
-                mode=mode,
-                host_lang=my_lang,
-            )
-            room.peers["host"] = PeerState(role="host", lang=my_lang)
-            ROOMS[room_id] = room
-            HOST_ACTIVE_ROOM[host_code] = room_id
+            raise HTTPException(status_code=404, detail="Room not found")
 
         room.updated_at = time.time()
 
@@ -467,21 +503,7 @@ async def join_room(req: JoinRoomReq):
 
     async with ROOM_LOCK:
         room = get_room_or_404(room_id)
-        room.guest_lang = guest_lang
-        room.peers["guest"] = PeerState(role="guest", lang=guest_lang)
-        room.status = "active"
-        room.updated_at = time.time()
-
-    await broadcast(
-        room,
-        {
-            "type": "peer_joined",
-            "room_id": room_id,
-            "status": room.status,
-            "guest_lang": guest_lang,
-            "ts": now_ts(),
-        },
-    )
+        await mark_guest_joined(room, guest_lang)
 
     return JoinRoomResp(ok=True, room_id=room_id, status=room.status)
 
@@ -535,23 +557,22 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
     room.sockets.add(websocket)
     room.updated_at = time.time()
 
-    if role not in room.peers:
-        room.peers[role] = PeerState(role=role, lang=my_lang)
+    async with ROOM_LOCK:
+        if role == "host":
+            room.host_lang = my_lang
+            room.peers["host"] = PeerState(role="host", lang=my_lang)
 
-    await broadcast(
-        room,
-        {
-            "type": "presence",
-            "room_id": room_id,
-            "host_code": room.host_code,
-            "mode": room.mode,
-            "status": room.status,
-            "host_lang": room.host_lang,
-            "guest_lang": room.guest_lang,
-            "peer_count": len(room.peers),
-            "ts": now_ts(),
-        },
-    )
+        elif role == "guest":
+            await mark_guest_joined(room, my_lang)
+
+        elif role == "host-preview":
+            room.peers["host-preview"] = PeerState(role="host-preview", lang=my_lang)
+
+        else:
+            room.peers[role] = PeerState(role=role, lang=my_lang)
+            room.updated_at = time.time()
+
+    await broadcast_presence(room)
 
     try:
         while True:
@@ -583,26 +604,13 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 async with ROOM_LOCK:
                     if role == "host":
                         room.host_lang = new_lang
-                    else:
+                    elif role == "guest":
                         room.guest_lang = new_lang
 
                     room.peers[role] = PeerState(role=role, lang=new_lang)
                     room.updated_at = time.time()
 
-                await broadcast(
-                    room,
-                    {
-                        "type": "presence",
-                        "room_id": room_id,
-                        "host_code": room.host_code,
-                        "mode": room.mode,
-                        "status": room.status,
-                        "host_lang": room.host_lang,
-                        "guest_lang": room.guest_lang,
-                        "peer_count": len(room.peers),
-                        "ts": now_ts(),
-                    },
-                )
+                await broadcast_presence(room)
                 continue
 
             if mtype == "text_message":
@@ -669,19 +677,26 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 room.guest_lang = None
                 room.status = "waiting"
 
+            if role == "host":
+                room.status = "waiting"
+
             if not room.sockets:
                 if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
                     HOST_ACTIVE_ROOM.pop(room.host_code, None)
+                ROOMS.pop(room.room_id, None)
+            else:
+                await broadcast_presence(room)
 
-        await broadcast(
-            room,
-            {
-                "type": "peer_left",
-                "sender": role,
-                "message": "Karşı taraf odadan ayrıldı.",
-                "ts": now_ts(),
-            },
-        )
+        if room_id in ROOMS:
+            await broadcast(
+                room,
+                {
+                    "type": "peer_left",
+                    "sender": role,
+                    "message": "Karşı taraf odadan ayrıldı.",
+                    "ts": now_ts(),
+                },
+            )
 
     except Exception as e:
         logger.exception("INTERPRETER_WS_ERROR %s", e)
