@@ -754,15 +754,17 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
 
             if mtype == "profile_sync":
                 sender_id = str(data.get("sender_id") or "").strip()
+                sync_lang = str(data.get("lang") or my_lang).strip().lower()
                 voice_mode = str(data.get("voice_mode") or "auto").strip().lower()
                 translate_mode = str(data.get("translate_mode") or "normal").strip().lower()
-                sync_lang = str(data.get("lang") or my_lang).strip().lower()
 
                 if effective_role == "host":
                     room.host_lang = sync_lang
                 elif effective_role == "guest":
                     room.guest_lang = sync_lang
                     room.status = "active"
+
+                room.updated_at = time.time()
 
                 await broadcast_except_sender(
                     room,
@@ -830,6 +832,25 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                         )
                     )
                     continue
+
+                await broadcast_except_sender(
+                    room,
+                    {
+                        "type": "translated_message",
+                        "sender": effective_role,
+                        "sender_id": sender_id,
+                        "sender_user_id": sender_user_id,
+                        "sender_voice": sender_voice,
+                        "sender_translate_mode": sender_translate_mode,
+                        "original_text": original_text,
+                        "translated_text": translated,
+                        "from_lang": from_lang,
+                        "to_lang": to_lang,
+                        "ts": now_ts(),
+                    },
+                    websocket,
+                )
+                continue
 
                 await broadcast_except_sender(
                     room,
