@@ -647,9 +647,6 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
     role = str(websocket.query_params.get("role") or "guest").strip().lower()
     my_lang = str(websocket.query_params.get("lang") or "en").strip().lower()
 
-    is_preview = role == "host-preview"
-    effective_role = "host" if role == "host-preview" else role
-
     room = ROOMS.get(room_id)
     if not room:
         await websocket.send_text(
@@ -665,28 +662,23 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
         await websocket.close()
         return
 
+    is_preview = role == "host-preview"
+    effective_role = "host" if role == "host-preview" else role
+
     room.sockets.add(websocket)
     room.updated_at = time.time()
 
-    async with ROOM_LOCK:
-        # preview socket peer sayısına dahil edilmez
-        if not is_preview:
-            room.peers[effective_role] = PeerState(role=effective_role, lang=my_lang)
+    if not is_preview and effective_role not in room.peers:
+        room.peers[effective_role] = PeerState(role=effective_role, lang=my_lang)
 
-        if effective_role == "host":
-            room.host_lang = my_lang
+    if not is_preview and effective_role == "host":
+        room.host_lang = my_lang
 
-        if effective_role == "guest":
-            room.guest_lang = my_lang
-
-        real_peer_count = len([p for p in room.peers.keys() if p in ("host", "guest")])
-
-        if room.host_lang and room.guest_lang and real_peer_count >= 2:
-            room.status = "active"
-        else:
-            room.status = "waiting"
-
-        room.updated_at = time.time()
+    if effective_role == "guest":
+        room.guest_lang = my_lang
+        room.status = "active"
+        if "guest" not in room.peers:
+            room.peers["guest"] = PeerState(role="guest", lang=my_lang)
 
     await broadcast(
         room,
@@ -698,26 +690,11 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
             "status": room.status,
             "host_lang": room.host_lang,
             "guest_lang": room.guest_lang,
-            "peer_count": real_peer_count,
-            "peer_connected": bool(room.host_lang and room.guest_lang and real_peer_count >= 2),
+            "peer_count": len([p for p in room.peers.keys() if p in ("host", "guest")]),
+            "peer_connected": bool(room.guest_lang),
             "ts": now_ts(),
         },
     )
-
-    # guest gerçekten bağlandıysa host ve preview tarafları tetiklensin
-    if effective_role == "guest":
-        await broadcast(
-            room,
-            {
-                "type": "peer_joined",
-                "room_id": room_id,
-                "status": room.status,
-                "guest_lang": room.guest_lang,
-                "peer_count": real_peer_count,
-                "peer_connected": True,
-                "ts": now_ts(),
-            },
-        )
 
     try:
         while True:
@@ -732,13 +709,14 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 continue
 
             if mtype == "typing":
-                await broadcast(
+                await broadcast_except_sender(
                     room,
                     {
                         "type": "typing",
                         "sender": effective_role,
                         "ts": now_ts(),
                     },
+                    websocket,
                 )
                 continue
 
@@ -755,13 +733,6 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                     if not is_preview:
                         room.peers[effective_role] = PeerState(role=effective_role, lang=new_lang)
 
-                    real_peer_count = len([p for p in room.peers.keys() if p in ("host", "guest")])
-
-                    if room.host_lang and room.guest_lang and real_peer_count >= 2:
-                        room.status = "active"
-                    else:
-                        room.status = "waiting"
-
                     room.updated_at = time.time()
 
                 await broadcast(
@@ -774,25 +745,53 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                         "status": room.status,
                         "host_lang": room.host_lang,
                         "guest_lang": room.guest_lang,
-                        "peer_count": real_peer_count,
-                        "peer_connected": bool(room.host_lang and room.guest_lang and real_peer_count >= 2),
+                        "peer_count": len([p for p in room.peers.keys() if p in ("host", "guest")]),
+                        "peer_connected": bool(room.guest_lang),
                         "ts": now_ts(),
                     },
                 )
                 continue
 
             if mtype == "profile_sync":
+                sender_id = str(data.get("sender_id") or "").strip()
+                voice_mode = str(data.get("voice_mode") or "auto").strip().lower()
+                translate_mode = str(data.get("translate_mode") or "normal").strip().lower()
+                sync_lang = str(data.get("lang") or my_lang).strip().lower()
+
+                if effective_role == "host":
+                    room.host_lang = sync_lang
+                elif effective_role == "guest":
+                    room.guest_lang = sync_lang
+                    room.status = "active"
+
                 await broadcast_except_sender(
                     room,
                     {
                         "type": "profile_sync",
-                        "sender_id": str(data.get("sender_id") or "").strip(),
-                        "lang": str(data.get("lang") or my_lang).strip().lower(),
-                        "voice_mode": str(data.get("voice_mode") or "auto").strip().lower(),
-                        "translate_mode": str(data.get("translate_mode") or "normal").strip().lower(),
+                        "sender": effective_role,
+                        "sender_id": sender_id,
+                        "lang": sync_lang,
+                        "voice_mode": voice_mode,
+                        "translate_mode": translate_mode,
                         "ts": now_ts(),
                     },
                     websocket,
+                )
+
+                await broadcast(
+                    room,
+                    {
+                        "type": "presence",
+                        "room_id": room_id,
+                        "host_code": room.host_code,
+                        "mode": room.mode,
+                        "status": room.status,
+                        "host_lang": room.host_lang,
+                        "guest_lang": room.guest_lang,
+                        "peer_count": len([p for p in room.peers.keys() if p in ("host", "guest")]),
+                        "peer_connected": bool(room.guest_lang),
+                        "ts": now_ts(),
+                    },
                 )
                 continue
 
@@ -861,23 +860,24 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
 
                 if effective_role == "guest":
                     room.guest_lang = None
-
-                real_peer_count = len([p for p in room.peers.keys() if p in ("host", "guest")])
-
-                if room.host_lang and room.guest_lang and real_peer_count >= 2:
-                    room.status = "active"
-                else:
                     room.status = "waiting"
 
-        await broadcast(
-            room,
-            {
-                "type": "peer_left",
-                "sender": effective_role,
-                "message": "Karşı taraf odadan ayrıldı.",
-                "ts": now_ts(),
-            },
-        )
+                if effective_role == "host" and "host" not in room.peers:
+                    room.status = "waiting"
+
+                await broadcast(
+                    room,
+                    {
+                        "type": "peer_left",
+                        "sender": effective_role,
+                        "message": "Karşı taraf odadan ayrıldı.",
+                        "ts": now_ts(),
+                    },
+                )
+
+            if not room.sockets:
+                if HOST_ACTIVE_ROOM.get(room.host_code) == room.room_id:
+                    HOST_ACTIVE_ROOM.pop(room.host_code, None)
 
     except Exception as e:
         logger.exception("INTERPRETER_WS_ERROR %s", e)
