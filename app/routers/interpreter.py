@@ -305,13 +305,6 @@ def new_room_id() -> str:
     return secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:12]
 
 
-def get_room_or_404(room_id: str) -> RoomState:
-    room = ROOMS.get(room_id)
-    if not room:
-        raise HTTPException(status_code=404, detail="Room not found")
-    return room
-
-
 def db_upsert_room(
     host_code: str,
     room_id: str,
@@ -413,6 +406,35 @@ def load_room_from_db_if_needed(room_id: str) -> Optional[RoomState]:
 
     ROOMS[room_id] = room
     return room
+
+
+def resolve_target_lang(
+    room: RoomState,
+    effective_role: str,
+    requested_to_lang: str,
+    from_lang: str,
+) -> str:
+    requested = str(requested_to_lang or "").strip().lower()
+    src = str(from_lang or "").strip().lower()
+
+    if effective_role == "host":
+        opposite = str(room.guest_lang or "").strip().lower()
+    else:
+        opposite = str(room.host_lang or "").strip().lower()
+
+    if opposite and opposite != src:
+        if not requested:
+            return opposite
+        if requested == src:
+            return opposite
+
+    if requested:
+        return requested
+
+    if opposite:
+        return opposite
+
+    return "en" if src != "en" else "tr"
 
 
 async def broadcast(room: RoomState, payload: dict):
@@ -884,7 +906,7 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
             if mtype == "text_message":
                 original_text = str(data.get("text") or "").strip()
                 from_lang = str(data.get("from_lang") or my_lang).strip().lower()
-                to_lang = str(data.get("to_lang") or "").strip().lower()
+                sender_requested_to_lang = str(data.get("to_lang") or "").strip().lower()
                 sender_id = str(data.get("sender_id") or "").strip()
                 sender_user_id = str(data.get("sender_user_id") or "").strip()
                 sender_voice = str(data.get("sender_voice") or "").strip().lower()
@@ -893,11 +915,12 @@ async def interpreter_ws(websocket: WebSocket, room_id: str):
                 if not original_text:
                     continue
 
-                if not to_lang:
-                    if effective_role == "host":
-                        to_lang = room.guest_lang or "en"
-                    else:
-                        to_lang = room.host_lang or "tr"
+                to_lang = resolve_target_lang(
+                    room=room,
+                    effective_role=effective_role,
+                    requested_to_lang=sender_requested_to_lang,
+                    from_lang=from_lang,
+                )
 
                 try:
                     translated = await translate_with_fallback(
