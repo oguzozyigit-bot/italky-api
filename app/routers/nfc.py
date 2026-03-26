@@ -128,8 +128,8 @@ def upsert_profile_access(
 
 
 @router.post("/activate")
-def activate_nfc(body: ActivateNfcBody, x_session_id: str = Header(None)):
-    check_session(body.user_id, x_session_id)
+def activate_nfc(body: ActivateNfcBody, x_session_key: str = Header(None)):
+    check_session(body.user_id, x_session_key)
 
     user_id = body.user_id.strip()
     uid = body.uid.strip().upper()
