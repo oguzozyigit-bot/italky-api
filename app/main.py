@@ -11,7 +11,6 @@ from fastapi.staticfiles import StaticFiles
 from app.routers.auth import router as auth_router
 from app.routers.nfc import router as nfc_router
 from routers.session import router as session_router
-from routers.admin_panel import router as admin_panel_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
@@ -115,7 +114,6 @@ app.include_router(onetoall_ws_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
 app.include_router(nfc_router)
 app.include_router(session_router)
-app.include_router(admin_panel_router)
 
 # AUTH
 app.include_router(auth_router)
