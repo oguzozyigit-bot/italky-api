@@ -4,9 +4,11 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from supabase import create_client, Client
+
+from routers.session import check_session
 
 router = APIRouter(prefix="/api/nfc", tags=["nfc"])
 
@@ -52,7 +54,15 @@ class ConsumeLanguageBody(BaseModel):
     reason: str = "language_install"
 
 
-def log_nfc(card_uid: Optional[str], user_id: Optional[str], device_id: Optional[str], action: str, result: str, reason: str = "", meta: Optional[dict[str, Any]] = None):
+def log_nfc(
+    card_uid: Optional[str],
+    user_id: Optional[str],
+    device_id: Optional[str],
+    action: str,
+    result: str,
+    reason: str = "",
+    meta: Optional[dict[str, Any]] = None,
+):
     try:
         supabase.table("nfc_logs").insert({
             "card_uid": card_uid,
@@ -74,7 +84,14 @@ def get_card_by_uid(uid: str):
 
 
 def get_package_by_code(code: str):
-    res = supabase.table("nfc_packages").select("*").eq("code", code).eq("is_active", True).limit(1).execute()
+    res = (
+        supabase.table("nfc_packages")
+        .select("*")
+        .eq("code", code)
+        .eq("is_active", True)
+        .limit(1)
+        .execute()
+    )
     rows = res.data or []
     return rows[0] if rows else None
 
@@ -95,7 +112,13 @@ def get_active_entitlement(user_id: str):
     return rows[0] if rows else None
 
 
-def upsert_profile_access(user_id: str, card_uid: Optional[str], package_code: Optional[str], expires_at: Optional[str], mode: str):
+def upsert_profile_access(
+    user_id: str,
+    card_uid: Optional[str],
+    package_code: Optional[str],
+    expires_at: Optional[str],
+    mode: str
+):
     supabase.table("profiles").update({
         "app_access_mode": mode,
         "nfc_card_uid": card_uid,
@@ -105,7 +128,9 @@ def upsert_profile_access(user_id: str, card_uid: Optional[str], package_code: O
 
 
 @router.post("/activate")
-def activate_nfc(body: ActivateNfcBody):
+def activate_nfc(body: ActivateNfcBody, x_session_id: str = Header(None)):
+    check_session(body.user_id, x_session_id)
+
     user_id = body.user_id.strip()
     uid = body.uid.strip().upper()
     device_id = body.device_id.strip()
@@ -134,13 +159,8 @@ def activate_nfc(body: ActivateNfcBody):
         raise HTTPException(status_code=403, detail="Kart başka hesaba bağlı")
 
     if current_device_id and current_device_id != device_id:
-        supabase.table("nfc_cards").update({
-            "status": "tampered",
-            "is_active": False
-        }).eq("uid", uid).execute()
-
         log_nfc(uid, user_id, device_id, "activate", "fail", "device_mismatch")
-        raise HTTPException(status_code=403, detail="Kart farklı cihazda kullanıldığı için kilitlendi")
+        raise HTTPException(status_code=403, detail="Kart farklı cihazda kullanıldığı için kullanılamıyor")
 
     package_code = str(card.get("package_code") or "").strip()
     package = get_package_by_code(package_code)
@@ -185,10 +205,16 @@ def activate_nfc(body: ActivateNfcBody):
                 "status": "active"
             }).execute()
 
-            # İster burada jeton da profile’a eklenebilir
-            profile_res = supabase.table("profiles").select("jeton_balance").eq("id", user_id).maybe_single().execute()
+            profile_res = (
+                supabase.table("profiles")
+                .select("jeton_balance")
+                .eq("id", user_id)
+                .maybe_single()
+                .execute()
+            )
             profile = profile_res.data or {}
             current_jeton = int(profile.get("jeton_balance") or 0)
+
             supabase.table("profiles").update({
                 "jeton_balance": current_jeton + int(package.get("jeton_amount") or 0)
             }).eq("id", user_id).execute()
@@ -246,7 +272,9 @@ def activate_nfc(body: ActivateNfcBody):
 
 
 @router.post("/check")
-def check_nfc(body: CheckNfcBody):
+def check_nfc(body: CheckNfcBody, x_session_id: str = Header(None)):
+    check_session(body.user_id, x_session_id)
+
     user_id = body.user_id.strip()
     uid = (body.uid or "").strip().upper()
     device_id = (body.device_id or "").strip()
@@ -294,7 +322,9 @@ def check_nfc(body: CheckNfcBody):
 
 
 @router.post("/consume-jeton")
-def consume_jeton(body: ConsumeJetonBody):
+def consume_jeton(body: ConsumeJetonBody, x_session_id: str = Header(None)):
+    check_session(body.user_id, x_session_id)
+
     if body.amount <= 0:
         raise HTTPException(status_code=400, detail="amount pozitif olmalı")
 
@@ -317,11 +347,16 @@ def consume_jeton(body: ConsumeJetonBody):
         "remaining": new_remaining
     })
 
-    return {"ok": True, "remaining_jeton": new_remaining}
+    return {
+        "ok": True,
+        "remaining_jeton": new_remaining
+    }
 
 
 @router.post("/consume-language")
-def consume_language(body: ConsumeLanguageBody):
+def consume_language(body: ConsumeLanguageBody, x_session_id: str = Header(None)):
+    check_session(body.user_id, x_session_id)
+
     if body.count <= 0:
         raise HTTPException(status_code=400, detail="count pozitif olmalı")
 
@@ -344,4 +379,7 @@ def consume_language(body: ConsumeLanguageBody):
         "remaining": new_remaining
     })
 
-    return {"ok": True, "remaining_languages": new_remaining}
+    return {
+        "ok": True,
+        "remaining_languages": new_remaining
+    }
