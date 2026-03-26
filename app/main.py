@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from app.routers.auth import router as auth_router
-from routers.nfc import router as nfc_router
+from app.routers.nfc import router as nfc_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
