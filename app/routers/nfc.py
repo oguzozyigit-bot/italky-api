@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from supabase import create_client, Client
 
-from routers.session import check_session
+from app.routers.session import check_session
 
 router = APIRouter(prefix="/api/nfc", tags=["nfc"])
 
