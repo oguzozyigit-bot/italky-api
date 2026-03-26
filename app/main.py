@@ -10,7 +10,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from app.routers.auth import router as auth_router
 from app.routers.nfc import router as nfc_router
-from routers.session import router as session_router
+from app.routers.session import router as session_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
