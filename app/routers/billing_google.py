@@ -128,8 +128,10 @@ def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, balance_after: in
             "user_id": user_id,
             "type": tx_type,
             "amount": amount,
-            "balance_after": balance_after,
-            "note": note,
+            "reason": note,
+            "meta": {
+                "balance_after": balance_after
+            }
         }
     ).execute()
 
