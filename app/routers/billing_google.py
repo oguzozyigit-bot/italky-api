@@ -123,18 +123,17 @@ def _insert_purchase_log(user_id: str, product_id: str, amount: int, purchase_to
 
 
 def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, balance_after: int, note: str):
-    try:
-        supabase.table("wallet_tx").insert(
-            {
-                "user_id": user_id,
-                "type": tx_type,
-                "amount": amount,
-                "balance_after": balance_after,
-                "note": note,
-            }
-        ).execute()
-    except Exception:
-        pass
+    res = supabase.table("wallet_tx").insert(
+        {
+            "user_id": user_id,
+            "type": tx_type,
+            "amount": amount,
+            "balance_after": balance_after,
+            "note": note,
+        }
+    ).execute()
+
+    print("WALLET_TX INSERT RESULT:", res)
 
 
 def _profile_or_404(user_id: str) -> Dict[str, Any]:
