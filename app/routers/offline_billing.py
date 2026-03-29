@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -16,8 +16,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-OFFLINE_PRICE = 5
-OFFLINE_DURATION = 365
+REPEAT_DOWNLOAD_PRICE = 20
 
 
 class OfflineFileReq(BaseModel):
@@ -25,25 +24,65 @@ class OfflineFileReq(BaseModel):
     file_name: str
 
 
-def parse_dt(value):
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
 def norm_file_name(value: str) -> str:
     return str(value or "").strip().lower().replace("_", "-")
 
 
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 # =========================
-# AKTİVASYON
-# sadece ücretli ek diller için
-# ör: fr, de, es
+# KONTROL
+# ilk indirme ücretsiz mi?
+# tekrar indirme ücretli mi?
+# =========================
+@router.post("/api/offline/files/check")
+async def check_file(req: OfflineFileReq):
+    user_id = (req.user_id or "").strip()
+    file_name = norm_file_name(req.file_name)
+
+    if not user_id:
+        raise HTTPException(status_code=422, detail="user_id required")
+
+    if not file_name:
+        raise HTTPException(status_code=422, detail="file_name required")
+
+    existing = (
+        supabase.table("offline_files")
+        .select("id,user_id,file_name,download_count,last_downloaded_at")
+        .eq("user_id", user_id)
+        .eq("file_name", file_name)
+        .limit(1)
+        .execute()
+    )
+
+    if existing.data:
+        row = existing.data[0]
+        return {
+            "ok": True,
+            "already_downloaded": True,
+            "download_count": int(row.get("download_count") or 1),
+            "repeat_price": REPEAT_DOWNLOAD_PRICE,
+            "file_name": file_name
+        }
+
+    return {
+        "ok": True,
+        "already_downloaded": False,
+        "download_count": 0,
+        "repeat_price": REPEAT_DOWNLOAD_PRICE,
+        "file_name": file_name
+    }
+
+
+# =========================
+# AKTİVASYON / İNDİRME KAYDI
+# ilk indirme ücretsiz
+# tekrar indirme 20 jeton
 # =========================
 @router.post("/api/offline/files/activate")
 async def activate_file(req: OfflineFileReq):
-
     user_id = (req.user_id or "").strip()
     file_name = norm_file_name(req.file_name)
 
@@ -65,72 +104,71 @@ async def activate_file(req: OfflineFileReq):
         raise HTTPException(status_code=404, detail="profile not found")
 
     tokens = int((prof.data[0] or {}).get("tokens") or 0)
-    now = datetime.now(timezone.utc)
 
     existing = (
         supabase.table("offline_files")
-        .select("*")
+        .select("id,download_count")
         .eq("user_id", user_id)
         .eq("file_name", file_name)
         .limit(1)
         .execute()
     )
 
-    if existing.data:
+    already_downloaded = bool(existing.data)
+    charged = 0
+
+    if already_downloaded:
+        if tokens < REPEAT_DOWNLOAD_PRICE:
+            raise HTTPException(status_code=402, detail="insufficient_tokens")
+
+        charged = REPEAT_DOWNLOAD_PRICE
+        next_tokens = tokens - charged
+
+        supabase.table("profiles").update({
+            "tokens": next_tokens
+        }).eq("id", user_id).execute()
+
         row = existing.data[0]
-        exp = parse_dt(row.get("expires_at"))
+        next_count = int(row.get("download_count") or 1) + 1
 
-        if exp and exp > now:
-            return {
-                "ok": True,
-                "already_active": True,
-                "tokens": tokens,
-                "price": OFFLINE_PRICE,
-                "expires_at": exp.isoformat(),
-                "duration_days": OFFLINE_DURATION,
-                "file_name": file_name
-            }
-
-    if tokens < OFFLINE_PRICE:
-        raise HTTPException(status_code=402, detail="insufficient_tokens")
-
-    expires = now + timedelta(days=OFFLINE_DURATION)
-
-    if existing.data:
         supabase.table("offline_files").update({
-            "expires_at": expires.isoformat()
-        }).eq("id", existing.data[0]["id"]).execute()
-    else:
-        supabase.table("offline_files").insert({
-            "user_id": user_id,
-            "file_name": file_name,
-            "expires_at": expires.isoformat()
-        }).execute()
+            "download_count": next_count,
+            "last_downloaded_at": now_iso()
+        }).eq("id", row["id"]).execute()
 
-    next_tokens = tokens - OFFLINE_PRICE
+        return {
+            "ok": True,
+            "already_downloaded": True,
+            "charged": charged,
+            "tokens": next_tokens,
+            "download_count": next_count,
+            "file_name": file_name
+        }
 
-    supabase.table("profiles").update({
-        "tokens": next_tokens
-    }).eq("id", user_id).execute()
+    supabase.table("offline_files").insert({
+        "user_id": user_id,
+        "file_name": file_name,
+        "download_count": 1,
+        "first_downloaded_at": now_iso(),
+        "last_downloaded_at": now_iso()
+    }).execute()
 
     return {
         "ok": True,
-        "already_active": False,
-        "tokens": next_tokens,
-        "price": OFFLINE_PRICE,
-        "expires_at": expires.isoformat(),
-        "duration_days": OFFLINE_DURATION,
+        "already_downloaded": False,
+        "charged": 0,
+        "tokens": tokens,
+        "download_count": 1,
         "file_name": file_name
     }
 
 
 # =========================
 # LİSTE
-# sadece ücretli ek dil lisansları
+# kullanıcının indirdiği offline dosyalar
 # =========================
 @router.get("/api/offline/files/list")
 async def list_files(user_id: str):
-
     user_id = (user_id or "").strip()
 
     if not user_id:
@@ -140,24 +178,12 @@ async def list_files(user_id: str):
         supabase.table("offline_files")
         .select("*")
         .eq("user_id", user_id)
+        .order("last_downloaded_at", desc=True)
         .execute()
     )
 
-    now = datetime.now(timezone.utc)
-    items = []
-
-    for r in rows.data or []:
-        exp = parse_dt(r.get("expires_at"))
-        active = bool(exp and exp > now)
-
-        items.append({
-            **r,
-            "active": active
-        })
-
     return {
         "ok": True,
-        "items": items,
-        "price": OFFLINE_PRICE,
-        "duration_days": OFFLINE_DURATION
-    }
+        "items": rows.data or [],
+        "repeat_price": REPEAT_DOWNLOAD_PRICE
+        }
