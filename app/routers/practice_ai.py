@@ -141,7 +141,6 @@ def _deduct_token(user_id: str, current_tokens: int) -> int:
     try:
         supabase.table("profiles").update(payload).eq("id", user_id).execute()
     except Exception:
-        # some projects may use jeton_balance instead of tokens
         supabase.table("profiles").update({"jeton_balance": new_tokens}).eq("id", user_id).execute()
 
     return new_tokens
@@ -237,13 +236,74 @@ def _summarize_memory_for_prompt(memory: dict | None) -> str:
     )
 
 
+def _opening_examples_for_lang(lang: str) -> str:
+    lang = str(lang or "").strip().lower()
+
+    examples = {
+        "en": (
+            "Opening style examples in English:\n"
+            "- Hi Oğuz. Last time we practiced greetings. Shall we continue?\n"
+            "- Hi Oğuz. Today we will practice daily questions.\n"
+            "- Hello Oğuz. Let us start with a simple question. What is your name?\n"
+            "- Good to see you again. Yesterday we worked on introductions. Ready?\n"
+            "- Today we will practice shopping sentences. Are you ready?"
+        ),
+        "de": (
+            "Opening style examples in German:\n"
+            "- Hallo Oğuz. Letztes Mal haben wir Begrüßungen geübt. Wollen wir weitermachen?\n"
+            "- Hallo Oğuz. Heute üben wir einfache Alltagsfragen.\n"
+            "- Guten Tag Oğuz. Wir beginnen mit einer leichten Frage. Wie heißt du?\n"
+            "- Schön, dich wiederzusehen. Gestern haben wir Vorstellungen geübt. Bist du bereit?\n"
+            "- Heute üben wir Sätze zum Einkaufen. Bist du bereit?"
+        ),
+        "fr": (
+            "Opening style examples in French:\n"
+            "- Bonjour Oğuz. La dernière fois, nous avons travaillé les salutations. On continue ?\n"
+            "- Bonjour Oğuz. Aujourd'hui, nous allons pratiquer des questions simples de la vie quotidienne.\n"
+            "- Salut Oğuz. Nous commençons avec une question facile. Comment tu t'appelles ?\n"
+            "- Ravi de te revoir. Hier, nous avons travaillé les présentations. Tu es prêt ?\n"
+            "- Aujourd'hui, nous allons pratiquer des phrases pour faire des achats. Tu es prêt ?"
+        ),
+        "es": (
+            "Opening style examples in Spanish:\n"
+            "- Hola Oğuz. La última vez practicamos los saludos. ¿Seguimos?\n"
+            "- Hola Oğuz. Hoy vamos a practicar preguntas simples de la vida diaria.\n"
+            "- Hola Oğuz. Empezamos con una pregunta fácil. ¿Cómo te llamas?\n"
+            "- Me alegra verte otra vez. Ayer practicamos las presentaciones. ¿Estás listo?\n"
+            "- Hoy vamos a practicar frases para ir de compras. ¿Estás listo?"
+        ),
+        "it": (
+            "Opening style examples in Italian:\n"
+            "- Ciao Oğuz. L'ultima volta abbiamo praticato i saluti. Continuiamo?\n"
+            "- Ciao Oğuz. Oggi pratichiamo domande semplici della vita quotidiana.\n"
+            "- Ciao Oğuz. Cominciamo con una domanda facile. Come ti chiami?\n"
+            "- È bello rivederti. Ieri abbiamo praticato le presentazioni. Sei pronto?\n"
+            "- Oggi pratichiamo frasi per fare shopping. Sei pronto?"
+        ),
+    }
+
+    return examples.get(lang, examples["en"])
+
+
 def _extract_summary_fields(parsed: dict) -> dict:
+    lesson_stage = str(parsed.get("lesson_stage") or "").strip()
+    target_phrase = str(parsed.get("target_phrase") or "").strip()
+    reply_tr = str(parsed.get("reply_tr") or "").strip()
+    reply = str(parsed.get("reply") or "").strip()
+
+    topic_map = {
+        "placement": "placement",
+        "practice": "daily practice",
+        "repeat": "pronunciation repeat",
+        "correction": "pronunciation correction",
+    }
+
     return {
-        "last_topic": str(parsed.get("topic") or parsed.get("lesson_stage") or "").strip(),
+        "last_topic": topic_map.get(lesson_stage, lesson_stage or "daily practice"),
         "last_level_estimate": str(parsed.get("level_estimate") or "").strip(),
-        "last_target_phrase": str(parsed.get("target_phrase") or "").strip(),
-        "last_session_summary": str(parsed.get("reply_tr") or "").strip(),
-        "last_teacher_message": str(parsed.get("reply") or "").strip(),
+        "last_target_phrase": target_phrase,
+        "last_session_summary": reply_tr,
+        "last_teacher_message": reply,
     }
 
 
@@ -281,13 +341,16 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"Student display name: {display_name or 'student'}\n"
         f"Profile level for selected language: {profile_level or 'unknown'}\n"
         f"{_summarize_memory_for_prompt(memory)}\n\n"
+        f"{_opening_examples_for_lang(body.lang)}\n\n"
         f"{body.prompt}\n\n"
         f"Important teacher behavior:\n"
         f"- If previous lesson memory exists, greet the student naturally by name if available.\n"
         f"- If previous lesson memory exists, briefly refer to the last topic before continuing.\n"
-        f"- Example style: 'Hi Oğuz. Last time we practiced greetings. Shall we continue?'\n"
         f"- If there is no previous memory, start with a short placement greeting.\n"
-        f"- Keep replies short."
+        f"- Use the student display name when natural.\n"
+        f"- Keep replies short.\n"
+        f"- First reply should feel like a real teacher opening, not a robot waiting screen.\n"
+        f"- Good examples: greeting + one short reminder or one short lesson goal + one short question.\n"
     )
 
     try:
