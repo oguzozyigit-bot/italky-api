@@ -90,17 +90,14 @@ def _load_profile(user_id: str):
 
 
 def _display_name(profile: dict) -> str:
-    # 1) En güvenli kaynak: full_name
     full_name = str(profile.get("full_name") or "").strip()
     if full_name:
         return full_name.split(" ")[0]
 
-    # 2) Alternatif ad alanları
     name = str(profile.get("name") or "").strip()
     if name:
         return name.split(" ")[0]
 
-    # 3) teacher_prefs içinde en güncel kaydı bul
     teacher_prefs = profile.get("teacher_prefs") or {}
     if isinstance(teacher_prefs, dict) and teacher_prefs:
         numeric_keys = []
@@ -125,7 +122,6 @@ def _display_name(profile: dict) -> str:
             if hitap:
                 return hitap
 
-    # 4) email fallback
     email = str(profile.get("email") or "").strip()
     if email and "@" in email:
         return email.split("@")[0]
@@ -187,7 +183,6 @@ def _profile_has_paid_access(profile: dict) -> bool:
 
 
 def _profile_trial_active(profile: dict) -> bool:
-    # Premium / paid access varsa trial artık engel değil
     if _profile_has_paid_access(profile):
         return False
 
@@ -342,6 +337,59 @@ def _extract_summary_fields(parsed: dict) -> dict:
     }
 
 
+def _extract_text_from_gemini_response(resp) -> str:
+    try:
+        txt = getattr(resp, "text", "") or ""
+        if txt:
+            return txt.strip()
+    except Exception:
+        pass
+
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        if candidates:
+            content = getattr(candidates[0], "content", None)
+            parts = getattr(content, "parts", None) or []
+            chunks = []
+            for p in parts:
+                t = getattr(p, "text", None)
+                if t:
+                    chunks.append(t)
+            return "".join(chunks).strip()
+    except Exception:
+        pass
+
+    return ""
+
+
+def _extract_json_from_text(raw_text: str) -> dict | None:
+    raw_text = str(raw_text or "").strip()
+    if not raw_text:
+        return None
+
+    parsed = _safe_json(raw_text)
+    if isinstance(parsed, dict):
+        return parsed
+
+    if "```" in raw_text:
+        parts = raw_text.split("```")
+        for part in parts:
+            cleaned = part.replace("json", "", 1).strip()
+            parsed = _safe_json(cleaned)
+            if isinstance(parsed, dict):
+                return parsed
+
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidate = raw_text[start:end + 1]
+        parsed = _safe_json(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+
+    return None
+
+
 @router.post("/api/practice/chat")
 async def practice_chat(body: PracticeChatBody, request: Request):
     print("PRACTICE_AI ROUTE HIT")
@@ -423,74 +471,37 @@ async def practice_chat(body: PracticeChatBody, request: Request):
             generation_config={
                 "temperature": 0.55,
                 "max_output_tokens": 220,
-                "response_mime_type": "application/json",
             },
         )
 
-        raw_text = ""
+        raw_text = _extract_text_from_gemini_response(resp)
+        print("RAW GEMINI TEXT:", raw_text)
 
-        try:
-            raw_text = getattr(resp, "text", "") or ""
-        except Exception:
-            raw_text = ""
+        parsed = _extract_json_from_text(raw_text)
+        print("PARSED GEMINI JSON:", parsed)
 
-        if not raw_text:
-            try:
-                candidates = getattr(resp, "candidates", None) or []
-                if candidates:
-                    content = getattr(candidates[0], "content", None)
-                    parts = getattr(content, "parts", None) or []
-                    chunks = []
-                    for p in parts:
-                        t = getattr(p, "text", None)
-                        if t:
-                            chunks.append(t)
-                    raw_text = "".join(chunks).strip()
-            except Exception:
-                raw_text = ""
+        if not isinstance(parsed, dict):
+            raise HTTPException(status_code=502, detail="practice_ai_invalid_model_json")
 
-        if not raw_text:
-            finish_reason = None
-            try:
-                candidates = getattr(resp, "candidates", None) or []
-                if candidates:
-                    finish_reason = getattr(candidates[0], "finish_reason", None)
-            except Exception:
-                pass
+        reply = str(parsed.get("reply") or "").strip()
+        reply_tr = str(parsed.get("reply_tr") or "").strip()
 
-            print("GEMINI EMPTY RESPONSE. finish_reason =", finish_reason)
+        if not reply:
+            raise HTTPException(status_code=502, detail="practice_ai_empty_reply")
 
-            parsed = {
-                "reply": "",
-                "reply_tr": "Öğretmen şu an cevap üretemedi. Lütfen tekrar deneyelim.",
-                "target_phrase": "",
-                "should_repeat": False,
-                "lesson_stage": "practice",
-            }
-        else:
-            parsed = _safe_json(raw_text)
+        parsed["reply"] = reply
+        parsed["reply_tr"] = reply_tr
+        parsed["target_phrase"] = str(parsed.get("target_phrase") or "").strip()
+        parsed["should_repeat"] = bool(parsed.get("should_repeat"))
+        parsed["lesson_stage"] = str(parsed.get("lesson_stage") or "practice").strip()
 
-        if not parsed:
-            parsed = {
-                "reply": "",
-                "reply_tr": "Öğretmen cevabı çözümlenemedi. Lütfen tekrar deneyelim.",
-                "target_phrase": "",
-                "should_repeat": False,
-                "lesson_stage": "practice",
-            }
-
-        reply = str(parsed.get("reply") or "")
         bad_terms = [
             "gemini", "openai", "chatgpt", "google", "model", "api",
             "artificial intelligence", " ai "
         ]
-        low = f" {reply.lower()} "
+        low = f" {parsed['reply'].lower()} "
         if any(term in low for term in bad_terms):
-            parsed["reply"] = ""
-            parsed["reply_tr"] = ""
-            parsed["target_phrase"] = ""
-            parsed["should_repeat"] = False
-            parsed["lesson_stage"] = "practice"
+            raise HTTPException(status_code=502, detail="practice_ai_blocked_model_reply")
 
         try:
             memory_fields = _extract_summary_fields(parsed)
@@ -512,6 +523,8 @@ async def practice_chat(body: PracticeChatBody, request: Request):
             "text": json.dumps(parsed, ensure_ascii=False),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print("PRACTICE_AI ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=f"gemini_error: {e}")
