@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -112,6 +112,13 @@ def _normalize_status(status: str) -> str:
     val = str(status or "").strip().lower()
     if val not in {"active", "expired", "cancelled", "passive"}:
         raise HTTPException(status_code=400, detail="INVALID_STATUS")
+    return val
+
+
+def _normalize_card_status(status: str) -> str:
+    val = str(status or "").strip().lower()
+    if val not in {"new", "bound", "blocked", "passive"}:
+        raise HTTPException(status_code=400, detail="INVALID_CARD_STATUS")
     return val
 
 
@@ -351,12 +358,11 @@ async def list_users(ctx: Dict[str, Any] = Depends(_require_admin)):
 
 @router.post("/users/role")
 async def set_user_role(payload: RoleUpdateIn, ctx: Dict[str, Any] = Depends(_require_admin)):
+    _require_superadmin(ctx)
+
     role = str(payload.role or "").lower().strip()
     if role not in {"user", "admin", "superadmin"}:
         raise HTTPException(status_code=400, detail="INVALID_ROLE")
-
-    if role == "superadmin" and ctx["role"] != "superadmin":
-        raise HTTPException(status_code=403, detail="ONLY_SUPERADMIN_CAN_SET_SUPERADMIN")
 
     sb = _get_supabase()
     try:
@@ -386,6 +392,8 @@ async def list_packages(ctx: Dict[str, Any] = Depends(_require_admin)):
 
 @router.post("/packages")
 async def create_package(payload: PackageCreateIn, ctx: Dict[str, Any] = Depends(_require_admin)):
+    _require_superadmin(ctx)
+
     sb = _get_supabase()
     source_type = _normalize_source_type(payload.source_type)
 
@@ -421,6 +429,8 @@ async def create_package(payload: PackageCreateIn, ctx: Dict[str, Any] = Depends
 
 @router.post("/packages/update")
 async def update_package(payload: PackageUpdateIn, ctx: Dict[str, Any] = Depends(_require_admin)):
+    _require_superadmin(ctx)
+
     sb = _get_supabase()
     try:
         patch: Dict[str, Any] = {}
@@ -470,6 +480,8 @@ async def list_entitlements(
     source_type: Optional[str] = None,
     ctx: Dict[str, Any] = Depends(_require_admin),
 ):
+    _require_superadmin(ctx)
+
     sb = _get_supabase()
     try:
         q = (
@@ -494,6 +506,7 @@ async def list_entitlements(
 
 @router.post("/entitlements/assign")
 async def assign_entitlement(payload: EntitlementAssignIn, ctx: Dict[str, Any] = Depends(_require_admin)):
+    # admin ve superadmin ikisi de NFC/QR bağlayabilir
     sb = _get_supabase()
     source_type = _normalize_source_type(payload.source_type)
     card_uid = _normalize_uid(payload.card_uid)
@@ -506,6 +519,10 @@ async def assign_entitlement(payload: EntitlementAssignIn, ctx: Dict[str, Any] =
 
         if not bool(package_row.get("is_active", True)):
             raise HTTPException(status_code=400, detail="PACKAGE_NOT_ACTIVE")
+
+        # admin yalnızca nfc_qr bağlayabilir
+        if ctx.get("role") == "admin" and source_type != "nfc_qr":
+            raise HTTPException(status_code=403, detail="ADMIN_ONLY_NFC_QR_ASSIGN")
 
         if source_type == "nfc_qr" and not card_uid:
             raise HTTPException(status_code=400, detail="CARD_UID_REQUIRED_FOR_NFC_QR")
@@ -549,6 +566,8 @@ async def assign_entitlement(payload: EntitlementAssignIn, ctx: Dict[str, Any] =
 
 @router.post("/entitlements/status")
 async def update_entitlement_status(payload: EntitlementStatusIn, ctx: Dict[str, Any] = Depends(_require_admin)):
+    _require_superadmin(ctx)
+
     sb = _get_supabase()
     status = _normalize_status(payload.status)
 
@@ -597,6 +616,7 @@ async def list_nfc_cards(ctx: Dict[str, Any] = Depends(_require_admin)):
 
 @router.post("/nfc/cards/upsert")
 async def upsert_nfc_card(payload: NfcCardUpsertIn, ctx: Dict[str, Any] = Depends(_require_admin)):
+    # admin ve superadmin kart oluşturabilir
     sb = _get_supabase()
     uid = _normalize_uid(payload.uid)
     if not uid:
@@ -609,7 +629,7 @@ async def upsert_nfc_card(payload: NfcCardUpsertIn, ctx: Dict[str, Any] = Depend
             raise HTTPException(status_code=404, detail="PACKAGE_NOT_FOUND")
 
         serial_no = (payload.serial_no or "").strip() or None
-        status = (payload.status or "new").strip().lower() or "new"
+        status = _normalize_card_status(payload.status or "new")
 
         body = {
             "uid": uid,
@@ -644,6 +664,8 @@ async def upsert_nfc_card(payload: NfcCardUpsertIn, ctx: Dict[str, Any] = Depend
 # =========================================================
 @router.post("/github/commit")
 async def github_commit(payload: GithubCommitIn, ctx: Dict[str, Any] = Depends(_require_admin)):
+    _require_superadmin(ctx)
+
     env = _get_env()
     _need_env("GITHUB_TOKEN", env["GITHUB_TOKEN"])
     _need_env("GITHUB_OWNER", env["GITHUB_OWNER"])
@@ -651,9 +673,9 @@ async def github_commit(payload: GithubCommitIn, ctx: Dict[str, Any] = Depends(_
 
     api = f"https://api.github.com/repos/{env['GITHUB_OWNER']}/{env['GITHUB_REPO']}/contents/{payload.path.lstrip('/')}"
     headers = {
-        "Authorization": f"token {env['GITHUB_TOKEN']}",
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "italky-admin-panel",
+      "Authorization": f"token {env['GITHUB_TOKEN']}",
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "italky-admin-panel",
     }
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -676,6 +698,8 @@ async def github_commit(payload: GithubCommitIn, ctx: Dict[str, Any] = Depends(_
 
 @router.post("/deploy/vercel")
 async def deploy_vercel(ctx: Dict[str, Any] = Depends(_require_admin)):
+    _require_superadmin(ctx)
+
     env = _get_env()
     _need_env("VERCEL_DEPLOY_HOOK_URL", env["VERCEL_DEPLOY_HOOK_URL"])
 
@@ -689,6 +713,8 @@ async def deploy_vercel(ctx: Dict[str, Any] = Depends(_require_admin)):
 
 @router.post("/deploy/render")
 async def deploy_render(ctx: Dict[str, Any] = Depends(_require_admin)):
+    _require_superadmin(ctx)
+
     env = _get_env()
     _need_env("RENDER_API_KEY", env["RENDER_API_KEY"])
     _need_env("RENDER_SERVICE_ID", env["RENDER_SERVICE_ID"])
