@@ -43,13 +43,6 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse_dt(v: Any):
-    try:
-        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
 def _extract_bearer(request: Request) -> str:
     auth = str(request.headers.get("Authorization") or "").strip()
     if not auth.lower().startswith("bearer "):
@@ -67,6 +60,13 @@ def _get_current_user(token: str):
         return None
 
 
+def _safe_json(text: str):
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
 def _load_profile(user_id: str):
     q = (
         supabase.table("profiles")
@@ -80,77 +80,88 @@ def _load_profile(user_id: str):
     return q.data[0]
 
 
-def _trial_active(profile: dict) -> bool:
+def _profile_trial_active(profile: dict) -> bool:
     if profile.get("trial_active") is True:
         return True
 
-    days = profile.get("trial_days_left")
     try:
-        if days is not None and int(days) > 0:
+        days_left = int(profile.get("trial_days_left") or 0)
+        if days_left > 0:
             return True
     except Exception:
         pass
 
-    end_at = _parse_dt(profile.get("trial_ends_at") or profile.get("trial_end_at"))
-    if end_at and end_at > _now_utc():
-        return True
+    end_at = str(profile.get("trial_ends_at") or profile.get("trial_end_at") or "").strip()
+    if end_at:
+        try:
+            dt = datetime.fromisoformat(end_at.replace("Z", "+00:00"))
+            if dt > _now_utc():
+                return True
+        except Exception:
+            pass
 
     return False
 
 
-def _package_name(profile: dict) -> str:
+def _profile_package_code(profile: dict) -> str:
     return str(
-        profile.get("package_name")
-        or profile.get("package_code")
+        profile.get("package_code")
+        or profile.get("package_name")
         or profile.get("active_package")
         or profile.get("membership_type")
         or profile.get("plan")
-        or profile.get("current_package")
-        or ""
+        or "none"
     ).strip().lower()
 
 
-def _has_allowed_package(profile: dict) -> bool:
-    name = _package_name(profile)
-
-    if "translate" in name:
+def _profile_can_practice(profile: dict, package_code: str, trial_active: bool) -> bool:
+    # trial açık olsa bile Practice AI kapalı
+    if trial_active:
         return False
-    if "education" in name:
-        return True
-    if "egitim" in name:
-        return True
-    if "edu" in name:
-        return True
-    if "premium" in name:
+
+    # explicit db flag varsa onu önce kullan
+    if "can_practice" in profile:
+        try:
+            return bool(profile.get("can_practice"))
+        except Exception:
+            pass
+
+    # sistem kararı:
+    # edu / premium -> açık
+    # translate / none -> kapalı
+    if package_code in ("edu", "education", "egitim", "premium"):
         return True
 
     return False
 
 
-def _current_tokens(profile: dict) -> int:
-    try:
-        return int(profile.get("tokens") or profile.get("jeton_balance") or 0)
-    except Exception:
-        return 0
+def _profile_tokens(profile: dict) -> int:
+    for key in ("jeton_balance", "tokens"):
+        try:
+            val = int(profile.get(key) or 0)
+            return val
+        except Exception:
+            continue
+    return 0
 
 
 def _deduct_token(user_id: str, current_tokens: int) -> int:
     new_tokens = max(0, current_tokens - 1)
 
-    payload = {"tokens": new_tokens}
+    # Önce senin sistemindeki ana alanı dene
     try:
-        supabase.table("profiles").update(payload).eq("id", user_id).execute()
-    except Exception:
         supabase.table("profiles").update({"jeton_balance": new_tokens}).eq("id", user_id).execute()
+        return new_tokens
+    except Exception:
+        pass
+
+    # fallback
+    try:
+        supabase.table("profiles").update({"tokens": new_tokens}).eq("id", user_id).execute()
+    except Exception:
+        pass
 
     return new_tokens
-
-
-def _safe_json(text: str):
-    try:
-        return json.loads(text)
-    except Exception:
-        return None
 
 
 def _display_name(profile: dict) -> str:
@@ -309,6 +320,10 @@ def _extract_summary_fields(parsed: dict) -> dict:
 
 @router.post("/api/practice/chat")
 async def practice_chat(body: PracticeChatBody, request: Request):
+    print("PRACTICE_AI ROUTE HIT")
+    print("LANG:", body.lang)
+    print("MODE:", body.mode)
+
     token = _extract_bearer(request)
     user = _get_current_user(token)
     if not user:
@@ -318,13 +333,26 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     if not profile:
         raise HTTPException(status_code=404, detail="profile_not_found")
 
-    if _trial_active(profile):
+    trial_active = _profile_trial_active(profile)
+    package_code = _profile_package_code(profile)
+    can_practice = _profile_can_practice(profile, package_code, trial_active)
+    tokens = _profile_tokens(profile)
+
+    print("USER:", getattr(user, "id", None))
+    print("PACKAGE_CODE:", package_code)
+    print("TRIAL_ACTIVE:", trial_active)
+    print("CAN_PRACTICE:", can_practice)
+    print("TOKENS:", tokens)
+
+    if trial_active:
         raise HTTPException(status_code=403, detail="practice_ai_closed_for_trial")
 
-    if not _has_allowed_package(profile):
+    if package_code == "translate":
+        raise HTTPException(status_code=403, detail="practice_ai_closed_for_translate")
+
+    if not can_practice:
         raise HTTPException(status_code=403, detail="practice_ai_requires_education_or_premium")
 
-    tokens = _current_tokens(profile)
     if tokens <= 0:
         raise HTTPException(status_code=402, detail="insufficient_tokens")
 
@@ -352,6 +380,8 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"- First reply should feel like a real teacher opening, not a robot waiting screen.\n"
         f"- Good examples: greeting + one short reminder or one short lesson goal + one short question.\n"
     )
+
+    print("FINAL PROMPT READY")
 
     try:
         resp = model.generate_content(
@@ -409,4 +439,5 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         }
 
     except Exception as e:
+        print("PRACTICE_AI ERROR:", repr(e))
         raise HTTPException(status_code=500, detail=f"gemini_error: {e}")
