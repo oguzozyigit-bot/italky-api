@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -63,8 +62,7 @@ def _get_current_user(token: str):
         return None
     try:
         res = supabase.auth.get_user(token)
-        user = getattr(res, "user", None)
-        return user
+        return getattr(res, "user", None)
     except Exception:
         return None
 
@@ -117,10 +115,8 @@ def _has_allowed_package(profile: dict) -> bool:
 
     if "translate" in name:
         return False
-
     if "education" in name:
         return True
-
     if "premium" in name:
         return True
 
@@ -147,52 +143,6 @@ def _safe_json(text: str):
         return None
 
 
-def _normalize(s: str) -> str:
-    s = str(s or "").lower().strip()
-    s = re.sub(r"[^a-z0-9\s]", "", s)
-    s = re.sub(r"\s+", " ", s)
-    return s
-
-
-def _levenshtein(a: str, b: str) -> int:
-    a = _normalize(a)
-    b = _normalize(b)
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
-
-    dp = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
-    for i in range(len(a) + 1):
-        dp[i][0] = i
-    for j in range(len(b) + 1):
-        dp[0][j] = j
-
-    for i in range(1, len(a) + 1):
-        for j in range(1, len(b) + 1):
-            cost = 0 if a[i - 1] == b[j - 1] else 1
-            dp[i][j] = min(
-                dp[i - 1][j] + 1,
-                dp[i][j - 1] + 1,
-                dp[i - 1][j - 1] + cost,
-            )
-    return dp[-1][-1]
-
-
-def _score_pronunciation(spoken: str, target: str) -> int:
-    a = _normalize(spoken)
-    b = _normalize(target)
-    if not a or not b:
-        return 0
-    if a == b:
-        return 100
-
-    dist = _levenshtein(a, b)
-    max_len = max(len(a), len(b)) or 1
-    score = round((1 - dist / max_len) * 100)
-    return max(0, score)
-
-
 @router.post("/api/practice/chat")
 async def practice_chat(body: PracticeChatBody, request: Request):
     token = _extract_bearer(request)
@@ -204,22 +154,19 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     if not profile:
         raise HTTPException(status_code=404, detail="profile_not_found")
 
-    # ACCESS RULES
     if _trial_active(profile):
-      raise HTTPException(status_code=403, detail="practice_ai_closed_for_trial")
+        raise HTTPException(status_code=403, detail="practice_ai_closed_for_trial")
 
     if not _has_allowed_package(profile):
-      raise HTTPException(status_code=403, detail="practice_ai_requires_education_or_premium")
+        raise HTTPException(status_code=403, detail="practice_ai_requires_education_or_premium")
 
     tokens = _current_tokens(profile)
     if tokens <= 0:
-      raise HTTPException(status_code=402, detail="insufficient_tokens")
+        raise HTTPException(status_code=402, detail="insufficient_tokens")
 
-    # Deduct 1 token per turn
     tokens_after = _deduct_token(user.id, tokens)
 
     model = genai.GenerativeModel(GEMINI_MODEL)
-
     final_prompt = f"{body.system_prompt}\n\n{body.prompt}"
 
     try:
@@ -227,7 +174,7 @@ async def practice_chat(body: PracticeChatBody, request: Request):
             final_prompt,
             generation_config={
                 "temperature": 0.7,
-                "max_output_tokens": 400,
+                "max_output_tokens": 350,
                 "response_mime_type": "application/json",
             },
         )
@@ -236,7 +183,6 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         parsed = _safe_json(raw_text)
 
         if not parsed:
-            # fail-safe JSON
             parsed = {
                 "reply": "",
                 "reply_tr": "",
@@ -245,12 +191,11 @@ async def practice_chat(body: PracticeChatBody, request: Request):
                 "lesson_stage": "practice",
             }
 
-        # hard safety cleanup: no AI/model names
-        bad_terms = [
-            "gemini", "openai", "chatgpt", "google", "model", "api", "artificial intelligence", "ai"
-        ]
         reply = str(parsed.get("reply") or "")
-        low = reply.lower()
+        bad_terms = [
+            "gemini", "openai", "chatgpt", "google", "model", "api", "artificial intelligence", " ai "
+        ]
+        low = f" {reply.lower()} "
         if any(term in low for term in bad_terms):
             parsed["reply"] = ""
             parsed["reply_tr"] = ""
