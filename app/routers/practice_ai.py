@@ -371,18 +371,27 @@ def _extract_json_from_text(raw_text: str) -> dict | None:
     if isinstance(parsed, dict):
         return parsed
 
-    if "```" in raw_text:
-        parts = raw_text.split("```")
-        for part in parts:
-            cleaned = part.replace("json", "", 1).strip()
-            parsed = _safe_json(cleaned)
-            if isinstance(parsed, dict):
-                return parsed
+    if raw_text.startswith("```"):
+        cleaned = raw_text
+
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[len("```json"):].strip()
+        elif cleaned.startswith("```JSON"):
+            cleaned = cleaned[len("```JSON"):].strip()
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[len("```"):].strip()
+
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3].strip()
+
+        parsed = _safe_json(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
 
     start = raw_text.find("{")
     end = raw_text.rfind("}")
     if start != -1 and end != -1 and end > start:
-        candidate = raw_text[start:end + 1]
+        candidate = raw_text[start:end + 1].strip()
         parsed = _safe_json(candidate)
         if isinstance(parsed, dict):
             return parsed
@@ -461,6 +470,8 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"- The teacher must feel like a real teacher leading the session.\n"
         f"- First reply should feel like a real teacher opening, not a robot waiting screen.\n"
         f"- Good examples: greeting + one short reminder or one short lesson goal + one short question.\n"
+        f"- Reply must be valid JSON only.\n"
+        f"- Do not wrap JSON in markdown code fences.\n"
     )
 
     print("FINAL PROMPT READY")
@@ -475,7 +486,7 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         )
 
         raw_text = _extract_text_from_gemini_response(resp)
-        print("RAW GEMINI TEXT:", raw_text)
+        print("RAW GEMINI TEXT REPR:", repr(raw_text))
 
         parsed = _extract_json_from_text(raw_text)
         print("PARSED GEMINI JSON:", parsed)
