@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from supabase import create_client, Client
 import google.generativeai as genai
+from google.api_core.exceptions import ResourceExhausted
 
 router = APIRouter(tags=["practice-ai"])
 
@@ -260,55 +261,6 @@ def _summarize_memory_for_prompt(memory: dict | None) -> str:
     )
 
 
-def _opening_examples_for_lang(lang: str) -> str:
-    lang = str(lang or "").strip().lower()
-
-    examples = {
-        "en": (
-            "Opening style examples in English:\n"
-            "- Hi Oğuz. Last time we practiced greetings. Shall we continue?\n"
-            "- Hi Oğuz. Today we will practice daily questions.\n"
-            "- Hello Oğuz. Let us start with a simple question. What is your name?\n"
-            "- Good to see you again. Yesterday we worked on introductions. Ready?\n"
-            "- Today we will practice shopping sentences. Are you ready?"
-        ),
-        "de": (
-            "Opening style examples in German:\n"
-            "- Hallo Oğuz. Letztes Mal haben wir Begrüßungen geübt. Wollen wir weitermachen?\n"
-            "- Hallo Oğuz. Heute üben wir einfache Alltagsfragen.\n"
-            "- Guten Tag Oğuz. Wir beginnen mit einer leichten Frage. Wie heißt du?\n"
-            "- Schön, dich wiederzusehen. Gestern haben wir Vorstellungen geübt. Bist du bereit?\n"
-            "- Heute üben wir Sätze zum Einkaufen. Bist du bereit?"
-        ),
-        "fr": (
-            "Opening style examples in French:\n"
-            "- Bonjour Oğuz. La dernière fois, nous avons travaillé les salutations. On continue ?\n"
-            "- Bonjour Oğuz. Aujourd'hui, nous allons pratiquer des questions simples de la vie quotidienne.\n"
-            "- Salut Oğuz. Nous commençons avec une question facile. Comment tu t'appelles ?\n"
-            "- Ravi de te revoir. Hier, nous avons travaillé les présentations. Tu es prêt ?\n"
-            "- Aujourd'hui, nous allons pratiquer des phrases pour faire des achats. Tu es prêt ?"
-        ),
-        "es": (
-            "Opening style examples in Spanish:\n"
-            "- Hola Oğuz. La última vez practicamos los saludos. ¿Seguimos?\n"
-            "- Hola Oğuz. Hoy vamos a practicar preguntas simples de la vida diaria.\n"
-            "- Hola Oğuz. Empezamos con una pregunta fácil. ¿Cómo te llamas?\n"
-            "- Me alegra verte otra vez. Ayer practicamos las presentaciones. ¿Estás listo?\n"
-            "- Hoy vamos a practicar frases para ir de compras. ¿Estás listo?"
-        ),
-        "it": (
-            "Opening style examples in Italian:\n"
-            "- Ciao Oğuz. L'ultima volta abbiamo praticato i saluti. Continuiamo?\n"
-            "- Ciao Oğuz. Oggi pratichiamo domande semplici della vita quotidiana.\n"
-            "- Ciao Oğuz. Cominciamo con una domanda facile. Come ti chiami?\n"
-            "- È bello rivederti. Ieri abbiamo praticato le presentazioni. Sei pronto?\n"
-            "- Oggi pratichiamo frasi per fare shopping. Sei pronto?"
-        ),
-    }
-
-    return examples.get(lang, examples["en"])
-
-
 def _extract_summary_fields(parsed: dict) -> dict:
     lesson_stage = str(parsed.get("lesson_stage") or "").strip()
     target_phrase = str(parsed.get("target_phrase") or "").strip()
@@ -374,6 +326,8 @@ def _parse_model_fields(raw_text: str) -> dict | None:
     target_phrase = _extract_block(raw_text, "TARGET_PHRASE")
     should_repeat_raw = _extract_block(raw_text, "SHOULD_REPEAT").lower()
     lesson_stage = _extract_block(raw_text, "LESSON_STAGE")
+    level_estimate = _extract_block(raw_text, "LEVEL_ESTIMATE")
+    topic = _extract_block(raw_text, "TOPIC")
 
     if not reply and not reply_tr and not target_phrase and not lesson_stage:
         return None
@@ -384,7 +338,24 @@ def _parse_model_fields(raw_text: str) -> dict | None:
         "target_phrase": target_phrase,
         "should_repeat": should_repeat_raw in ("true", "1", "yes"),
         "lesson_stage": lesson_stage or "practice",
+        "level_estimate": level_estimate,
+        "topic": topic,
     }
+
+
+def _fallback_tr(reply: str, lang: str) -> str:
+    lang_name = {
+        "en": "İngilizce",
+        "de": "Almanca",
+        "fr": "Fransızca",
+        "es": "İspanyolca",
+        "it": "İtalyanca",
+    }.get(lang, "yabancı dil")
+
+    if not reply:
+        return "Öğretmen konuşuyor."
+
+    return f"Öğretmen {lang_name} konuşuyor ve dersi yönlendiriyor."
 
 
 @router.post("/api/practice/chat")
@@ -444,7 +415,6 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"Student display name: {display_name or 'student'}\n"
         f"Profile level for selected language: {profile_level or 'unknown'}\n"
         f"{_summarize_memory_for_prompt(memory)}\n\n"
-        f"{_opening_examples_for_lang(body.lang)}\n\n"
         f"{body.prompt}\n\n"
         f"Important output rule:\n"
         f"Return plain text only in exactly this format:\n"
@@ -452,17 +422,17 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"REPLY_TR: <short Turkish meaning>\n"
         f"TARGET_PHRASE: <exact phrase to repeat if needed>\n"
         f"SHOULD_REPEAT: <true or false>\n"
-        f"LESSON_STAGE: <placement or practice or repeat or correction>\n\n"
+        f"LESSON_STAGE: <placement or practice or repeat or correction>\n"
+        f"LEVEL_ESTIMATE: <A1 or A2 or B1 or B2 or C1 if possible>\n"
+        f"TOPIC: <very short topic name>\n\n"
         f"Important teacher behavior:\n"
-        f"- If previous lesson memory exists, greet the student naturally by name if available.\n"
-        f"- If previous lesson memory exists, briefly refer to the last topic before continuing.\n"
-        f"- If there is no previous memory, start with a short placement greeting.\n"
-        f"- Use the student display name when natural.\n"
-        f"- Keep replies short.\n"
-        f"- The teacher must guide the lesson actively.\n"
-        f"- The teacher must choose the next small step.\n"
-        f"- The teacher must ask one short question at a time.\n"
-        f"- The teacher must feel like a real teacher leading the session.\n"
+        f"- Do not just say hello and stop.\n"
+        f"- The teacher must always lead the lesson.\n"
+        f"- The teacher must always continue with one short question or one short task.\n"
+        f"- The first reply must include both a greeting and a lesson direction.\n"
+        f"- Good opening example: Hello Oğuz. Today we practice introductions. What is your name?\n"
+        f"- Good continuation example: Good. Now tell me where you live.\n"
+        f"- If pronunciation is below 95, keep the student on the same phrase.\n"
         f"- Do not return JSON.\n"
         f"- Do not wrap the answer in markdown.\n"
     )
@@ -473,8 +443,8 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         resp = model.generate_content(
             final_prompt,
             generation_config={
-                "temperature": 0.55,
-                "max_output_tokens": 220,
+                "temperature": 0.45,
+                "max_output_tokens": 180,
             },
         )
 
@@ -492,6 +462,9 @@ async def practice_chat(body: PracticeChatBody, request: Request):
 
         if not reply:
             raise HTTPException(status_code=502, detail="practice_ai_empty_reply")
+
+        if not reply_tr:
+            reply_tr = _fallback_tr(reply, body.lang)
 
         parsed["reply"] = reply
         parsed["reply_tr"] = reply_tr
@@ -527,8 +500,13 @@ async def practice_chat(body: PracticeChatBody, request: Request):
             "text": json.dumps(parsed, ensure_ascii=False),
         }
 
+    except ResourceExhausted as e:
+        print("PRACTICE_AI QUOTA ERROR:", repr(e))
+        raise HTTPException(status_code=429, detail="practice_ai_temporarily_busy")
+
     except HTTPException:
         raise
+
     except Exception as e:
         print("PRACTICE_AI ERROR:", repr(e))
-        raise HTTPException(status_code=500, detail=f"gemini_error: {e}")
+        raise HTTPException(status_code=500, detail="practice_ai_internal_error")
