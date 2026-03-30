@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+import requests
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -16,6 +17,9 @@ router = APIRouter(tags=["practice-ai"])
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+
 GEMINI_API_KEY = (
     os.getenv("GEMINI_API_KEY", "").strip()
     or os.getenv("GOOGLE_API_KEY", "").strip()
@@ -25,11 +29,13 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
 
-if not GEMINI_API_KEY:
-    raise RuntimeError("GEMINI_API_KEY / GOOGLE_API_KEY missing")
+if not OPENAI_API_KEY and not GEMINI_API_KEY:
+    raise RuntimeError("At least one provider key is required")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-genai.configure(api_key=GEMINI_API_KEY)
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 class PracticeChatBody(BaseModel):
@@ -283,31 +289,6 @@ def _extract_summary_fields(parsed: dict) -> dict:
     }
 
 
-def _extract_text_from_gemini_response(resp) -> str:
-    try:
-        txt = getattr(resp, "text", "") or ""
-        if txt:
-            return txt.strip()
-    except Exception:
-        pass
-
-    try:
-        candidates = getattr(resp, "candidates", None) or []
-        if candidates:
-            content = getattr(candidates[0], "content", None)
-            parts = getattr(content, "parts", None) or []
-            chunks = []
-            for p in parts:
-                t = getattr(p, "text", None)
-                if t:
-                    chunks.append(t)
-            return "".join(chunks).strip()
-    except Exception:
-        pass
-
-    return ""
-
-
 def _extract_block(raw: str, key: str) -> str:
     pattern = rf"{key}:(.*?)(?:\n[A-Z_]+:|$)"
     m = re.search(pattern, raw, flags=re.DOTALL)
@@ -356,6 +337,100 @@ def _fallback_tr(reply: str, lang: str) -> str:
         return "Öğretmen konuşuyor."
 
     return f"Öğretmen {lang_name} konuşuyor ve dersi yönlendiriyor."
+
+
+def _openai_extract_output_text(payload: dict) -> str:
+    # Responses API shape can vary; collect all output text chunks
+    chunks: list[str] = []
+
+    output = payload.get("output") or []
+    for item in output:
+        content = item.get("content") or []
+        for part in content:
+            if part.get("type") in ("output_text", "text"):
+                txt = part.get("text") or ""
+                if txt:
+                    chunks.append(txt)
+
+    if chunks:
+        return "".join(chunks).strip()
+
+    # fallback fields
+    for key in ("output_text", "text"):
+        txt = payload.get(key)
+        if isinstance(txt, str) and txt.strip():
+            return txt.strip()
+
+    return ""
+
+
+def _call_openai_teacher(final_prompt: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    body = {
+        "model": OPENAI_MODEL,
+        "input": final_prompt,
+    }
+
+    r = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers=headers,
+        json=body,
+        timeout=60,
+    )
+
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"openai_http_{r.status_code}")
+
+    payload = r.json()
+    raw_text = _openai_extract_output_text(payload)
+    print("RAW OPENAI TEXT REPR:", repr(raw_text))
+    return raw_text
+
+
+def _extract_text_from_gemini_response(resp) -> str:
+    try:
+        txt = getattr(resp, "text", "") or ""
+        if txt:
+            return txt.strip()
+    except Exception:
+        pass
+
+    try:
+        candidates = getattr(resp, "candidates", None) or []
+        if candidates:
+            content = getattr(candidates[0], "content", None)
+            parts = getattr(content, "parts", None) or []
+            chunks = []
+            for p in parts:
+                t = getattr(p, "text", None)
+                if t:
+                    chunks.append(t)
+            return "".join(chunks).strip()
+    except Exception:
+        pass
+
+    return ""
+
+
+def _call_gemini_teacher(final_prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        return ""
+
+    model = genai.GenerativeModel(GEMINI_MODEL)
+    resp = model.generate_content(
+        final_prompt,
+        generation_config={
+            "temperature": 0.45,
+            "max_output_tokens": 180,
+        },
+    )
+    raw_text = _extract_text_from_gemini_response(resp)
+    print("RAW GEMINI TEXT REPR:", repr(raw_text))
+    return raw_text
 
 
 @router.post("/api/practice/chat")
@@ -408,8 +483,6 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     profile_level = _profile_level_for_lang(profile, body.lang)
     memory = _load_memory(user.id, body.lang)
 
-    model = genai.GenerativeModel(GEMINI_MODEL)
-
     final_prompt = (
         f"{body.system_prompt}\n\n"
         f"Student display name: {display_name or 'student'}\n"
@@ -428,10 +501,11 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"Important teacher behavior:\n"
         f"- Do not just say hello and stop.\n"
         f"- The teacher must always lead the lesson.\n"
-        f"- The teacher must always continue with one short question or one short task.\n"
-        f"- The first reply must include both a greeting and a lesson direction.\n"
-        f"- Good opening example: Hello Oğuz. Today we practice introductions. What is your name?\n"
-        f"- Good continuation example: Good. Now tell me where you live.\n"
+        f"- The teacher must always continue with one clear question or one clear task.\n"
+        f"- The first reply must include greeting + topic + question.\n"
+        f"- Example: Hello Oğuz. Today we practice introductions. What is your name?\n"
+        f"- Keep replies natural and short-to-medium.\n"
+        f"- 2 or 3 short sentences are allowed.\n"
         f"- If pronunciation is below 95, keep the student on the same phrase.\n"
         f"- Do not return JSON.\n"
         f"- Do not wrap the answer in markdown.\n"
@@ -440,16 +514,26 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     print("FINAL PROMPT READY")
 
     try:
-        resp = model.generate_content(
-            final_prompt,
-            generation_config={
-                "temperature": 0.45,
-                "max_output_tokens": 180,
-            },
-        )
+        raw_text = ""
 
-        raw_text = _extract_text_from_gemini_response(resp)
-        print("RAW GEMINI TEXT REPR:", repr(raw_text))
+        # Primary: OpenAI
+        if OPENAI_API_KEY:
+            try:
+                raw_text = _call_openai_teacher(final_prompt)
+            except Exception as e:
+                print("OPENAI PRIMARY ERROR:", repr(e))
+                raw_text = ""
+
+        # Fallback: Gemini
+        if not raw_text:
+            try:
+                raw_text = _call_gemini_teacher(final_prompt)
+            except ResourceExhausted as e:
+                print("GEMINI FALLBACK QUOTA ERROR:", repr(e))
+                raise HTTPException(status_code=429, detail="practice_ai_temporarily_busy")
+            except Exception as e:
+                print("GEMINI FALLBACK ERROR:", repr(e))
+                raw_text = ""
 
         parsed = _parse_model_fields(raw_text)
         print("PARSED MODEL FIELDS:", parsed)
@@ -500,13 +584,8 @@ async def practice_chat(body: PracticeChatBody, request: Request):
             "text": json.dumps(parsed, ensure_ascii=False),
         }
 
-    except ResourceExhausted as e:
-        print("PRACTICE_AI QUOTA ERROR:", repr(e))
-        raise HTTPException(status_code=429, detail="practice_ai_temporarily_busy")
-
     except HTTPException:
         raise
-
     except Exception as e:
         print("PRACTICE_AI ERROR:", repr(e))
         raise HTTPException(status_code=500, detail="practice_ai_internal_error")
