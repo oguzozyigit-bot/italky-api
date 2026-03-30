@@ -90,18 +90,42 @@ def _load_profile(user_id: str):
 
 
 def _display_name(profile: dict) -> str:
-    teacher_prefs = profile.get("teacher_prefs") or {}
-    if isinstance(teacher_prefs, dict):
-        for _, prefs in teacher_prefs.items():
-            if isinstance(prefs, dict):
-                hitap = str(prefs.get("student_hitap") or "").strip()
-                if hitap:
-                    return hitap
-
+    # 1) En güvenli kaynak: full_name
     full_name = str(profile.get("full_name") or "").strip()
     if full_name:
         return full_name.split(" ")[0]
 
+    # 2) Alternatif ad alanları
+    name = str(profile.get("name") or "").strip()
+    if name:
+        return name.split(" ")[0]
+
+    # 3) teacher_prefs içinde en güncel kaydı bul
+    teacher_prefs = profile.get("teacher_prefs") or {}
+    if isinstance(teacher_prefs, dict) and teacher_prefs:
+        numeric_keys = []
+        other_keys = []
+
+        for k, v in teacher_prefs.items():
+            if not isinstance(v, dict):
+                continue
+            try:
+                numeric_keys.append((int(str(k)), v))
+            except Exception:
+                other_keys.append(v)
+
+        if numeric_keys:
+            numeric_keys.sort(key=lambda x: x[0], reverse=True)
+            hitap = str(numeric_keys[0][1].get("student_hitap") or "").strip()
+            if hitap:
+                return hitap
+
+        for v in other_keys:
+            hitap = str(v.get("student_hitap") or "").strip()
+            if hitap:
+                return hitap
+
+    # 4) email fallback
     email = str(profile.get("email") or "").strip()
     if email and "@" in email:
         return email.split("@")[0]
@@ -127,18 +151,6 @@ def _deduct_token(user_id: str, current_tokens: int) -> int:
     new_tokens = max(0, current_tokens - 1)
     supabase.table("profiles").update({"tokens": new_tokens}).eq("id", user_id).execute()
     return new_tokens
-
-
-def _profile_trial_active(profile: dict) -> bool:
-    # Premium / package aktifse trial artık engel değil
-    if _profile_has_paid_access(profile):
-        return False
-
-    trial_ends_at = _parse_dt(profile.get("trial_ends_at"))
-    if trial_ends_at and trial_ends_at > _now_utc():
-        return True
-
-    return False
 
 
 def _profile_membership_code(profile: dict) -> str:
@@ -172,6 +184,18 @@ def _profile_has_paid_access(profile: dict) -> bool:
     )
 
     return package_active and (package_valid or paid_name_hit)
+
+
+def _profile_trial_active(profile: dict) -> bool:
+    # Premium / paid access varsa trial artık engel değil
+    if _profile_has_paid_access(profile):
+        return False
+
+    trial_ends_at = _parse_dt(profile.get("trial_ends_at"))
+    if trial_ends_at and trial_ends_at > _now_utc():
+        return True
+
+    return False
 
 
 def _profile_can_practice(profile: dict) -> bool:
@@ -228,9 +252,9 @@ def _upsert_memory(
 
     existing = _load_memory(user_id, lang)
     if existing:
-      supabase.table("practice_ai_memory").update(payload).eq("id", existing["id"]).execute()
+        supabase.table("practice_ai_memory").update(payload).eq("id", existing["id"]).execute()
     else:
-      supabase.table("practice_ai_memory").insert(payload).execute()
+        supabase.table("practice_ai_memory").insert(payload).execute()
 
 
 def _summarize_memory_for_prompt(memory: dict | None) -> str:
@@ -342,6 +366,7 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     tokens = _profile_tokens(profile)
 
     print("USER:", getattr(user, "id", None))
+    print("DISPLAY_NAME:", _display_name(profile))
     print("MEMBERSHIP_CODE:", membership_code)
     print("TRIAL_ACTIVE:", trial_active)
     print("CAN_PRACTICE:", can_practice)
@@ -356,7 +381,6 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     if not can_practice:
         raise HTTPException(status_code=403, detail="practice_ai_requires_education_or_premium")
 
-    # test sürecinde bunu açıp kapatabilirsin
     TEST_BYPASS_TOKEN = False
 
     if tokens <= 0 and not TEST_BYPASS_TOKEN:
@@ -383,6 +407,10 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"- If there is no previous memory, start with a short placement greeting.\n"
         f"- Use the student display name when natural.\n"
         f"- Keep replies short.\n"
+        f"- The teacher must guide the lesson actively.\n"
+        f"- The teacher must choose the next small step.\n"
+        f"- The teacher must ask one short question at a time.\n"
+        f"- The teacher must feel like a real teacher leading the session.\n"
         f"- First reply should feel like a real teacher opening, not a robot waiting screen.\n"
         f"- Good examples: greeting + one short reminder or one short lesson goal + one short question.\n"
     )
@@ -393,19 +421,59 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         resp = model.generate_content(
             final_prompt,
             generation_config={
-                "temperature": 0.7,
-                "max_output_tokens": 350,
+                "temperature": 0.55,
+                "max_output_tokens": 220,
                 "response_mime_type": "application/json",
             },
         )
 
-        raw_text = getattr(resp, "text", "") or ""
-        parsed = _safe_json(raw_text)
+        raw_text = ""
+
+        try:
+            raw_text = getattr(resp, "text", "") or ""
+        except Exception:
+            raw_text = ""
+
+        if not raw_text:
+            try:
+                candidates = getattr(resp, "candidates", None) or []
+                if candidates:
+                    content = getattr(candidates[0], "content", None)
+                    parts = getattr(content, "parts", None) or []
+                    chunks = []
+                    for p in parts:
+                        t = getattr(p, "text", None)
+                        if t:
+                            chunks.append(t)
+                    raw_text = "".join(chunks).strip()
+            except Exception:
+                raw_text = ""
+
+        if not raw_text:
+            finish_reason = None
+            try:
+                candidates = getattr(resp, "candidates", None) or []
+                if candidates:
+                    finish_reason = getattr(candidates[0], "finish_reason", None)
+            except Exception:
+                pass
+
+            print("GEMINI EMPTY RESPONSE. finish_reason =", finish_reason)
+
+            parsed = {
+                "reply": "",
+                "reply_tr": "Öğretmen şu an cevap üretemedi. Lütfen tekrar deneyelim.",
+                "target_phrase": "",
+                "should_repeat": False,
+                "lesson_stage": "practice",
+            }
+        else:
+            parsed = _safe_json(raw_text)
 
         if not parsed:
             parsed = {
                 "reply": "",
-                "reply_tr": "",
+                "reply_tr": "Öğretmen cevabı çözümlenemedi. Lütfen tekrar deneyelim.",
                 "target_phrase": "",
                 "should_repeat": False,
                 "lesson_stage": "practice",
