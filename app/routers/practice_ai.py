@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,13 +41,6 @@ class PracticeChatBody(BaseModel):
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _safe_json(text: str):
-    try:
-        return json.loads(text)
-    except Exception:
-        return None
 
 
 def _parse_dt(v: Any):
@@ -362,41 +355,35 @@ def _extract_text_from_gemini_response(resp) -> str:
     return ""
 
 
-def _extract_json_from_text(raw_text: str) -> dict | None:
+def _extract_block(raw: str, key: str) -> str:
+    pattern = rf"{key}:(.*?)(?:\n[A-Z_]+:|$)"
+    m = re.search(pattern, raw, flags=re.DOTALL)
+    if not m:
+        return ""
+    return m.group(1).strip()
+
+
+def _parse_model_fields(raw_text: str) -> dict | None:
     raw_text = str(raw_text or "").strip()
     if not raw_text:
         return None
 
-    parsed = _safe_json(raw_text)
-    if isinstance(parsed, dict):
-        return parsed
+    reply = _extract_block(raw_text, "REPLY")
+    reply_tr = _extract_block(raw_text, "REPLY_TR")
+    target_phrase = _extract_block(raw_text, "TARGET_PHRASE")
+    should_repeat_raw = _extract_block(raw_text, "SHOULD_REPEAT").lower()
+    lesson_stage = _extract_block(raw_text, "LESSON_STAGE")
 
-    if raw_text.startswith("```"):
-        cleaned = raw_text
+    if not reply and not reply_tr and not target_phrase and not lesson_stage:
+        return None
 
-        if cleaned.startswith("```json"):
-            cleaned = cleaned[len("```json"):].strip()
-        elif cleaned.startswith("```JSON"):
-            cleaned = cleaned[len("```JSON"):].strip()
-        elif cleaned.startswith("```"):
-            cleaned = cleaned[len("```"):].strip()
-
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3].strip()
-
-        parsed = _safe_json(cleaned)
-        if isinstance(parsed, dict):
-            return parsed
-
-    start = raw_text.find("{")
-    end = raw_text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        candidate = raw_text[start:end + 1].strip()
-        parsed = _safe_json(candidate)
-        if isinstance(parsed, dict):
-            return parsed
-
-    return None
+    return {
+        "reply": reply,
+        "reply_tr": reply_tr,
+        "target_phrase": target_phrase,
+        "should_repeat": should_repeat_raw in ("true", "1", "yes"),
+        "lesson_stage": lesson_stage or "practice",
+    }
 
 
 @router.post("/api/practice/chat")
@@ -458,6 +445,13 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"{_summarize_memory_for_prompt(memory)}\n\n"
         f"{_opening_examples_for_lang(body.lang)}\n\n"
         f"{body.prompt}\n\n"
+        f"Important output rule:\n"
+        f"Return plain text only in exactly this format:\n"
+        f"REPLY: <teacher visible reply in target language only>\n"
+        f"REPLY_TR: <short Turkish meaning>\n"
+        f"TARGET_PHRASE: <exact phrase to repeat if needed>\n"
+        f"SHOULD_REPEAT: <true or false>\n"
+        f"LESSON_STAGE: <placement or practice or repeat or correction>\n\n"
         f"Important teacher behavior:\n"
         f"- If previous lesson memory exists, greet the student naturally by name if available.\n"
         f"- If previous lesson memory exists, briefly refer to the last topic before continuing.\n"
@@ -468,10 +462,8 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"- The teacher must choose the next small step.\n"
         f"- The teacher must ask one short question at a time.\n"
         f"- The teacher must feel like a real teacher leading the session.\n"
-        f"- First reply should feel like a real teacher opening, not a robot waiting screen.\n"
-        f"- Good examples: greeting + one short reminder or one short lesson goal + one short question.\n"
-        f"- Reply must be valid JSON only.\n"
-        f"- Do not wrap JSON in markdown code fences.\n"
+        f"- Do not return JSON.\n"
+        f"- Do not wrap the answer in markdown.\n"
     )
 
     print("FINAL PROMPT READY")
@@ -488,11 +480,11 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         raw_text = _extract_text_from_gemini_response(resp)
         print("RAW GEMINI TEXT REPR:", repr(raw_text))
 
-        parsed = _extract_json_from_text(raw_text)
-        print("PARSED GEMINI JSON:", parsed)
+        parsed = _parse_model_fields(raw_text)
+        print("PARSED MODEL FIELDS:", parsed)
 
         if not isinstance(parsed, dict):
-            raise HTTPException(status_code=502, detail="practice_ai_invalid_model_json")
+            raise HTTPException(status_code=502, detail="practice_ai_invalid_model_format")
 
         reply = str(parsed.get("reply") or "").strip()
         reply_tr = str(parsed.get("reply_tr") or "").strip()
