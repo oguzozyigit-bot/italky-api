@@ -43,6 +43,22 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _safe_json(text: str):
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
+def _parse_dt(v: Any):
+    if not v:
+        return None
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
 def _extract_bearer(request: Request) -> str:
     auth = str(request.headers.get("Authorization") or "").strip()
     if not auth.lower().startswith("bearer "):
@@ -60,13 +76,6 @@ def _get_current_user(token: str):
         return None
 
 
-def _safe_json(text: str):
-    try:
-        return json.loads(text)
-    except Exception:
-        return None
-
-
 def _load_profile(user_id: str):
     q = (
         supabase.table("profiles")
@@ -80,98 +89,14 @@ def _load_profile(user_id: str):
     return q.data[0]
 
 
-def _profile_trial_active(profile: dict) -> bool:
-    if profile.get("trial_active") is True:
-        return True
-
-    try:
-        days_left = int(profile.get("trial_days_left") or 0)
-        if days_left > 0:
-            return True
-    except Exception:
-        pass
-
-    end_at = str(profile.get("trial_ends_at") or profile.get("trial_end_at") or "").strip()
-    if end_at:
-        try:
-            dt = datetime.fromisoformat(end_at.replace("Z", "+00:00"))
-            if dt > _now_utc():
-                return True
-        except Exception:
-            pass
-
-    return False
-
-
-def _profile_package_code(profile: dict) -> str:
-    return str(
-        profile.get("package_code")
-        or profile.get("package_name")
-        or profile.get("active_package")
-        or profile.get("membership_type")
-        or profile.get("plan")
-        or "none"
-    ).strip().lower()
-
-
-def _profile_can_practice(profile: dict, package_code: str, trial_active: bool) -> bool:
-    # trial açık olsa bile Practice AI kapalı
-    if trial_active:
-        return False
-
-    # explicit db flag varsa onu önce kullan
-    if "can_practice" in profile:
-        try:
-            return bool(profile.get("can_practice"))
-        except Exception:
-            pass
-
-    # sistem kararı:
-    # edu / premium -> açık
-    # translate / none -> kapalı
-    if package_code in ("edu", "education", "egitim", "premium"):
-        return True
-
-    return False
-
-
-def _profile_tokens(profile: dict) -> int:
-    for key in ("jeton_balance", "tokens"):
-        try:
-            val = int(profile.get(key) or 0)
-            return val
-        except Exception:
-            continue
-    return 0
-
-
-def _deduct_token(user_id: str, current_tokens: int) -> int:
-    new_tokens = max(0, current_tokens - 1)
-
-    # Önce senin sistemindeki ana alanı dene
-    try:
-        supabase.table("profiles").update({"jeton_balance": new_tokens}).eq("id", user_id).execute()
-        return new_tokens
-    except Exception:
-        pass
-
-    # fallback
-    try:
-        supabase.table("profiles").update({"tokens": new_tokens}).eq("id", user_id).execute()
-    except Exception:
-        pass
-
-    return new_tokens
-
-
 def _display_name(profile: dict) -> str:
-    hitap = str(profile.get("hitap") or "").strip()
-    if hitap:
-        return hitap
-
-    name = str(profile.get("name") or "").strip()
-    if name:
-        return name.split(" ")[0]
+    teacher_prefs = profile.get("teacher_prefs") or {}
+    if isinstance(teacher_prefs, dict):
+        for _, prefs in teacher_prefs.items():
+            if isinstance(prefs, dict):
+                hitap = str(prefs.get("student_hitap") or "").strip()
+                if hitap:
+                    return hitap
 
     full_name = str(profile.get("full_name") or "").strip()
     if full_name:
@@ -189,6 +114,81 @@ def _profile_level_for_lang(profile: dict, lang: str) -> str:
     if isinstance(levels, dict):
         return str(levels.get(lang) or levels.get(lang.upper()) or "").strip()
     return ""
+
+
+def _profile_tokens(profile: dict) -> int:
+    try:
+        return int(profile.get("tokens") or 0)
+    except Exception:
+        return 0
+
+
+def _deduct_token(user_id: str, current_tokens: int) -> int:
+    new_tokens = max(0, current_tokens - 1)
+    supabase.table("profiles").update({"tokens": new_tokens}).eq("id", user_id).execute()
+    return new_tokens
+
+
+def _profile_trial_active(profile: dict) -> bool:
+    # Premium / package aktifse trial artık engel değil
+    if _profile_has_paid_access(profile):
+        return False
+
+    trial_ends_at = _parse_dt(profile.get("trial_ends_at"))
+    if trial_ends_at and trial_ends_at > _now_utc():
+        return True
+
+    return False
+
+
+def _profile_membership_code(profile: dict) -> str:
+    selected_code = str(profile.get("selected_package_code") or "").strip().lower()
+    if selected_code:
+        return selected_code
+
+    plan = str(profile.get("plan") or "").strip().lower()
+    if plan:
+        return plan
+
+    nfc_code = str(profile.get("nfc_package_code") or "").strip().lower()
+    if nfc_code:
+        return nfc_code
+
+    return "none"
+
+
+def _profile_has_paid_access(profile: dict) -> bool:
+    package_active = bool(profile.get("package_active") is True)
+
+    package_ends_at = _parse_dt(profile.get("package_ends_at"))
+    package_valid = bool(package_ends_at and package_ends_at > _now_utc())
+
+    plan = str(profile.get("plan") or "").strip().lower()
+    selected_code = str(profile.get("selected_package_code") or "").strip().lower()
+
+    paid_name_hit = any(
+        key in f"{plan} {selected_code}"
+        for key in ["premium", "edu", "education", "egitim", "translate"]
+    )
+
+    return package_active and (package_valid or paid_name_hit)
+
+
+def _profile_can_practice(profile: dict) -> bool:
+    if not _profile_has_paid_access(profile):
+        return False
+
+    plan = str(profile.get("plan") or "").strip().lower()
+    selected_code = str(profile.get("selected_package_code") or "").strip().lower()
+    combo = f"{plan} {selected_code}"
+
+    if "translate" in combo:
+        return False
+
+    if any(k in combo for k in ["premium", "edu", "education", "egitim"]):
+        return True
+
+    return False
 
 
 def _load_memory(user_id: str, lang: str) -> dict | None:
@@ -228,9 +228,9 @@ def _upsert_memory(
 
     existing = _load_memory(user_id, lang)
     if existing:
-        supabase.table("practice_ai_memory").update(payload).eq("id", existing["id"]).execute()
+      supabase.table("practice_ai_memory").update(payload).eq("id", existing["id"]).execute()
     else:
-        supabase.table("practice_ai_memory").insert(payload).execute()
+      supabase.table("practice_ai_memory").insert(payload).execute()
 
 
 def _summarize_memory_for_prompt(memory: dict | None) -> str:
@@ -330,16 +330,19 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     profile = _load_profile(user.id)
+    print("PROFILE RAW:", profile)
+    print("SUPABASE_URL:", SUPABASE_URL)
+
     if not profile:
         raise HTTPException(status_code=404, detail="profile_not_found")
 
+    membership_code = _profile_membership_code(profile)
     trial_active = _profile_trial_active(profile)
-    package_code = _profile_package_code(profile)
-    can_practice = _profile_can_practice(profile, package_code, trial_active)
+    can_practice = _profile_can_practice(profile)
     tokens = _profile_tokens(profile)
 
     print("USER:", getattr(user, "id", None))
-    print("PACKAGE_CODE:", package_code)
+    print("MEMBERSHIP_CODE:", membership_code)
     print("TRIAL_ACTIVE:", trial_active)
     print("CAN_PRACTICE:", can_practice)
     print("TOKENS:", tokens)
@@ -347,16 +350,19 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     if trial_active:
         raise HTTPException(status_code=403, detail="practice_ai_closed_for_trial")
 
-    if package_code == "translate":
+    if "translate" in membership_code:
         raise HTTPException(status_code=403, detail="practice_ai_closed_for_translate")
 
     if not can_practice:
         raise HTTPException(status_code=403, detail="practice_ai_requires_education_or_premium")
 
-    if tokens <= 0:
+    # test sürecinde bunu açıp kapatabilirsin
+    TEST_BYPASS_TOKEN = False
+
+    if tokens <= 0 and not TEST_BYPASS_TOKEN:
         raise HTTPException(status_code=402, detail="insufficient_tokens")
 
-    tokens_after = _deduct_token(user.id, tokens)
+    tokens_after = tokens if TEST_BYPASS_TOKEN else _deduct_token(user.id, tokens)
 
     display_name = _display_name(profile)
     profile_level = _profile_level_for_lang(profile, body.lang)
