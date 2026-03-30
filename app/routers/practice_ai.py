@@ -17,6 +17,7 @@ router = APIRouter(tags=["practice-ai"])
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
@@ -272,6 +273,8 @@ def _extract_summary_fields(parsed: dict) -> dict:
     target_phrase = str(parsed.get("target_phrase") or "").strip()
     reply_tr = str(parsed.get("reply_tr") or "").strip()
     reply = str(parsed.get("reply") or "").strip()
+    level_estimate = str(parsed.get("level_estimate") or "").strip()
+    topic = str(parsed.get("topic") or "").strip()
 
     topic_map = {
         "placement": "placement",
@@ -281,8 +284,8 @@ def _extract_summary_fields(parsed: dict) -> dict:
     }
 
     return {
-        "last_topic": topic_map.get(lesson_stage, lesson_stage or "daily practice"),
-        "last_level_estimate": str(parsed.get("level_estimate") or "").strip(),
+        "last_topic": topic or topic_map.get(lesson_stage, lesson_stage or "daily practice"),
+        "last_level_estimate": level_estimate,
         "last_target_phrase": target_phrase,
         "last_session_summary": reply_tr,
         "last_teacher_message": reply,
@@ -340,7 +343,6 @@ def _fallback_tr(reply: str, lang: str) -> str:
 
 
 def _openai_extract_output_text(payload: dict) -> str:
-    # Responses API shape can vary; collect all output text chunks
     chunks: list[str] = []
 
     output = payload.get("output") or []
@@ -355,7 +357,6 @@ def _openai_extract_output_text(payload: dict) -> str:
     if chunks:
         return "".join(chunks).strip()
 
-    # fallback fields
     for key in ("output_text", "text"):
         txt = payload.get(key)
         if isinstance(txt, str) and txt.strip():
@@ -446,7 +447,6 @@ async def practice_chat(body: PracticeChatBody, request: Request):
 
     profile = _load_profile(user.id)
     print("PROFILE RAW:", profile)
-    print("SUPABASE_URL:", SUPABASE_URL)
 
     if not profile:
         raise HTTPException(status_code=404, detail="profile_not_found")
@@ -516,7 +516,6 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     try:
         raw_text = ""
 
-        # Primary: OpenAI
         if OPENAI_API_KEY:
             try:
                 raw_text = _call_openai_teacher(final_prompt)
@@ -524,7 +523,6 @@ async def practice_chat(body: PracticeChatBody, request: Request):
                 print("OPENAI PRIMARY ERROR:", repr(e))
                 raw_text = ""
 
-        # Fallback: Gemini
         if not raw_text:
             try:
                 raw_text = _call_gemini_teacher(final_prompt)
@@ -584,8 +582,13 @@ async def practice_chat(body: PracticeChatBody, request: Request):
             "text": json.dumps(parsed, ensure_ascii=False),
         }
 
+    except ResourceExhausted as e:
+        print("PRACTICE_AI QUOTA ERROR:", repr(e))
+        raise HTTPException(status_code=429, detail="practice_ai_temporarily_busy")
+
     except HTTPException:
         raise
+
     except Exception as e:
         print("PRACTICE_AI ERROR:", repr(e))
         raise HTTPException(status_code=500, detail="practice_ai_internal_error")
