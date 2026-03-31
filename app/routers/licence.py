@@ -1,0 +1,269 @@
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel
+from supabase import create_client, Client
+import os
+from datetime import datetime, timezone, timedelta
+
+router = APIRouter(prefix="/api/license", tags=["license"])
+
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_URL veya SUPABASE_SERVICE_ROLE_KEY eksik")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+# =========================================================
+# MODELS
+# =========================================================
+
+class ActivateCodeBody(BaseModel):
+    code: str
+
+
+class StartTrialBody(BaseModel):
+    days: int = 7
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def clean_code(code: str) -> str:
+    return "".join(ch for ch in str(code or "").upper().strip() if ch.isalnum())[:8]
+
+
+def get_user_from_token(auth_header: str | None):
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Yetkisiz erişim")
+
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Geçersiz token")
+
+    try:
+        user_res = supabase.auth.get_user(token)
+        user = getattr(user_res, "user", None)
+        if not user or not getattr(user, "id", None):
+            raise HTTPException(status_code=401, detail="Kullanıcı alınamadı")
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Oturum doğrulanamadı: {e}")
+
+
+def get_profile(user_id: str) -> dict:
+    res = (
+        supabase.table("profiles")
+        .select("*")
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    return res.data or {}
+
+
+def upsert_profile(user_id: str, payload: dict):
+    exists = (
+        supabase.table("profiles")
+        .select("id")
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+    )
+
+    if exists.data:
+        return (
+            supabase.table("profiles")
+            .update(payload)
+            .eq("id", user_id)
+            .execute()
+        )
+
+    payload = {"id": user_id, **payload}
+    return supabase.table("profiles").insert(payload).execute()
+
+
+def get_license_row(code: str) -> dict | None:
+    res = (
+        supabase.table("nfc_cards")
+        .select("*")
+        .eq("uid", code)
+        .maybe_single()
+        .execute()
+    )
+    return res.data
+
+
+def get_package(package_code: str) -> dict | None:
+    if not package_code:
+        return None
+
+    res = (
+        supabase.table("packages")
+        .select("*")
+        .eq("code", package_code)
+        .maybe_single()
+        .execute()
+    )
+    return res.data
+
+
+def deactivate_old_entitlements(user_id: str):
+    (
+        supabase.table("entitlements")
+        .update({"status": "passive"})
+        .eq("user_id", user_id)
+        .eq("status", "active")
+        .execute()
+    )
+
+
+def create_entitlement_for_code(user_id: str, code_row: dict, package_row: dict) -> dict:
+    duration_days = int(package_row.get("duration_days") or 0)
+    started_at_dt = datetime.now(timezone.utc)
+    expires_at_dt = started_at_dt + timedelta(days=duration_days if duration_days > 0 else 3650)
+
+    payload = {
+        "user_id": user_id,
+        "package_code": package_row.get("code"),
+        "source_type": "qr_code",
+        "card_uid": code_row.get("uid"),
+        "started_at": started_at_dt.isoformat(),
+        "expires_at": expires_at_dt.isoformat(),
+        "remaining_jeton": int(package_row.get("jeton_amount") or 0),
+        "status": "active",
+        "note": "Lisans kodu ile aktive edildi"
+    }
+
+    res = supabase.table("entitlements").insert(payload).execute()
+    return (res.data or [{}])[0]
+
+
+def activate_license_row(code_row: dict, user_id: str):
+    prev_note = str(code_row.get("note") or "").strip()
+    parts = [p.strip() for p in prev_note.split("|") if p.strip()]
+    parts = [p for p in parts if not p.lower().startswith("activated_at:")]
+    parts = [p for p in parts if not p.lower().startswith("activated_by:")]
+    parts.append(f"activated_at:{now_iso()}")
+    parts.append(f"activated_by:{user_id}")
+    new_note = " | ".join(parts)
+
+    return (
+        supabase.table("nfc_cards")
+        .update({
+            "status": "bound",
+            "bound_user_id": user_id,
+            "note": new_note
+        })
+        .eq("uid", code_row.get("uid"))
+        .execute()
+    )
+
+
+# =========================================================
+# ROUTES
+# =========================================================
+
+@router.post("/activate-code")
+def activate_code(
+    body: ActivateCodeBody,
+    authorization: str | None = Header(default=None)
+):
+    user = get_user_from_token(authorization)
+    user_id = user.id
+    code = clean_code(body.code)
+
+    if len(code) != 8:
+        raise HTTPException(status_code=400, detail="Kod 8 karakter olmalı")
+
+    code_row = get_license_row(code)
+    if not code_row:
+        raise HTTPException(status_code=404, detail="Lisans kodu bulunamadı")
+
+    if not bool(code_row.get("is_active", True)):
+        raise HTTPException(status_code=400, detail="Bu lisans kodu pasif")
+
+    current_status = str(code_row.get("status") or "").lower()
+    bound_user_id = code_row.get("bound_user_id")
+
+    if current_status == "bound" and bound_user_id and bound_user_id != user_id:
+        raise HTTPException(status_code=409, detail="Bu lisans kodu başka kullanıcıya bağlı")
+
+    package_code = code_row.get("package_code")
+    package_row = get_package(package_code)
+    if not package_row:
+        raise HTTPException(status_code=404, detail="Koda bağlı paket bulunamadı")
+
+    deactivate_old_entitlements(user_id)
+    entitlement = create_entitlement_for_code(user_id, code_row, package_row)
+    activate_license_row(code_row, user_id)
+
+    profile_payload = {
+        "selected_package_code": package_code,
+        "access_source_type": "qr_code",
+        "package_started_at": entitlement.get("started_at"),
+        "package_ends_at": entitlement.get("expires_at"),
+        "trial_used": True
+    }
+    upsert_profile(user_id, profile_payload)
+
+    return {
+        "ok": True,
+        "message": "Lisans aktive edildi",
+        "code": code,
+        "package_code": package_code,
+        "entitlement": entitlement
+    }
+
+
+@router.post("/start-trial")
+def start_trial(
+    body: StartTrialBody,
+    authorization: str | None = Header(default=None)
+):
+    user = get_user_from_token(authorization)
+    user_id = user.id
+
+    profile = get_profile(user_id)
+
+    if profile.get("trial_used") is True:
+        raise HTTPException(status_code=409, detail="Ücretsiz giriş daha önce kullanılmış")
+
+    days = int(body.days or 7)
+    if days < 1:
+        days = 7
+
+    trial_started_at = datetime.now(timezone.utc)
+    trial_ends_at = trial_started_at + timedelta(days=days)
+
+    upsert_profile(user_id, {
+        "trial_used": True,
+        "trial_started_at": trial_started_at.isoformat(),
+        "trial_ends_at": trial_ends_at.isoformat(),
+        "access_source_type": "trial"
+    })
+
+    return {
+        "ok": True,
+        "message": "Ücretsiz giriş başlatıldı",
+        "trial_started_at": trial_started_at.isoformat(),
+        "trial_ends_at": trial_ends_at.isoformat(),
+        "days": days
+    }
