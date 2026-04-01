@@ -39,10 +39,9 @@ def delete_my_account(authorization: str | None = Header(default=None)):
     user_id = str(user.id).strip()
 
     if not user_id:
-      raise HTTPException(status_code=400, detail="Geçersiz kullanıcı")
+        raise HTTPException(status_code=400, detail="Geçersiz kullanıcı")
 
     try:
-        # 1) Kullanıcıya bağlı verileri temizle
         table_ops = [
             ("billing_purchases", "user_id"),
             ("course_sessions", "user_id"),
@@ -72,7 +71,6 @@ def delete_my_account(authorization: str | None = Header(default=None)):
             except Exception:
                 pass
 
-        # 2) profiles içindeki bağlı kart bilgisini temizle
         try:
             supabase.table("profiles").update({
                 "nfc_card_uid": None,
@@ -83,12 +81,12 @@ def delete_my_account(authorization: str | None = Header(default=None)):
                 "package_started_at": None,
                 "package_ends_at": None,
                 "trial_started_at": None,
-                "trial_ends_at": None
+                "trial_ends_at": None,
+                "app_access_mode": "basic"
             }).eq("id", user_id).execute()
         except Exception:
             pass
 
-        # 3) Kart bağlarını kaldır
         try:
             supabase.table("nfc_cards").update({
                 "bound_user_id": None,
@@ -97,19 +95,19 @@ def delete_my_account(authorization: str | None = Header(default=None)):
         except Exception:
             pass
 
-        # 4) Profil kaydını sil
         try:
             supabase.table("profiles").delete().eq("id", user_id).execute()
         except Exception:
             pass
 
-        # 5) users tablon varsa onu da sil
         try:
             supabase.table("users").delete().eq("id", user_id).execute()
         except Exception:
             pass
 
-        # 6) Auth kullanıcısını kalıcı sil
+        # trial_audit silinmiyor
+        # kullanıcı tekrar hesap açsa bile ücretsiz denemeyi yeniden alamaz
+
         try:
             supabase.auth.admin.delete_user(user_id)
         except Exception as e:
