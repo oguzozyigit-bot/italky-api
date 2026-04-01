@@ -13,6 +13,7 @@ from app.routers.nfc import router as nfc_router
 from app.routers.session import router as session_router
 from app.routers.practice_ai import router as practice_ai_router
 from app.routers.license import router as license_router
+from app.routers.delete_account import router as delete_account_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
@@ -118,6 +119,7 @@ app.include_router(nfc_router)
 app.include_router(session_router)
 app.include_router(practice_ai_router)
 app.include_router(license_router)
+app.include_router(delete_account_router)
 
 # AUTH
 app.include_router(auth_router)
