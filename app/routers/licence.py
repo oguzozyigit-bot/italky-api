@@ -25,6 +25,7 @@ class ActivateCodeBody(BaseModel):
 
 class StartTrialBody(BaseModel):
     days: int = 7
+    nac_id: str | None = None
 
 
 # =========================================================
@@ -33,15 +34,6 @@ class StartTrialBody(BaseModel):
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 def clean_code(code: str) -> str:
@@ -116,7 +108,7 @@ def get_package(package_code: str) -> dict | None:
         return None
 
     res = (
-        supabase.table("packages")
+        supabase.table("nfc_packages")
         .select("*")
         .eq("code", package_code)
         .maybe_single()
@@ -127,7 +119,7 @@ def get_package(package_code: str) -> dict | None:
 
 def deactivate_old_entitlements(user_id: str):
     (
-        supabase.table("entitlements")
+        supabase.table("nfc_entitlements")
         .update({"status": "passive"})
         .eq("user_id", user_id)
         .eq("status", "active")
@@ -147,12 +139,18 @@ def create_entitlement_for_code(user_id: str, code_row: dict, package_row: dict)
         "card_uid": code_row.get("uid"),
         "started_at": started_at_dt.isoformat(),
         "expires_at": expires_at_dt.isoformat(),
+        "remaining_languages": int(package_row.get("language_limit") or 0),
         "remaining_jeton": int(package_row.get("jeton_amount") or 0),
+        "can_use_text_to_text": bool(package_row.get("can_use_text_to_text") or False),
+        "can_use_face_to_face": bool(package_row.get("can_use_face_to_face") or False),
+        "can_use_side_to_side": bool(package_row.get("can_use_side_to_side") or False),
+        "can_use_offline": bool(package_row.get("can_use_offline") or False),
+        "can_use_clone_voice": bool(package_row.get("can_use_clone_voice") or False),
         "status": "active",
         "note": "Lisans kodu ile aktive edildi"
     }
 
-    res = supabase.table("entitlements").insert(payload).execute()
+    res = supabase.table("nfc_entitlements").insert(payload).execute()
     return (res.data or [{}])[0]
 
 
@@ -175,6 +173,63 @@ def activate_license_row(code_row: dict, user_id: str):
         .eq("uid", code_row.get("uid"))
         .execute()
     )
+
+
+def has_used_trial_before(user_id: str, email: str, nac_id: str | None):
+    try:
+        r = (
+            supabase.table("trial_audit")
+            .select("id")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        if r.data:
+            return True
+    except Exception:
+        pass
+
+    try:
+        if email:
+            r = (
+                supabase.table("trial_audit")
+                .select("id")
+                .eq("email", email)
+                .limit(1)
+                .execute()
+            )
+            if r.data:
+                return True
+    except Exception:
+        pass
+
+    try:
+        if nac_id:
+            r = (
+                supabase.table("trial_audit")
+                .select("id")
+                .eq("nac_id", nac_id)
+                .limit(1)
+                .execute()
+            )
+            if r.data:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def write_trial_audit(user_id: str, email: str, nac_id: str | None, login_type: str | None):
+    payload = {
+        "user_id": user_id,
+        "email": email or None,
+        "nac_id": nac_id or None,
+        "login_type": login_type or None,
+        "trial_consumed": True,
+        "first_trial_started_at": now_iso()
+    }
+    supabase.table("trial_audit").insert(payload).execute()
 
 
 # =========================================================
@@ -217,10 +272,12 @@ def activate_code(
 
     profile_payload = {
         "selected_package_code": package_code,
-        "access_source_type": "qr_code",
+        "package_active": True,
         "package_started_at": entitlement.get("started_at"),
         "package_ends_at": entitlement.get("expires_at"),
-        "trial_used": True
+        "nfc_card_uid": code_row.get("uid"),
+        "nfc_package_code": package_code,
+        "nfc_expires_at": entitlement.get("expires_at")
     }
     upsert_profile(user_id, profile_payload)
 
@@ -242,9 +299,12 @@ def start_trial(
     user_id = user.id
 
     profile = get_profile(user_id)
+    email = str(profile.get("email") or getattr(user, "email", "") or "").strip().lower()
+    login_type = str(profile.get("login_type") or "google").strip().lower()
+    nac_id = str(body.nac_id or "").strip() or None
 
-    if profile.get("trial_used") is True:
-        raise HTTPException(status_code=409, detail="Ücretsiz giriş daha önce kullanılmış")
+    if has_used_trial_before(user_id, email, nac_id):
+        raise HTTPException(status_code=409, detail="Bu kullanıcı veya cihaz daha önce ücretsiz denemeyi kullanmış.")
 
     days = int(body.days or 7)
     if days < 1:
@@ -254,11 +314,13 @@ def start_trial(
     trial_ends_at = trial_started_at + timedelta(days=days)
 
     upsert_profile(user_id, {
-        "trial_used": True,
         "trial_started_at": trial_started_at.isoformat(),
         "trial_ends_at": trial_ends_at.isoformat(),
-        "access_source_type": "trial"
+        "package_active": False,
+        "selected_package_code": None
     })
+
+    write_trial_audit(user_id, email, nac_id, login_type)
 
     return {
         "ok": True,
