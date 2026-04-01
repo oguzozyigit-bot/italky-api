@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 from typing import List
 
-import requests
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
+
 from app.routers.auth import router as auth_router
 from app.routers.nfc import router as nfc_router
 from app.routers.session import router as session_router
@@ -115,6 +115,7 @@ app.include_router(voice_enroll_router, prefix="/api")
 app.include_router(chat_ai_router, prefix="/api")
 app.include_router(onetoall_ws_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
+
 app.include_router(nfc_router)
 app.include_router(session_router)
 app.include_router(practice_ai_router)
@@ -138,6 +139,12 @@ if has_offline and offline_router:
 if has_level_test and level_test_router:
     app.include_router(level_test_router, prefix="/api")
 
+if has_exam_pro and exam_pro_router:
+    app.include_router(exam_pro_router, prefix="/api")
+
+if has_ocr and ocr_router:
+    app.include_router(ocr_router, prefix="/api")
+
 # ===============================
 # HEALTH
 # ===============================
@@ -160,61 +167,3 @@ def api_healthz():
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
-
-# ===============================
-# ACCOUNT DELETE
-# ===============================
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-
-def _get_bearer(auth_header: str | None) -> str:
-    if not auth_header:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-
-    parts = auth_header.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Invalid Authorization header")
-
-    token = parts[1].strip()
-    if not token:
-        raise HTTPException(status_code=401, detail="Empty token")
-
-    return token
-
-@app.post("/api/account/delete")
-def delete_account(authorization: str | None = Header(default=None)):
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
-        raise HTTPException(status_code=500, detail="Supabase not configured")
-
-    access_token = _get_bearer(authorization)
-
-    user_resp = requests.get(
-        f"{SUPABASE_URL}/auth/v1/user",
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "apikey": SUPABASE_SERVICE_ROLE,
-        },
-        timeout=20,
-    )
-
-    if user_resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid session")
-
-    user_id = user_resp.json().get("id")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User id missing")
-
-    del_resp = requests.delete(
-        f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
-        headers={
-            "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
-            "apikey": SUPABASE_SERVICE_ROLE,
-            "Content-Type": "application/json",
-        },
-        timeout=20,
-    )
-
-    if del_resp.status_code not in (200, 204):
-        raise HTTPException(status_code=500, detail="Delete failed")
-
-    return {"ok": True}
