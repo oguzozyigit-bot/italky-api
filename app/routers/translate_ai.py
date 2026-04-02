@@ -374,24 +374,26 @@ def translate_ai(body: TranslateBody):
 
     if mode == "normal":
         try:
-            translated = google_translate_official(text, source, target)
-            if translated:
-                return {
-                    "ok": True,
-                    "translated": translated
-                }
-        except Exception as e1:
-            print("[translate_ai] google_official failed:", e1)
-
-        try:
+            print("[translate_ai] trying google free")
             translated = google_translate_free(text, source, target)
             if translated:
                 return {
                     "ok": True,
                     "translated": translated
                 }
+        except Exception as e1:
+            print("[translate_ai] google_free failed:", e1)
+
+        try:
+            print("[translate_ai] trying google official fallback")
+            translated = google_translate_official(text, source, target)
+            if translated:
+                return {
+                    "ok": True,
+                    "translated": translated
+                }
         except Exception as e2:
-            print("[translate_ai] google_free failed:", e2)
+            print("[translate_ai] google_official failed:", e2)
 
         return {
             "ok": False,
