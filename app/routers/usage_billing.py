@@ -17,10 +17,8 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# Yeni sabit kural
 CHARS_PER_JETON = 3000
 
-# ücretli modüller
 PAID_TEXT_MODULES = {
     "text_ai",
     "facetoface_ai",
@@ -38,7 +36,6 @@ PAID_VOICE_MODULES = {
     "voice_live",
 }
 
-# ücretsiz preview
 FREE_VOICE_MODULES = {
     "voice_preset_preview",
 }
@@ -62,9 +59,8 @@ def _get_profile_or_404(user_id: str) -> Dict[str, Any]:
         supabase.table("profiles")
         .select(
             "id,tokens,blocked,"
-            "char_text_remaining,char_face_clone_remaining,"
-            "char_interpreter_remaining,char_interpreter_clone_remaining,"
-            "char_meeting_remaining"
+            "char_text_remaining,"
+            "char_voice_remaining"
         )
         .eq("id", user_id)
         .limit(1)
@@ -90,7 +86,7 @@ def _normalize_kind(kind: str) -> str:
 def _counter_field_for_kind(kind: str) -> str:
     if kind == "text":
         return "char_text_remaining"
-    return "char_face_clone_remaining"
+    return "char_voice_remaining"
 
 
 def _wallet_type_for(module: str, kind: str) -> str:
@@ -148,16 +144,27 @@ def _update_profile_fields(user_id: str, payload: Dict[str, Any]):
 def _reason_for(module: str, kind: str, startup: bool, char_count: int) -> str:
     if kind == "voice":
         if module == "voice_clone_preview":
-            return "Kendi sesim önizleme kullanımı"
+            return "Jetonlu model kullanımı • Kendi Sesim Önizleme"
         if module == "voice_preset_use":
-            return "Özel ses kullanımı"
+            return "Jetonlu model kullanımı • Özel Ses"
+        if module == "voice_clone":
+            return "Jetonlu model kullanımı • Kendi Sesim"
         if startup:
-            return f"Ses kullanımı başlangıç kesintisi ({char_count} karakter)"
-        return f"Ses kullanımı 3000 karakter kesintisi ({char_count} karakter)"
+            return f"Jetonlu model kullanımı • Ses ({char_count} karakter)"
+        return f"Jetonlu model kullanımı • Ses ({char_count} karakter)"
+
+    if module == "practic_ai":
+        return "Jetonlu model kullanımı • Practice AI"
+    if module in {"text_ai", "culture_translate", "text_translate_paid"}:
+        return "Jetonlu model kullanımı • Kültürel Translate"
+    if module == "facetoface_ai":
+        return "Jetonlu model kullanımı • FaceToFace"
+    if module == "eartoear_ai":
+        return "Jetonlu model kullanımı • SideToSide"
 
     if startup:
-        return f"Ücretli çeviri başlangıç kesintisi ({char_count} karakter)"
-    return f"Ücretli çeviri 3000 karakter kesintisi ({char_count} karakter)"
+        return f"Jetonlu model kullanımı ({char_count} karakter)"
+    return f"Jetonlu model kullanımı ({char_count} karakter)"
 
 
 @router.post("/api/usage/commit")
@@ -211,22 +218,17 @@ async def usage_commit(req: UsageBillingReq):
     tokens_before = int(profile.get("tokens") or 0)
 
     charged_tokens = 0
-    reasons: list[str] = []
 
     # ilk kullanımda 1 jeton peşin
     if consumed_chars == 0:
         charged_tokens += 1
-        reasons.append(_reason_for(module, usage_kind, True, char_count))
 
     old_step = consumed_chars // CHARS_PER_JETON
     new_total = consumed_chars + char_count
     new_step = new_total // CHARS_PER_JETON
 
     if new_step > old_step:
-        step_charge = new_step - old_step
-        charged_tokens += step_charge
-        for _ in range(step_charge):
-            reasons.append(_reason_for(module, usage_kind, False, char_count))
+        charged_tokens += (new_step - old_step)
 
     tokens_after = tokens_before - charged_tokens
     if tokens_after < 0:
@@ -249,7 +251,6 @@ async def usage_commit(req: UsageBillingReq):
     )
 
     if charged_tokens > 0:
-        # tek bir hareket yerine her düşümü ayrı yaz
         temp_balance = tokens_before
         first_consumed = consumed_chars == 0
         old_step2 = consumed_chars // CHARS_PER_JETON
