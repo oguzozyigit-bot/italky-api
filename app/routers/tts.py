@@ -39,18 +39,17 @@ PRESET_VOICE_CONFIG: Dict[str, Dict[str, str]] = {
     "selden": {
         "label": "Selden",
         "gender": "female",
-        "openai_voice": "sage",
+        "openai_voice": "coral",
     },
     "jale": {
         "label": "Jale",
         "gender": "female",
-        "openai_voice": "coral",
+        "openai_voice": "shimmer",
     },
-    
     "handan": {
         "label": "Handan",
         "gender": "female",
-        "openai_voice": "shimmer",
+        "openai_voice": "sage",
     },
     "nilay": {
         "label": "Nilay",
@@ -83,7 +82,6 @@ PRESET_VOICE_CONFIG: Dict[str, Dict[str, str]] = {
         "openai_voice": "cedar",
     },
 }
-
 
 def canon_lang(code: str) -> str:
     return (code or "tr").strip().lower().replace("_", "-")
