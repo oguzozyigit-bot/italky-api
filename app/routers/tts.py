@@ -39,29 +39,28 @@ PRESET_VOICE_CONFIG: Dict[str, Dict[str, str]] = {
     "selden": {
         "label": "Selden",
         "gender": "female",
-        "openai_voice": "shimmer",
+        "openai_voice": "sage",
     },
     "jale": {
         "label": "Jale",
         "gender": "female",
-        "openai_voice": "sage",
+        "openai_voice": "coral",
     },
     "aysem": {
         "label": "Ayşem",
         "gender": "female",
-        "openai_voice": "coral",
+        "openai_voice": "alloy",
     },
     "handan": {
         "label": "Handan",
         "gender": "female",
-        "openai_voice": "alloy",
+        "openai_voice": "shimmer",
     },
     "nilay": {
         "label": "Nilay",
         "gender": "female",
         "openai_voice": "marin",
     },
-
     "ozan": {
         "label": "Ozan",
         "gender": "male",
