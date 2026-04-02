@@ -145,12 +145,6 @@ def _profile_tokens(profile: dict) -> int:
         return 0
 
 
-def _deduct_token(user_id: str, current_tokens: int) -> int:
-    new_tokens = max(0, current_tokens - 1)
-    supabase.table("profiles").update({"tokens": new_tokens}).eq("id", user_id).execute()
-    return new_tokens
-
-
 def _profile_membership_code(profile: dict) -> str:
     selected_code = str(profile.get("selected_package_code") or "").strip().lower()
     if selected_code:
@@ -434,6 +428,91 @@ def _call_gemini_teacher(final_prompt: str) -> str:
     return raw_text
 
 
+def _insert_wallet_tx(user_id: str, amount: int, reason: str, meta: dict):
+    return supabase.table("wallet_tx").insert(
+        {
+            "user_id": user_id,
+            "type": "usage_teacher",
+            "amount": amount,
+            "reason": reason,
+            "meta": meta,
+        }
+    ).execute()
+
+
+def _commit_practice_text_usage(user_id: str, profile: dict, input_text: str, output_text: str) -> int:
+    text_before = int(profile.get("char_text_remaining") or 0)
+    tokens_before = int(profile.get("tokens") or 0)
+
+    in_len = len(str(input_text or "").strip())
+    out_len = len(str(output_text or "").strip())
+    billable_chars = max(in_len, out_len)
+
+    if billable_chars <= 0:
+        return tokens_before
+
+    charged_tokens = 0
+
+    if text_before == 0:
+        charged_tokens += 1
+
+    old_step = text_before // 3000
+    new_total = text_before + billable_chars
+    new_step = new_total // 3000
+
+    if new_step > old_step:
+        charged_tokens += (new_step - old_step)
+
+    tokens_after = tokens_before - charged_tokens
+    if tokens_after < 0:
+        raise HTTPException(status_code=402, detail="insufficient_tokens")
+
+    supabase.table("profiles").update({
+        "tokens": tokens_after,
+        "char_text_remaining": new_total
+    }).eq("id", user_id).execute()
+
+    temp_balance = tokens_before
+
+    if text_before == 0:
+        temp_balance -= 1
+        _insert_wallet_tx(
+            user_id=user_id,
+            amount=-1,
+            reason="Jetonlu model kullanımı • Practice AI",
+            meta={
+                "module": "practice_ai",
+                "usage_kind": "text",
+                "charge_type": "startup",
+                "input_chars": in_len,
+                "output_chars": out_len,
+                "billable_chars": billable_chars,
+                "balance_after": temp_balance
+            }
+        )
+
+    if new_step > old_step:
+        for i in range(new_step - old_step):
+            temp_balance -= 1
+            _insert_wallet_tx(
+                user_id=user_id,
+                amount=-1,
+                reason="Jetonlu model kullanımı • Practice AI",
+                meta={
+                    "module": "practice_ai",
+                    "usage_kind": "text",
+                    "charge_type": "3000_step",
+                    "step_index": i + 1,
+                    "input_chars": in_len,
+                    "output_chars": out_len,
+                    "billable_chars": billable_chars,
+                    "balance_after": temp_balance
+                }
+            )
+
+    return tokens_after
+
+
 @router.post("/api/practice/chat")
 async def practice_chat(body: PracticeChatBody, request: Request):
     print("PRACTICE_AI ROUTE HIT")
@@ -454,14 +533,12 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     membership_code = _profile_membership_code(profile)
     trial_active = _profile_trial_active(profile)
     can_practice = _profile_can_practice(profile)
-    tokens = _profile_tokens(profile)
 
     print("USER:", getattr(user, "id", None))
     print("DISPLAY_NAME:", _display_name(profile))
     print("MEMBERSHIP_CODE:", membership_code)
     print("TRIAL_ACTIVE:", trial_active)
     print("CAN_PRACTICE:", can_practice)
-    print("TOKENS:", tokens)
 
     if trial_active:
         raise HTTPException(status_code=403, detail="practice_ai_closed_for_trial")
@@ -471,13 +548,6 @@ async def practice_chat(body: PracticeChatBody, request: Request):
 
     if not can_practice:
         raise HTTPException(status_code=403, detail="practice_ai_requires_education_or_premium")
-
-    TEST_BYPASS_TOKEN = False
-
-    if tokens <= 0 and not TEST_BYPASS_TOKEN:
-        raise HTTPException(status_code=402, detail="insufficient_tokens")
-
-    tokens_after = tokens if TEST_BYPASS_TOKEN else _deduct_token(user.id, tokens)
 
     display_name = _display_name(profile)
     profile_level = _profile_level_for_lang(profile, body.lang)
@@ -561,6 +631,13 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         low = f" {parsed['reply'].lower()} "
         if any(term in low for term in bad_terms):
             raise HTTPException(status_code=502, detail="practice_ai_blocked_model_reply")
+
+        tokens_after = _commit_practice_text_usage(
+            user_id=user.id,
+            profile=profile,
+            input_text=body.prompt,
+            output_text=reply
+        )
 
         try:
             memory_fields = _extract_summary_fields(parsed)
