@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 import requests
@@ -13,8 +14,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
-
-# Güncel varsayılan Gemini modeli
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 
@@ -73,6 +72,74 @@ def detect_register_hint(text: str) -> str:
     return "neutral"
 
 
+def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
+    s = normalize_text(text)
+    low = s.lower()
+
+    if not s:
+        return False
+
+    # kısa ve düz cümlelerde AI'a gitme
+    words = re.findall(r"\S+", s)
+    word_count = len(words)
+    char_count = len(s)
+
+    if char_count <= 60 and word_count <= 8:
+        simple_hits = [
+            "selam", "merhaba", "günaydın", "iyi geceler", "iyi akşamlar",
+            "nasılsın", "nasilsin", "iyiyim", "teşekkürler", "tesekkurler",
+            "tamam", "olur", "evet", "hayır", "hayir", "görüşürüz", "gorusuruz",
+            "hoşça kal", "hosca kal", "kaç para", "yardım eder misin", "adres nerede"
+        ]
+        if any(x in low for x in simple_hits):
+            return False
+
+    # kültürel fark gerektiren tetikleyiciler
+    emotional_hits = [
+        "kırıldım", "kirildim", "alındım", "alindim", "gönül", "gonul",
+        "kalbim", "içim", "icim", "ayıp oldu", "ayip oldu", "bozuldu",
+        "üzgünüm", "uzgunum", "mutluyum", "çok sevindim", "cok sevindim"
+    ]
+
+    idiom_hits = [
+        "lafın gelişi", "lafin gelisi", "üstü kapalı", "ustu kapali",
+        "ince ince", "iğneleme", "igneleme", "ima", "imalı", "imali",
+        "taş atmak", "tas atmak", "gönlünü almak", "gonlunu almak"
+    ]
+
+    formal_hits = [
+        "sayın", "saygılarımla", "arz ederim", "rica ederim",
+        "tarafınıza", "hususunda", "değerlendirmenizi"
+    ]
+
+    if tone != "neutral":
+        return True
+
+    if style in {"warm", "social"} and char_count >= 50:
+        return True
+
+    if any(x in low for x in emotional_hits):
+        return True
+
+    if any(x in low for x in idiom_hits):
+        return True
+
+    if any(x in low for x in formal_hits):
+        return True
+
+    if char_count >= 180:
+        return True
+
+    if word_count >= 20:
+        return True
+
+    if "!" in s or "?" in s:
+        if char_count >= 70:
+            return True
+
+    return False
+
+
 def google_translate_free(text: str, source: str, target: str) -> str:
     url = "https://translate.googleapis.com/translate_a/single"
     params = {
@@ -83,7 +150,7 @@ def google_translate_free(text: str, source: str, target: str) -> str:
         "q": text,
     }
 
-    r = requests.get(url, params=params, timeout=25)
+    r = requests.get(url, params=params, timeout=12)
     r.raise_for_status()
     data = r.json()
 
@@ -108,7 +175,7 @@ def google_translate_official(text: str, source: str, target: str) -> str:
         "key": GOOGLE_TRANSLATE_API_KEY,
     }
 
-    r = requests.post(url, data=payload, timeout=25)
+    r = requests.post(url, data=payload, timeout=12)
     r.raise_for_status()
     data = r.json()
     translated = (
@@ -204,13 +271,12 @@ Text:
         "https://api.openai.com/v1/responses",
         headers=headers,
         json=payload,
-        timeout=45,
+        timeout=18,
     )
     r.raise_for_status()
     data = r.json()
 
     chunks = []
-
     for item in data.get("output", []) or []:
         for content in item.get("content", []) or []:
             if content.get("type") in {"output_text", "text"}:
@@ -219,7 +285,6 @@ Text:
                     chunks.append(txt)
 
     out = "".join(chunks).strip()
-
     if not out:
         out = str(data.get("output_text") or data.get("text") or "").strip()
 
@@ -314,13 +379,13 @@ Text:
             }
         ],
         "generationConfig": {
-            "temperature": 0.52,
+            "temperature": 0.42,
             "topP": 0.9,
-            "maxOutputTokens": 1024
+            "maxOutputTokens": 512
         }
     }
 
-    r = requests.post(url, json=payload, timeout=40)
+    r = requests.post(url, json=payload, timeout=16)
     r.raise_for_status()
     data = r.json()
 
@@ -335,6 +400,20 @@ Text:
         raise RuntimeError("Gemini empty text")
 
     return out
+
+
+def fast_translate_fallback(text: str, source: str, target: str) -> str:
+    try:
+        print("[translate_ai] trying google free")
+        translated = google_translate_free(text, source, target)
+        if translated:
+            return translated
+    except Exception as e1:
+        print("[translate_ai] google_free failed:", e1)
+
+    print("[translate_ai] trying google official fallback")
+    translated = google_translate_official(text, source, target)
+    return translated
 
 
 @router.get("/translate_ai/health")
@@ -367,48 +446,34 @@ def translate_ai(body: TranslateBody):
         return {"ok": False, "error": "missing_lang"}
 
     if source == target:
-        return {
-            "ok": True,
-            "translated": text
-        }
+        return {"ok": True, "translated": text}
 
     if mode == "normal":
         try:
-            print("[translate_ai] trying google free")
-            translated = google_translate_free(text, source, target)
+            translated = fast_translate_fallback(text, source, target)
             if translated:
-                return {
-                    "ok": True,
-                    "translated": translated
-                }
-        except Exception as e1:
-            print("[translate_ai] google_free failed:", e1)
+                return {"ok": True, "translated": translated}
+        except Exception as e:
+            print("[translate_ai] normal failed:", e)
 
-        try:
-            print("[translate_ai] trying google official fallback")
-            translated = google_translate_official(text, source, target)
-            if translated:
-                return {
-                    "ok": True,
-                    "translated": translated
-                }
-        except Exception as e2:
-            print("[translate_ai] google_official failed:", e2)
-
-        return {
-            "ok": False,
-            "error": "normal_translate_failed"
-        }
+        return {"ok": False, "error": "normal_translate_failed"}
 
     if mode == "cultural":
+        # hız için: basit cümlelerde AI'a hiç gitme
+        if not should_use_ai_for_cultural(text, tone, style):
+          try:
+              print("[translate_ai] cultural fast path -> google")
+              translated = fast_translate_fallback(text, source, target)
+              if translated:
+                  return {"ok": True, "translated": translated}
+          except Exception as e0:
+              print("[translate_ai] cultural fast path failed:", e0)
+
         try:
             print("[translate_ai] trying gemini cultural")
             translated = gemini_cultural_translate(text, source, target, tone, style)
             if translated:
-                return {
-                    "ok": True,
-                    "translated": translated
-                }
+                return {"ok": True, "translated": translated}
         except Exception as e1:
             print("[translate_ai] gemini failed:", e1)
 
@@ -416,10 +481,7 @@ def translate_ai(body: TranslateBody):
             print("[translate_ai] trying openai cultural fallback")
             translated = openai_cultural_translate(text, source, target, tone, style)
             if translated:
-                return {
-                    "ok": True,
-                    "translated": translated
-                }
+                return {"ok": True, "translated": translated}
         except Exception as e2:
             print("[translate_ai] openai failed:", e2)
 
@@ -427,10 +489,7 @@ def translate_ai(body: TranslateBody):
             print("[translate_ai] trying google official fallback")
             translated = google_translate_official(text, source, target)
             if translated:
-                return {
-                    "ok": True,
-                    "translated": translated
-                }
+                return {"ok": True, "translated": translated}
         except Exception as e3:
             print("[translate_ai] google_official fallback failed:", e3)
 
@@ -438,19 +497,10 @@ def translate_ai(body: TranslateBody):
             print("[translate_ai] trying google free fallback")
             translated = google_translate_free(text, source, target)
             if translated:
-                return {
-                    "ok": True,
-                    "translated": translated
-                }
+                return {"ok": True, "translated": translated}
         except Exception as e4:
             print("[translate_ai] google_free fallback failed:", e4)
 
-        return {
-            "ok": False,
-            "error": "cultural_translate_failed"
-        }
+        return {"ok": False, "error": "cultural_translate_failed"}
 
-    return {
-        "ok": False,
-        "error": "invalid_mode"
-    }
+    return {"ok": False, "error": "invalid_mode"}
