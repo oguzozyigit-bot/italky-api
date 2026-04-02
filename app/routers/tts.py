@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import logging
 import base64
+import hashlib
 from typing import Optional, Dict
 
 import httpx
@@ -24,6 +25,8 @@ CARTESIA_MODEL_ID = "sonic-3"
 
 OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 CARTESIA_TTS_URL = "https://api.cartesia.ai/tts/bytes"
+
+TTS_CACHE_BUCKET = os.getenv("TTS_CACHE_BUCKET", "tts-cache").strip()
 
 # Öncelikli marka isimleri
 # Özel sesler OpenAI yerleşik seslerine map edilir.
@@ -248,6 +251,43 @@ async def openai_tts(text: str, voice_name: str, tone: str):
         return None
 
 
+async def openai_tts_with_bytes(text: str, voice_name: str, tone: str):
+    if not OPENAI_API_KEY or not voice_name:
+        return None, None
+
+    payload = {
+        "model": OPENAI_TTS_MODEL,
+        "voice": voice_name,
+        "input": text,
+        "format": "mp3",
+        "instructions": tone_instruction(tone),
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            r = await client.post(
+                OPENAI_TTS_URL,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        if r.status_code >= 400:
+            logger.warning("openai_tts_with_bytes failed: %s", r.text[:500])
+            return None, None
+
+        if not r.content:
+            return None, None
+
+        b64 = base64.b64encode(r.content).decode("utf-8")
+        return b64, r.content
+    except Exception as e:
+        logger.warning("openai_tts_with_bytes exception: %s", e)
+        return None, None
+
+
 def build_clone_preview_text(profile: Optional[dict]) -> str:
     name = str((profile or {}).get("full_name") or "").strip()
     first_name = name.split(" ")[0] if name else "Arkadaşım"
@@ -257,6 +297,66 @@ def build_clone_preview_text(profile: Optional[dict]) -> str:
         f"italkyAI ile çevirileri kendi sesimle ve duygularımı da yansıtarak yapabiliyorum. "
         f"Böylece konuşmalarım daha doğal, daha sıcak ve bana daha yakın oluyor."
     )
+
+
+def _preview_cache_key(voice: str, lang: str, text: str) -> str:
+    raw = f"{voice}|{lang_base(lang)}|{text}".encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    return f"preset-previews/{voice}/{lang_base(lang)}/{digest}.mp3"
+
+
+async def _storage_download_base64(path: str) -> Optional[str]:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
+        return None
+
+    url = f"{SUPABASE_URL}/storage/v1/object/{TTS_CACHE_BUCKET}/{path}"
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(
+                url,
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                },
+            )
+
+        if r.status_code != 200 or not r.content:
+            return None
+
+        return base64.b64encode(r.content).decode("utf-8")
+    except Exception as e:
+        logger.warning("storage_download_base64 failed: %s", e)
+        return None
+
+
+async def _storage_upload_mp3(path: str, audio_bytes: bytes) -> bool:
+    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE or not audio_bytes:
+        return False
+
+    url = f"{SUPABASE_URL}/storage/v1/object/{TTS_CACHE_BUCKET}/{path}"
+
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            r = await client.post(
+                url,
+                content=audio_bytes,
+                headers={
+                    "apikey": SUPABASE_SERVICE_ROLE,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+                    "Content-Type": "audio/mpeg",
+                    "x-upsert": "true",
+                },
+            )
+
+        if r.status_code not in (200, 201):
+            logger.warning("storage_upload_mp3 failed: %s", r.text[:500])
+            return False
+
+        return True
+    except Exception as e:
+        logger.warning("storage_upload_mp3 exception: %s", e)
+        return False
 
 
 @router.post("/tts", response_model=TTSResponse)
@@ -280,9 +380,38 @@ async def tts(req: TTSRequest):
     # 1) Özel sesler -> OpenAI
     if is_preset_voice(voice):
         openai_voice = preset_openai_voice(voice)
+
+        # preview ise cache kullan
+        if module == "voice_preset_preview":
+            cache_path = _preview_cache_key(voice, req.lang, text)
+
+            cached_audio = await _storage_download_base64(cache_path)
+            if cached_audio:
+                return TTSResponse(
+                    ok=True,
+                    audio_base64=cached_audio,
+                    provider_used=f"cache-preset-{voice}"
+                )
+
+            audio_b64, audio_bytes = await openai_tts_with_bytes(text, openai_voice, tone)
+            if audio_b64:
+                if audio_bytes:
+                    await _storage_upload_mp3(cache_path, audio_bytes)
+
+                return TTSResponse(
+                    ok=True,
+                    audio_base64=audio_b64,
+                    provider_used=f"openai-preset-{voice}"
+                )
+
+        # normal preset kullanım
         audio = await openai_tts(text, openai_voice, tone)
         if audio:
-            return TTSResponse(ok=True, audio_base64=audio, provider_used=f"openai-preset-{voice}")
+            return TTSResponse(
+                ok=True,
+                audio_base64=audio,
+                provider_used=f"openai-preset-{voice}"
+            )
 
     # 2) Kendi Sesim / clone -> Cartesia
     if voice == "clone" and voice_ready and voice_id:
