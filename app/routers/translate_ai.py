@@ -10,7 +10,12 @@ from pydantic import BaseModel
 router = APIRouter(tags=["translate_ai"])
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
+
+# Güncel varsayılan Gemini modeli
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 
 
 class TranslateBody(BaseModel):
@@ -114,6 +119,116 @@ def google_translate_official(text: str, source: str, target: str) -> str:
     return str(translated).strip()
 
 
+def openai_cultural_translate(
+    text: str,
+    source: str,
+    target: str,
+    tone: str = "neutral",
+    style: str = "balanced"
+) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    tone = canonical_tone(tone)
+    style = canonical_style(style)
+    register_hint = detect_register_hint(text)
+
+    tone_map = {
+        "neutral": "Keep the tone natural, clear, smooth and human.",
+        "happy": "Keep the tone warm, friendly, positive and lively.",
+        "angry": "Keep the emotional intensity, but make it sound natural, socially appropriate and human.",
+        "sad": "Keep the tone soft, sincere, empathetic and emotionally gentle.",
+        "excited": "Keep the tone energetic, vivid, enthusiastic and natural."
+    }
+
+    style_map = {
+        "balanced": "Use balanced, natural, everyday phrasing.",
+        "warm": "Prefer warmer, softer, more human phrasing when possible.",
+        "clear": "Prefer simpler, clearer, easier-to-understand phrasing.",
+        "social": "Prefer slightly more conversational spoken-language phrasing."
+    }
+
+    register_map = {
+        "formal": "If the source sounds formal, keep it respectful but do not make it stiff or robotic.",
+        "casual": "If the source sounds casual, keep it relaxed, natural and conversational.",
+        "neutral": "Prefer natural daily phrasing over overly formal or rigid wording."
+    }
+
+    tone_rule = tone_map.get(tone, tone_map["neutral"])
+    style_rule = style_map.get(style, style_map["balanced"])
+    register_rule = register_map.get(register_hint, register_map["neutral"])
+
+    prompt = f"""
+You are a highly natural conversational translator.
+
+Translate the following text from "{source}" to "{target}".
+
+Core rules:
+- Preserve the exact meaning.
+- Do not sound robotic, stiff, or overly literal.
+- Make the result feel like something a real person would naturally say.
+- Keep the speaker's emotional tone.
+- Keep the social intent and politeness level.
+- Prefer fluent, human, culturally appropriate phrasing.
+- If a sentence sounds too formal in the target language, soften it slightly into natural spoken language without losing meaning.
+- If the source is already casual, keep it casual and natural.
+- Do not add extra explanation.
+- Do not add quotation marks.
+- Do not mention translation systems, AI tools, model names, brands, or technology.
+- Return only the translated text.
+
+Tone guidance:
+{tone_rule}
+
+Style guidance:
+{style_rule}
+
+Register guidance:
+{register_rule}
+
+Text:
+{text}
+""".strip()
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": prompt,
+    }
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    r = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers=headers,
+        json=payload,
+        timeout=45,
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    chunks = []
+
+    for item in data.get("output", []) or []:
+        for content in item.get("content", []) or []:
+            if content.get("type") in {"output_text", "text"}:
+                txt = str(content.get("text") or "").strip()
+                if txt:
+                    chunks.append(txt)
+
+    out = "".join(chunks).strip()
+
+    if not out:
+        out = str(data.get("output_text") or data.get("text") or "").strip()
+
+    if not out:
+        raise RuntimeError("OpenAI empty text")
+
+    return out
+
+
 def gemini_cultural_translate(
     text: str,
     source: str,
@@ -187,7 +302,7 @@ Text:
 
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     )
 
     payload = {
@@ -296,6 +411,17 @@ def translate_ai(body: TranslateBody):
             print("[translate_ai] gemini failed:", e1)
 
         try:
+            print("[translate_ai] trying openai cultural fallback")
+            translated = openai_cultural_translate(text, source, target, tone, style)
+            if translated:
+                return {
+                    "ok": True,
+                    "translated": translated
+                }
+        except Exception as e2:
+            print("[translate_ai] openai failed:", e2)
+
+        try:
             print("[translate_ai] trying google official fallback")
             translated = google_translate_official(text, source, target)
             if translated:
@@ -303,8 +429,8 @@ def translate_ai(body: TranslateBody):
                     "ok": True,
                     "translated": translated
                 }
-        except Exception as e2:
-            print("[translate_ai] google_official fallback failed:", e2)
+        except Exception as e3:
+            print("[translate_ai] google_official fallback failed:", e3)
 
         try:
             print("[translate_ai] trying google free fallback")
@@ -314,8 +440,8 @@ def translate_ai(body: TranslateBody):
                     "ok": True,
                     "translated": translated
                 }
-        except Exception as e3:
-            print("[translate_ai] google_free fallback failed:", e3)
+        except Exception as e4:
+            print("[translate_ai] google_free fallback failed:", e4)
 
         return {
             "ok": False,
