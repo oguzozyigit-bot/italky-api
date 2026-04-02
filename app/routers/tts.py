@@ -36,8 +36,8 @@ PRESET_VOICE_CONFIG: Dict[str, Dict[str, str]] = {
         "gender": "female",
         "openai_voice": "nova",
     },
-    "beren": {
-        "label": "Beren",
+    "selden": {
+        "label": "Selden",
         "gender": "female",
         "openai_voice": "shimmer",
     },
@@ -46,26 +46,46 @@ PRESET_VOICE_CONFIG: Dict[str, Dict[str, str]] = {
         "gender": "female",
         "openai_voice": "sage",
     },
+    "aysem": {
+        "label": "Ayşem",
+        "gender": "female",
+        "openai_voice": "coral",
+    },
+    "handan": {
+        "label": "Handan",
+        "gender": "female",
+        "openai_voice": "alloy",
+    },
+    "nilay": {
+        "label": "Nilay",
+        "gender": "female",
+        "openai_voice": "marin",
+    },
+
     "ozan": {
         "label": "Ozan",
         "gender": "male",
         "openai_voice": "onyx",
     },
-    # Gerekirse ileride açılır
-    "umay": {
-        "label": "Umay",
-        "gender": "female",
-        "openai_voice": "alloy",
-    },
-    "mina": {
-        "label": "Mina",
-        "gender": "female",
-        "openai_voice": "coral",
-    },
-    "kaan": {
-        "label": "Kaan",
+    "noyan": {
+        "label": "Noyan",
         "gender": "male",
         "openai_voice": "echo",
+    },
+    "oguz": {
+        "label": "Oğuz",
+        "gender": "male",
+        "openai_voice": "ash",
+    },
+    "yavuz": {
+        "label": "Yavuz",
+        "gender": "male",
+        "openai_voice": "fable",
+    },
+    "yilmaz": {
+        "label": "Yılmaz",
+        "gender": "male",
+        "openai_voice": "cedar",
     },
 }
 
