@@ -4,95 +4,66 @@ import os
 import logging
 import base64
 from typing import Optional, Dict
+
+import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
-import httpx
 
 logger = logging.getLogger("uvicorn.error")
 router = APIRouter(tags=["tts"])
 
-GOOGLE_API_KEY = (os.getenv("GOOGLE_API_KEY", "") or "").strip()
 SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or "").rstrip("/")
 SUPABASE_SERVICE_ROLE = (os.getenv("SUPABASE_SERVICE_ROLE_KEY", "") or "").strip()
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts").strip()
 
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "").strip()
 CARTESIA_VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01").strip()
 CARTESIA_MODEL_ID = "sonic-3"
 
-GOOGLE_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
+OPENAI_TTS_URL = "https://api.openai.com/v1/audio/speech"
 CARTESIA_TTS_URL = "https://api.cartesia.ai/tts/bytes"
 
-# Hazır özel sesler
-# Not:
-# - Buradaki id alanları ENV üzerinden okunur.
-# - ENV boşsa ilgili preset Google fallback ile kadın/erkek sesi kullanır.
+# Öncelikli marka isimleri
+# Özel sesler OpenAI yerleşik seslerine map edilir.
 PRESET_VOICE_CONFIG: Dict[str, Dict[str, str]] = {
     "huma": {
         "label": "Hüma",
         "gender": "female",
-        "cartesia_voice_id": os.getenv("PRESET_VOICE_HUMA_ID", "").strip(),
-    },
-    "umay": {
-        "label": "Umay",
-        "gender": "female",
-        "cartesia_voice_id": os.getenv("PRESET_VOICE_UMAY_ID", "").strip(),
-    },
-    "jale": {
-        "label": "Jale",
-        "gender": "female",
-        "cartesia_voice_id": os.getenv("PRESET_VOICE_JALE_ID", "").strip(),
-    },
-    "mina": {
-        "label": "Mina",
-        "gender": "female",
-        "cartesia_voice_id": os.getenv("PRESET_VOICE_MINA_ID", "").strip(),
+        "openai_voice": "nova",
     },
     "beren": {
         "label": "Beren",
         "gender": "female",
-        "cartesia_voice_id": os.getenv("PRESET_VOICE_BEREN_ID", "").strip(),
+        "openai_voice": "shimmer",
+    },
+    "jale": {
+        "label": "Jale",
+        "gender": "female",
+        "openai_voice": "sage",
     },
     "ozan": {
         "label": "Ozan",
         "gender": "male",
-        "cartesia_voice_id": os.getenv("PRESET_VOICE_OZAN_ID", "").strip(),
+        "openai_voice": "onyx",
+    },
+    # Gerekirse ileride açılır
+    "umay": {
+        "label": "Umay",
+        "gender": "female",
+        "openai_voice": "alloy",
+    },
+    "mina": {
+        "label": "Mina",
+        "gender": "female",
+        "openai_voice": "coral",
     },
     "kaan": {
         "label": "Kaan",
         "gender": "male",
-        "cartesia_voice_id": os.getenv("PRESET_VOICE_KAAN_ID", "").strip(),
+        "openai_voice": "echo",
     },
-}
-
-GOOGLE_LANG_MAP = {
-    "tr": "tr-TR",
-    "en": "en-US",
-    "de": "de-DE",
-    "fr": "fr-FR",
-    "it": "it-IT",
-    "es": "es-ES",
-    "ru": "ru-RU",
-    "el": "el-GR",
-    "az": "az-AZ",
-    "ka": "ka-GE",
-}
-
-GOOGLE_FEMALE_NAME = {
-    "tr": "tr-TR-Standard-A",
-    "en": "en-US-Standard-C",
-    "de": "de-DE-Standard-A",
-    "fr": "fr-FR-Standard-A",
-    "it": "it-IT-Standard-A",
-    "es": "es-ES-Standard-A",
-}
-
-GOOGLE_MALE_NAME = {
-    "tr": "tr-TR-Standard-B",
-    "en": "en-US-Standard-B",
-    "de": "de-DE-Standard-B",
-    "fr": "fr-FR-Standard-B",
-    "it": "it-IT-Standard-B",
-    "es": "es-ES-Standard-B",
 }
 
 
@@ -102,11 +73,6 @@ def canon_lang(code: str) -> str:
 
 def lang_base(code: str) -> str:
     return canon_lang(code).split("-")[0]
-
-
-def google_lang_code(code: str) -> str:
-    base = lang_base(code)
-    return GOOGLE_LANG_MAP.get(base, "en-US")
 
 
 def canon_voice(value: Optional[str]) -> str:
@@ -131,22 +97,17 @@ def canon_tone(value: Optional[str]) -> str:
     return "neutral"
 
 
-def tone_config(tone: str):
+def tone_instruction(tone: str) -> str:
     t = canon_tone(tone)
-
     if t == "happy":
-        return {"speed": 1.15, "volume": 1.1, "emotion": "positivity:high"}
-
+        return "Speak in a warm, cheerful, lively tone."
     if t == "angry":
-        return {"speed": 1.25, "volume": 1.15, "emotion": "anger:high"}
-
+        return "Speak with strong intensity, but keep it natural and socially appropriate."
     if t == "sad":
-        return {"speed": 0.85, "volume": 0.9, "emotion": "sadness:high"}
-
+        return "Speak in a soft, gentle, slightly emotional tone."
     if t == "excited":
-        return {"speed": 1.30, "volume": 1.15, "emotion": "excitement:high"}
-
-    return {"speed": 1.0, "volume": 1.0, "emotion": "neutral"}
+        return "Speak in an energetic, enthusiastic, vivid tone."
+    return "Speak naturally, clearly and smoothly."
 
 
 def is_preset_voice(voice: str) -> bool:
@@ -158,9 +119,9 @@ def preset_gender(voice: str) -> str:
     return str(cfg.get("gender") or "female").strip().lower()
 
 
-def preset_cartesia_voice_id(voice: str) -> str:
+def preset_openai_voice(voice: str) -> str:
     cfg = PRESET_VOICE_CONFIG.get(voice) or {}
-    return str(cfg.get("cartesia_voice_id") or "").strip()
+    return str(cfg.get("openai_voice") or "").strip()
 
 
 class FlexibleModel(BaseModel):
@@ -228,7 +189,9 @@ async def cartesia_tts(text: str, lang: str, voice_id: str, tone: str, use_tone:
     }
 
     if use_tone:
-        payload["generation_config"] = tone_config(tone)
+        payload["generation_config"] = {
+            "instruction": tone_instruction(tone)
+        }
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -252,44 +215,36 @@ async def cartesia_tts(text: str, lang: str, voice_id: str, tone: str, use_tone:
         return None
 
 
-async def google_tts(text: str, lang: str, voice_gender: str = "female"):
-    if not GOOGLE_API_KEY:
+async def openai_tts(text: str, voice_name: str, tone: str):
+    if not OPENAI_API_KEY or not voice_name:
         return None
 
-    base = lang_base(lang)
-    language_code = google_lang_code(lang)
-
-    voice_name = (
-        GOOGLE_MALE_NAME.get(base) if voice_gender == "male"
-        else GOOGLE_FEMALE_NAME.get(base)
-    )
-
     payload = {
-        "input": {"text": text},
-        "voice": {
-            "languageCode": language_code,
-            "ssmlGender": "MALE" if voice_gender == "male" else "FEMALE",
-        },
-        "audioConfig": {"audioEncoding": "MP3"},
+        "model": OPENAI_TTS_MODEL,
+        "voice": voice_name,
+        "input": text,
+        "format": "mp3",
+        "instructions": tone_instruction(tone),
     }
 
-    if voice_name:
-        payload["voice"]["name"] = voice_name
-
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=25.0) as client:
             r = await client.post(
-                f"{GOOGLE_TTS_URL}?key={GOOGLE_API_KEY}",
+                OPENAI_TTS_URL,
                 json=payload,
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
             )
 
-        if r.status_code != 200:
-            logger.warning("google_tts failed: %s", r.text[:500])
+        if r.status_code >= 400:
+            logger.warning("openai_tts failed: %s", r.text[:500])
             return None
 
-        return r.json().get("audioContent")
+        return base64.b64encode(r.content).decode("utf-8")
     except Exception as e:
-        logger.warning("google_tts exception: %s", e)
+        logger.warning("openai_tts exception: %s", e)
         return None
 
 
@@ -307,9 +262,6 @@ def build_clone_preview_text(profile: Optional[dict]) -> str:
 @router.post("/tts", response_model=TTSResponse)
 async def tts(req: TTSRequest):
     text = (req.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="text is required")
-
     tone = canon_tone(req.tone)
     voice = canon_voice(req.voice)
     module = str(req.module or "facetoface").strip().lower()
@@ -318,29 +270,21 @@ async def tts(req: TTSRequest):
     voice_ready = bool(profile and profile.get("tts_voice_ready"))
     voice_id = str((profile or {}).get("tts_voice_id") or "").strip()
 
-    # Kendi sesimi dinle butonunda metin boş gelirse profile adından örnek metin kur
+    # clone preview'da metin boşsa adla örnek üret
     if module == "clone_preview" and not text:
         text = build_clone_preview_text(profile)
 
-    # 1) Hazır özel sesler
+    if not text:
+        raise HTTPException(status_code=422, detail="text is required")
+
+    # 1) Özel sesler -> OpenAI
     if is_preset_voice(voice):
-        preset_id = preset_cartesia_voice_id(voice)
-
-        if preset_id:
-            audio = await cartesia_tts(text, req.lang, preset_id, tone, True)
-            if audio:
-                return TTSResponse(ok=True, audio_base64=audio, provider_used=f"preset-{voice}-tone")
-
-            audio = await cartesia_tts(text, req.lang, preset_id, tone, False)
-            if audio:
-                return TTSResponse(ok=True, audio_base64=audio, provider_used=f"preset-{voice}")
-
-        # ENV ile preset id yoksa Google fallback
-        audio = await google_tts(text, req.lang, preset_gender(voice))
+        openai_voice = preset_openai_voice(voice)
+        audio = await openai_tts(text, openai_voice, tone)
         if audio:
-            return TTSResponse(ok=True, audio_base64=audio, provider_used=f"google-preset-{voice}")
+            return TTSResponse(ok=True, audio_base64=audio, provider_used=f"openai-preset-{voice}")
 
-    # 2) Kendi clon sesim
+    # 2) Kendi Sesim / clone -> Cartesia
     if voice == "clone" and voice_ready and voice_id:
         audio = await cartesia_tts(text, req.lang, voice_id, tone, True)
         if audio:
@@ -350,13 +294,18 @@ async def tts(req: TTSRequest):
         if audio:
             return TTSResponse(ok=True, audio_base64=audio, provider_used="clone")
 
-    # 3) Genel kadın / erkek seçimleri
-    if voice in ("female", "male"):
-        audio = await google_tts(text, req.lang, voice)
+    # 3) Generic male/female -> OpenAI
+    if voice == "male":
+        audio = await openai_tts(text, "onyx", tone)
         if audio:
-            return TTSResponse(ok=True, audio_base64=audio, provider_used=f"google-{voice}")
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="openai-male")
 
-    # 4) Auto -> önce profilde seçili clone varsa onu dene
+    if voice == "female":
+        audio = await openai_tts(text, "nova", tone)
+        if audio:
+            return TTSResponse(ok=True, audio_base64=audio, provider_used="openai-female")
+
+    # 4) auto -> önce clone varsa Cartesia, yoksa frontend cihaz sesi kullansın
     if voice == "auto" and voice_ready and voice_id:
         audio = await cartesia_tts(text, req.lang, voice_id, tone, True)
         if audio:
@@ -366,9 +315,5 @@ async def tts(req: TTSRequest):
         if audio:
             return TTSResponse(ok=True, audio_base64=audio, provider_used="auto-clone")
 
-    # 5) Son fallback Google kadın sesi
-    audio = await google_tts(text, req.lang, "female")
-    if audio:
-        return TTSResponse(ok=True, audio_base64=audio, provider_used="google")
-
+    # 5) Ücretsiz / cihaz TTS fallback için backend boş dönsün
     return TTSResponse(ok=False, error="TTS_UNAVAILABLE")
