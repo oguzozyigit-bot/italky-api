@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -43,6 +44,14 @@ class GenReq(BaseModel):
     lang: str = Field("en", min_length=2, max_length=16)
 
 
+class EnsureExamAccessReq(BaseModel):
+    user_id: str = Field(..., min_length=6)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _norm_lang(lang: str) -> str:
     return (lang or "en").strip().lower()
 
@@ -68,7 +77,6 @@ def validate_questions_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(qs, list):
         raise ValueError("questions is not a list")
 
-    # ✅ burası kritik: dosyalar 50 soru olmalı
     if len(qs) != 50:
         raise ValueError(f"questions length must be 50, got {len(qs)}")
 
@@ -109,6 +117,103 @@ async def load_test_from_public_storage(lang: str) -> Dict[str, Any]:
     return doc
 
 
+@router.post("/level_test/ensure_access")
+async def ensure_level_test_access(req: EnsureExamAccessReq):
+    user_id = req.user_id.strip()
+    now = _utc_now()
+    now_iso = now.isoformat()
+
+    # 1) Aktif 7 günlük erişim var mı?
+    try:
+        access_row = (
+            sb_admin.table("level_exam_access")
+            .select("id, starts_at, ends_at, token_spent")
+            .eq("user_id", user_id)
+            .eq("access_type", "level_test")
+            .gt("ends_at", now_iso)
+            .order("ends_at", desc=True)
+            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as e:
+        logger.exception("LEVEL_TEST_ACCESS_READ_FAIL %s", e)
+        raise HTTPException(status_code=500, detail=f"access read failed: {str(e)}")
+
+    if access_row.data:
+        return {
+            "ok": True,
+            "access_open": True,
+            "used_token": False,
+            "valid_until": access_row.data.get("ends_at"),
+            "message": "existing_access_active"
+        }
+
+    # 2) Kullanıcının jetonunu oku
+    try:
+        prof = (
+            sb_admin.table("profiles")
+            .select("id,tokens")
+            .eq("id", user_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as e:
+        logger.exception("LEVEL_TEST_PROFILE_READ_FAIL %s", e)
+        raise HTTPException(status_code=500, detail=f"profile read failed: {str(e)}")
+
+    if not prof.data:
+        raise HTTPException(status_code=404, detail="user profile not found")
+
+    current_tokens = int(prof.data.get("tokens") or 0)
+
+    # 3) Jeton yoksa reddet
+    if current_tokens < 1:
+        return {
+            "ok": False,
+            "access_open": False,
+            "reason": "INSUFFICIENT_TOKENS",
+            "required_tokens": 1,
+            "tokens": current_tokens,
+            "message": "level_test_requires_1_token_for_7_days"
+        }
+
+    new_tokens = current_tokens - 1
+    ends_at = (now + timedelta(days=7)).isoformat()
+
+    # 4) Jeton düş
+    try:
+        sb_admin.table("profiles").update({
+            "tokens": new_tokens
+        }).eq("id", user_id).execute()
+    except Exception as e:
+        logger.exception("LEVEL_TEST_TOKEN_UPDATE_FAIL %s", e)
+        raise HTTPException(status_code=500, detail=f"token update failed: {str(e)}")
+
+    # 5) 7 günlük erişim aç
+    try:
+        sb_admin.table("level_exam_access").insert({
+            "user_id": user_id,
+            "access_type": "level_test",
+            "token_spent": 1,
+            "starts_at": now_iso,
+            "ends_at": ends_at
+        }).execute()
+    except Exception as e:
+        logger.exception("LEVEL_TEST_ACCESS_INSERT_FAIL %s", e)
+        raise HTTPException(status_code=500, detail=f"access insert failed: {str(e)}")
+
+    return {
+        "ok": True,
+        "access_open": True,
+        "used_token": True,
+        "required_tokens": 1,
+        "tokens_after": new_tokens,
+        "valid_until": ends_at,
+        "message": "level_test_access_opened_for_7_days"
+    }
+
+
 @router.post("/level_test/generate")
 async def generate_level_test(req: GenReq):
     test_id = req.test_id.strip()
@@ -130,12 +235,10 @@ async def generate_level_test(req: GenReq):
     if not row.data:
         raise HTTPException(status_code=404, detail="test not found")
 
-    # language_code null olabiliyor sende -> düzelt
     db_lang = _norm_lang(row.data.get("language_code") or lang or "en")
 
     # 2) DB’de questions varsa çık
     if row.data.get("questions"):
-        # language_code da null kalmasın diye minik düzeltme
         if not row.data.get("language_code"):
             try:
                 sb_admin.table("level_tests").update({"language_code": db_lang}).eq("id", test_id).execute()
