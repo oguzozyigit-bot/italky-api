@@ -14,6 +14,7 @@ from app.routers.session import router as session_router
 from app.routers.practice_ai import router as practice_ai_router
 from app.routers.license import router as license_router
 from app.routers.delete_account import router as delete_account_router
+from app.routers.nfc_tokens import router as nfc_tokens_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
@@ -115,6 +116,7 @@ app.include_router(voice_enroll_router, prefix="/api")
 app.include_router(chat_ai_router, prefix="/api")
 app.include_router(onetoall_ws_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
+app.include_router(nfc_tokens_router, prefix="/api")
 
 app.include_router(nfc_router)
 app.include_router(session_router)
