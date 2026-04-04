@@ -52,15 +52,6 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _parse_dt(v: Any):
-    if not v:
-      return None
-    try:
-        return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
 def _extract_bearer(request: Request) -> str:
     auth = str(request.headers.get("Authorization") or "").strip()
     if not auth.lower().startswith("bearer "):
@@ -241,13 +232,13 @@ def _parse_model_fields(raw_text: str) -> dict | None:
     reply = _extract_block(raw_text, "REPLY")
     reply_tr = _extract_block(raw_text, "REPLY_TR")
     target_phrase = _extract_block(raw_text, "TARGET_PHRASE")
+    repeat_hint_tr = _extract_block(raw_text, "REPEAT_HINT_TR")
     should_repeat_raw = _extract_block(raw_text, "SHOULD_REPEAT").lower()
     lesson_stage = _extract_block(raw_text, "LESSON_STAGE")
     level_estimate = _extract_block(raw_text, "LEVEL_ESTIMATE")
     topic = _extract_block(raw_text, "TOPIC")
-    repeat_hint_tr = _extract_block(raw_text, "REPEAT_HINT_TR")
 
-    if not reply and not reply_tr and not target_phrase and not lesson_stage:
+    if not reply:
         return None
 
     return {
@@ -379,37 +370,50 @@ def _call_gemini_teacher(final_prompt: str) -> str:
     return raw_text
 
 
-def _provider_reply(final_prompt: str) -> str:
-    gemini_error: Exception | None = None
-    openai_error: Exception | None = None
+def _looks_quality_reply(raw_text: str) -> bool:
+    txt = str(raw_text or "").strip()
+    if not txt:
+        return False
+    if len(txt) < 40:
+        return False
+    if txt.endswith(("Hello Oğuz!", "Hello Oğuz! It", "Hello Oğuz! Nice", "Merhaba Oğ", "That's a city in")):
+        return False
+    if "REPLY:" not in txt:
+        return False
+    return True
 
-    # Gemini birinci tercih
+
+def _provider_reply(final_prompt: str) -> str:
+    openai_error: Exception | None = None
+    gemini_error: Exception | None = None
+
+    if OPENAI_API_KEY:
+        try:
+            raw = _call_openai_teacher(final_prompt)
+            if _looks_quality_reply(raw):
+                return raw
+            print("OPENAI QUALITY REJECT:", repr(raw))
+        except Exception as e:
+            print("OPENAI PRIMARY ERROR:", repr(e))
+            openai_error = e
+
     if GEMINI_API_KEY:
         try:
             raw = _call_gemini_teacher(final_prompt)
-            if raw:
+            if _looks_quality_reply(raw):
                 return raw
+            print("GEMINI QUALITY REJECT:", repr(raw))
         except ResourceExhausted as e:
             print("GEMINI QUOTA ERROR:", repr(e))
             gemini_error = e
         except Exception as e:
-            print("GEMINI ERROR:", repr(e))
+            print("GEMINI FALLBACK ERROR:", repr(e))
             gemini_error = e
-
-    # Gemini yoksa / hata verirse OpenAI
-    if OPENAI_API_KEY:
-        try:
-            raw = _call_openai_teacher(final_prompt)
-            if raw:
-                return raw
-        except Exception as e:
-            print("OPENAI FALLBACK ERROR:", repr(e))
-            openai_error = e
 
     if isinstance(gemini_error, ResourceExhausted):
         raise HTTPException(status_code=429, detail="practice_ai_temporarily_busy")
 
-    if gemini_error or openai_error:
+    if openai_error or gemini_error:
         raise HTTPException(status_code=502, detail="practice_ai_provider_failed")
 
     raise HTTPException(status_code=502, detail="practice_ai_no_provider_available")
@@ -423,18 +427,16 @@ def _postprocess_teacher_output(parsed: dict, score_value: Any, display_name: st
     should_repeat = bool(parsed.get("should_repeat"))
     lesson_stage = str(parsed.get("lesson_stage") or "practice").strip() or "practice"
 
-    # İsim kullanımını gevşet
     if not first_turn and display_name:
         patterns = [
-            rf"^\s*{re.escape(display_name)}[\s,:!.-]+",
-            rf"^\s*merhaba\s+{re.escape(display_name)}[\s,:!.-]+",
-            rf"^\s*hi\s+{re.escape(display_name)}[\s,:!.-]+",
-            rf"^\s*hello\s+{re.escape(display_name)}[\s,:!.-]+",
+            rf"^\s*{re.escape(display_name)}[\s,:!.\-]+",
+            rf"^\s*merhaba\s+{re.escape(display_name)}[\s,:!.\-]+",
+            rf"^\s*hello\s+{re.escape(display_name)}[\s,:!.\-]+",
+            rf"^\s*hi\s+{re.escape(display_name)}[\s,:!.\-]+",
         ]
         for p in patterns:
             reply = re.sub(p, "", reply, flags=re.IGNORECASE).strip()
 
-    # 95 ve üzeri ise tekrar döngüsünü kapat
     try:
         score_num = float(score_value) if score_value is not None else None
     except Exception:
@@ -504,27 +506,29 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"REPLY: <teacher visible reply in target language only>\n"
         f"REPLY_TR: <short Turkish meaning>\n"
         f"TARGET_PHRASE: <exact phrase to repeat if needed>\n"
-        f"REPEAT_HINT_TR: <very short Turkish hint for what to repeat>\n"
+        f"REPEAT_HINT_TR: <very short Turkish hint for the repeat phrase>\n"
         f"SHOULD_REPEAT: <true or false>\n"
         f"LESSON_STAGE: <placement or practice or repeat or correction>\n"
         f"LEVEL_ESTIMATE: <A1 or A2 or B1 or B2 or C1 if possible>\n"
         f"TOPIC: <very short topic name>\n\n"
         f"Teacher behavior rules:\n"
-        f"- Sound like a warm real language teacher, not a robot.\n"
-        f"- Be short, natural, lively, encouraging.\n"
-        f"- Use the student's name only in the first greeting or occasional motivation, not in every reply.\n"
-        f"- After the first greeting, talk more naturally without repeating the name.\n"
-        f"- You may sometimes ask a tiny riddle, mini quiz, funny vocabulary check, or playful challenge.\n"
-        f"- Do not make every turn a full-sentence repetition task.\n"
-        f"- For beginner students, single words or short answers are acceptable.\n"
-        f"- If pronunciation is below 95, keep the same phrase and ask for repetition gently.\n"
-        f"- If pronunciation is 95 or higher, move on. Do not keep repeating the same phrase.\n"
-        f"- Use supportive lines like: very close, nice try, great, one small fix, let's try once more.\n"
-        f"- The first reply should include a greeting + a simple teaching move.\n"
-        f"- Do not only say hello and stop.\n"
-        f"- Keep the lesson flowing.\n"
-        f"- Do not return JSON.\n"
+        f"- You are the teacher inside italkyAI.\n"
+        f"- Never mention OpenAI, Gemini, AI, model, API, provider or any external company.\n"
+        f"- Never discuss politics, sex, news, profanity, insults, crime, religion, hacking, finance, medicine or unrelated topics.\n"
+        f"- Stay inside the lesson.\n"
+        f"- Sound warm, natural, cheerful and human.\n"
+        f"- Be a little relaxed and motivating, not robotic.\n"
+        f"- Use the student's name only in the first greeting or occasional praise, not in every reply.\n"
+        f"- The first reply must greet and immediately continue the lesson with a question or task.\n"
+        f"- Do not stop after greeting.\n"
+        f"- You may sometimes ask a tiny riddle, mini quiz or playful vocabulary challenge, but always inside the lesson.\n"
+        f"- For beginners, a single word or short answer is acceptable.\n"
+        f"- If pronunciation is below 95, gently repeat the same phrase.\n"
+        f"- If pronunciation is 95 or above, move on.\n"
+        f"- Keep replies natural and complete.\n"
+        f"- Do not return only a greeting.\n"
         f"- Do not wrap the answer in markdown.\n"
+        f"- Do not return JSON.\n"
     )
 
     print("FINAL PROMPT READY")
