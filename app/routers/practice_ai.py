@@ -54,7 +54,7 @@ def _now_utc() -> datetime:
 
 def _parse_dt(v: Any):
     if not v:
-        return None
+      return None
     try:
         return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
     except Exception:
@@ -143,67 +143,6 @@ def _profile_tokens(profile: dict) -> int:
         return int(profile.get("tokens") or 0)
     except Exception:
         return 0
-
-
-def _profile_membership_code(profile: dict) -> str:
-    selected_code = str(profile.get("selected_package_code") or "").strip().lower()
-    if selected_code:
-        return selected_code
-
-    plan = str(profile.get("plan") or "").strip().lower()
-    if plan:
-        return plan
-
-    nfc_code = str(profile.get("nfc_package_code") or "").strip().lower()
-    if nfc_code:
-        return nfc_code
-
-    return "none"
-
-
-def _profile_has_paid_access(profile: dict) -> bool:
-    package_active = bool(profile.get("package_active") is True)
-
-    package_ends_at = _parse_dt(profile.get("package_ends_at"))
-    package_valid = bool(package_ends_at and package_ends_at > _now_utc())
-
-    plan = str(profile.get("plan") or "").strip().lower()
-    selected_code = str(profile.get("selected_package_code") or "").strip().lower()
-
-    paid_name_hit = any(
-        key in f"{plan} {selected_code}"
-        for key in ["premium", "edu", "education", "egitim", "translate"]
-    )
-
-    return package_active and (package_valid or paid_name_hit)
-
-
-def _profile_trial_active(profile: dict) -> bool:
-    if _profile_has_paid_access(profile):
-        return False
-
-    trial_ends_at = _parse_dt(profile.get("trial_ends_at"))
-    if trial_ends_at and trial_ends_at > _now_utc():
-        return True
-
-    return False
-
-
-def _profile_can_practice(profile: dict) -> bool:
-    if not _profile_has_paid_access(profile):
-        return False
-
-    plan = str(profile.get("plan") or "").strip().lower()
-    selected_code = str(profile.get("selected_package_code") or "").strip().lower()
-    combo = f"{plan} {selected_code}"
-
-    if "translate" in combo:
-        return False
-
-    if any(k in combo for k in ["premium", "edu", "education", "egitim"]):
-        return True
-
-    return False
 
 
 def _load_memory(user_id: str, lang: str) -> dict | None:
@@ -306,6 +245,7 @@ def _parse_model_fields(raw_text: str) -> dict | None:
     lesson_stage = _extract_block(raw_text, "LESSON_STAGE")
     level_estimate = _extract_block(raw_text, "LEVEL_ESTIMATE")
     topic = _extract_block(raw_text, "TOPIC")
+    repeat_hint_tr = _extract_block(raw_text, "REPEAT_HINT_TR")
 
     if not reply and not reply_tr and not target_phrase and not lesson_stage:
         return None
@@ -314,6 +254,7 @@ def _parse_model_fields(raw_text: str) -> dict | None:
         "reply": reply,
         "reply_tr": reply_tr,
         "target_phrase": target_phrase,
+        "repeat_hint_tr": repeat_hint_tr,
         "should_repeat": should_repeat_raw in ("true", "1", "yes"),
         "lesson_stage": lesson_stage or "practice",
         "level_estimate": level_estimate,
@@ -334,6 +275,13 @@ def _fallback_tr(reply: str, lang: str) -> str:
         return "Öğretmen konuşuyor."
 
     return f"Öğretmen {lang_name} konuşuyor ve dersi yönlendiriyor."
+
+
+def _fallback_repeat_hint(target_phrase: str) -> str:
+    clean = str(target_phrase or "").strip()
+    if not clean:
+        return ""
+    return f"Şunu tekrar et: {clean}"
 
 
 def _openai_extract_output_text(payload: dict) -> str:
@@ -360,6 +308,9 @@ def _openai_extract_output_text(payload: dict) -> str:
 
 
 def _call_openai_teacher(final_prompt: str) -> str:
+    if not OPENAI_API_KEY:
+        return ""
+
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json",
@@ -419,8 +370,8 @@ def _call_gemini_teacher(final_prompt: str) -> str:
     resp = model.generate_content(
         final_prompt,
         generation_config={
-            "temperature": 0.45,
-            "max_output_tokens": 180,
+            "temperature": 0.55,
+            "max_output_tokens": 220,
         },
     )
     raw_text = _extract_text_from_gemini_response(resp)
@@ -428,89 +379,84 @@ def _call_gemini_teacher(final_prompt: str) -> str:
     return raw_text
 
 
-def _insert_wallet_tx(user_id: str, amount: int, reason: str, meta: dict):
-    return supabase.table("wallet_tx").insert(
-        {
-            "user_id": user_id,
-            "type": "usage_teacher",
-            "amount": amount,
-            "reason": reason,
-            "meta": meta,
-        }
-    ).execute()
+def _provider_reply(final_prompt: str) -> str:
+    gemini_error: Exception | None = None
+    openai_error: Exception | None = None
+
+    # Gemini birinci tercih
+    if GEMINI_API_KEY:
+        try:
+            raw = _call_gemini_teacher(final_prompt)
+            if raw:
+                return raw
+        except ResourceExhausted as e:
+            print("GEMINI QUOTA ERROR:", repr(e))
+            gemini_error = e
+        except Exception as e:
+            print("GEMINI ERROR:", repr(e))
+            gemini_error = e
+
+    # Gemini yoksa / hata verirse OpenAI
+    if OPENAI_API_KEY:
+        try:
+            raw = _call_openai_teacher(final_prompt)
+            if raw:
+                return raw
+        except Exception as e:
+            print("OPENAI FALLBACK ERROR:", repr(e))
+            openai_error = e
+
+    if isinstance(gemini_error, ResourceExhausted):
+        raise HTTPException(status_code=429, detail="practice_ai_temporarily_busy")
+
+    if gemini_error or openai_error:
+        raise HTTPException(status_code=502, detail="practice_ai_provider_failed")
+
+    raise HTTPException(status_code=502, detail="practice_ai_no_provider_available")
 
 
-def _commit_practice_text_usage(user_id: str, profile: dict, input_text: str, output_text: str) -> int:
-    text_before = int(profile.get("char_text_remaining") or 0)
-    tokens_before = int(profile.get("tokens") or 0)
+def _postprocess_teacher_output(parsed: dict, score_value: Any, display_name: str, first_turn: bool) -> dict:
+    reply = str(parsed.get("reply") or "").strip()
+    reply_tr = str(parsed.get("reply_tr") or "").strip()
+    target_phrase = str(parsed.get("target_phrase") or "").strip()
+    repeat_hint_tr = str(parsed.get("repeat_hint_tr") or "").strip()
+    should_repeat = bool(parsed.get("should_repeat"))
+    lesson_stage = str(parsed.get("lesson_stage") or "practice").strip() or "practice"
 
-    in_len = len(str(input_text or "").strip())
-    out_len = len(str(output_text or "").strip())
-    billable_chars = max(in_len, out_len)
+    # İsim kullanımını gevşet
+    if not first_turn and display_name:
+        patterns = [
+            rf"^\s*{re.escape(display_name)}[\s,:!.-]+",
+            rf"^\s*merhaba\s+{re.escape(display_name)}[\s,:!.-]+",
+            rf"^\s*hi\s+{re.escape(display_name)}[\s,:!.-]+",
+            rf"^\s*hello\s+{re.escape(display_name)}[\s,:!.-]+",
+        ]
+        for p in patterns:
+            reply = re.sub(p, "", reply, flags=re.IGNORECASE).strip()
 
-    if billable_chars <= 0:
-        return tokens_before
+    # 95 ve üzeri ise tekrar döngüsünü kapat
+    try:
+        score_num = float(score_value) if score_value is not None else None
+    except Exception:
+        score_num = None
 
-    charged_tokens = 0
+    if score_num is not None and score_num >= 95:
+        should_repeat = False
+        target_phrase = ""
+        repeat_hint_tr = ""
+        if lesson_stage in ("repeat", "correction"):
+            lesson_stage = "practice"
 
-    if text_before == 0:
-        charged_tokens += 1
+    if target_phrase and not repeat_hint_tr:
+        repeat_hint_tr = _fallback_repeat_hint(target_phrase)
 
-    old_step = text_before // 3000
-    new_total = text_before + billable_chars
-    new_step = new_total // 3000
-
-    if new_step > old_step:
-        charged_tokens += (new_step - old_step)
-
-    tokens_after = tokens_before - charged_tokens
-    if tokens_after < 0:
-        raise HTTPException(status_code=402, detail="insufficient_tokens")
-
-    supabase.table("profiles").update({
-        "tokens": tokens_after,
-        "char_text_remaining": new_total
-    }).eq("id", user_id).execute()
-
-    temp_balance = tokens_before
-
-    if text_before == 0:
-        temp_balance -= 1
-        _insert_wallet_tx(
-            user_id=user_id,
-            amount=-1,
-            reason="Jetonlu model kullanımı • Practice AI",
-            meta={
-                "module": "practice_ai",
-                "usage_kind": "text",
-                "charge_type": "startup",
-                "input_chars": in_len,
-                "output_chars": out_len,
-                "billable_chars": billable_chars,
-                "balance_after": temp_balance
-            }
-        )
-
-    if new_step > old_step:
-        for i in range(new_step - old_step):
-            temp_balance -= 1
-            _insert_wallet_tx(
-                user_id=user_id,
-                amount=-1,
-                reason="Jetonlu model kullanımı • Practice AI",
-                meta={
-                    "module": "practice_ai",
-                    "usage_kind": "text",
-                    "charge_type": "3000_step",
-                    "step_index": i + 1,
-                    "input_chars": in_len,
-                    "output_chars": out_len,
-                    "billable_chars": billable_chars,
-                    "balance_after": temp_balance
-                }
-            )
-
-    return tokens_after
+    parsed["reply"] = reply
+    parsed["reply_tr"] = reply_tr
+    parsed["target_phrase"] = target_phrase
+    parsed["repeat_hint_tr"] = repeat_hint_tr
+    parsed["should_repeat"] = should_repeat
+    parsed["lesson_stage"] = lesson_stage
+    return parsed
 
 
 @router.post("/api/practice/chat")
@@ -530,28 +476,22 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     if not profile:
         raise HTTPException(status_code=404, detail="profile_not_found")
 
-    membership_code = _profile_membership_code(profile)
-    trial_active = _profile_trial_active(profile)
-    can_practice = _profile_can_practice(profile)
+    tokens = _profile_tokens(profile)
 
     print("USER:", getattr(user, "id", None))
     print("DISPLAY_NAME:", _display_name(profile))
-    print("MEMBERSHIP_CODE:", membership_code)
-    print("TRIAL_ACTIVE:", trial_active)
-    print("CAN_PRACTICE:", can_practice)
+    print("TOKENS:", tokens)
 
-    if trial_active:
-        raise HTTPException(status_code=403, detail="practice_ai_closed_for_trial")
-
-    if "translate" in membership_code:
-        raise HTTPException(status_code=403, detail="practice_ai_closed_for_translate")
-
-    if not can_practice:
-        raise HTTPException(status_code=403, detail="practice_ai_requires_education_or_premium")
+    if tokens <= 0:
+        raise HTTPException(status_code=402, detail="insufficient_tokens")
 
     display_name = _display_name(profile)
     profile_level = _profile_level_for_lang(profile, body.lang)
     memory = _load_memory(user.id, body.lang)
+
+    score_match = re.search(r"Pronunciation score:\s*([0-9]+(?:\.[0-9]+)?)", body.prompt or "", flags=re.IGNORECASE)
+    score_value = float(score_match.group(1)) if score_match else None
+    first_turn = not str(body.prompt or "").strip()
 
     final_prompt = (
         f"{body.system_prompt}\n\n"
@@ -564,19 +504,25 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"REPLY: <teacher visible reply in target language only>\n"
         f"REPLY_TR: <short Turkish meaning>\n"
         f"TARGET_PHRASE: <exact phrase to repeat if needed>\n"
+        f"REPEAT_HINT_TR: <very short Turkish hint for what to repeat>\n"
         f"SHOULD_REPEAT: <true or false>\n"
         f"LESSON_STAGE: <placement or practice or repeat or correction>\n"
         f"LEVEL_ESTIMATE: <A1 or A2 or B1 or B2 or C1 if possible>\n"
         f"TOPIC: <very short topic name>\n\n"
-        f"Important teacher behavior:\n"
-        f"- Do not just say hello and stop.\n"
-        f"- The teacher must always lead the lesson.\n"
-        f"- The teacher must always continue with one clear question or one clear task.\n"
-        f"- The first reply must include greeting + topic + question.\n"
-        f"- Example: Hello Oğuz. Today we practice introductions. What is your name?\n"
-        f"- Keep replies natural and short-to-medium.\n"
-        f"- 2 or 3 short sentences are allowed.\n"
-        f"- If pronunciation is below 95, keep the student on the same phrase.\n"
+        f"Teacher behavior rules:\n"
+        f"- Sound like a warm real language teacher, not a robot.\n"
+        f"- Be short, natural, lively, encouraging.\n"
+        f"- Use the student's name only in the first greeting or occasional motivation, not in every reply.\n"
+        f"- After the first greeting, talk more naturally without repeating the name.\n"
+        f"- You may sometimes ask a tiny riddle, mini quiz, funny vocabulary check, or playful challenge.\n"
+        f"- Do not make every turn a full-sentence repetition task.\n"
+        f"- For beginner students, single words or short answers are acceptable.\n"
+        f"- If pronunciation is below 95, keep the same phrase and ask for repetition gently.\n"
+        f"- If pronunciation is 95 or higher, move on. Do not keep repeating the same phrase.\n"
+        f"- Use supportive lines like: very close, nice try, great, one small fix, let's try once more.\n"
+        f"- The first reply should include a greeting + a simple teaching move.\n"
+        f"- Do not only say hello and stop.\n"
+        f"- Keep the lesson flowing.\n"
         f"- Do not return JSON.\n"
         f"- Do not wrap the answer in markdown.\n"
     )
@@ -584,25 +530,7 @@ async def practice_chat(body: PracticeChatBody, request: Request):
     print("FINAL PROMPT READY")
 
     try:
-        raw_text = ""
-
-        if OPENAI_API_KEY:
-            try:
-                raw_text = _call_openai_teacher(final_prompt)
-            except Exception as e:
-                print("OPENAI PRIMARY ERROR:", repr(e))
-                raw_text = ""
-
-        if not raw_text:
-            try:
-                raw_text = _call_gemini_teacher(final_prompt)
-            except ResourceExhausted as e:
-                print("GEMINI FALLBACK QUOTA ERROR:", repr(e))
-                raise HTTPException(status_code=429, detail="practice_ai_temporarily_busy")
-            except Exception as e:
-                print("GEMINI FALLBACK ERROR:", repr(e))
-                raw_text = ""
-
+        raw_text = _provider_reply(final_prompt)
         parsed = _parse_model_fields(raw_text)
         print("PARSED MODEL FIELDS:", parsed)
 
@@ -621,6 +549,7 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         parsed["reply"] = reply
         parsed["reply_tr"] = reply_tr
         parsed["target_phrase"] = str(parsed.get("target_phrase") or "").strip()
+        parsed["repeat_hint_tr"] = str(parsed.get("repeat_hint_tr") or "").strip()
         parsed["should_repeat"] = bool(parsed.get("should_repeat"))
         parsed["lesson_stage"] = str(parsed.get("lesson_stage") or "practice").strip()
 
@@ -632,11 +561,11 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         if any(term in low for term in bad_terms):
             raise HTTPException(status_code=502, detail="practice_ai_blocked_model_reply")
 
-        tokens_after = _commit_practice_text_usage(
-            user_id=user.id,
-            profile=profile,
-            input_text=body.prompt,
-            output_text=reply
+        parsed = _postprocess_teacher_output(
+            parsed=parsed,
+            score_value=score_value,
+            display_name=display_name,
+            first_turn=first_turn
         )
 
         try:
@@ -655,7 +584,7 @@ async def practice_chat(body: PracticeChatBody, request: Request):
 
         return {
             "ok": True,
-            "tokens_after": tokens_after,
+            "tokens_after": tokens,
             "text": json.dumps(parsed, ensure_ascii=False),
         }
 
