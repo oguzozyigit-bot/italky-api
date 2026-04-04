@@ -87,31 +87,20 @@ def _display_name(profile: dict) -> str:
     if full_name:
         return full_name.split(" ")[0]
 
-    name = str(profile.get("name") or "").strip()
-    if name:
-        return name.split(" ")[0]
-
     teacher_prefs = profile.get("teacher_prefs") or {}
-    if isinstance(teacher_prefs, dict) and teacher_prefs:
-        numeric_keys = []
-        other_keys = []
-
+    if isinstance(teacher_prefs, dict):
+        latest_numeric = []
         for k, v in teacher_prefs.items():
             if not isinstance(v, dict):
                 continue
             try:
-                numeric_keys.append((int(str(k)), v))
+                latest_numeric.append((int(str(k)), v))
             except Exception:
-                other_keys.append(v)
+                pass
 
-        if numeric_keys:
-            numeric_keys.sort(key=lambda x: x[0], reverse=True)
-            hitap = str(numeric_keys[0][1].get("student_hitap") or "").strip()
-            if hitap:
-                return hitap
-
-        for v in other_keys:
-            hitap = str(v.get("student_hitap") or "").strip()
+        if latest_numeric:
+            latest_numeric.sort(key=lambda x: x[0], reverse=True)
+            hitap = str(latest_numeric[0][1].get("student_hitap") or "").strip()
             if hitap:
                 return hitap
 
@@ -339,14 +328,14 @@ def _extract_text_from_gemini_response(resp) -> str:
     try:
         candidates = getattr(resp, "candidates", None) or []
         if candidates:
-            content = getattr(candidates[0], "content", None)
-            parts = getattr(content, "parts", None) or []
-            chunks = []
-            for p in parts:
-                t = getattr(p, "text", None)
-                if t:
-                    chunks.append(t)
-            return "".join(chunks).strip()
+          content = getattr(candidates[0], "content", None)
+          parts = getattr(content, "parts", None) or []
+          chunks = []
+          for p in parts:
+              t = getattr(p, "text", None)
+              if t:
+                  chunks.append(t)
+          return "".join(chunks).strip()
     except Exception:
         pass
 
@@ -374,12 +363,31 @@ def _looks_quality_reply(raw_text: str) -> bool:
     txt = str(raw_text or "").strip()
     if not txt:
         return False
-    if len(txt) < 40:
-        return False
-    if txt.endswith(("Hello Oğuz!", "Hello Oğuz! It", "Hello Oğuz! Nice", "Merhaba Oğ", "That's a city in")):
-        return False
     if "REPLY:" not in txt:
         return False
+
+    parsed = _parse_model_fields(txt)
+    if not parsed:
+        return False
+
+    reply = str(parsed.get("reply") or "").strip()
+    reply_tr = str(parsed.get("reply_tr") or "").strip()
+
+    if len(reply) < 18:
+        return False
+    if len(reply_tr) < 4:
+        return False
+
+    bad_exact = {
+        "Hello Oğuz!",
+        "Hello Oğuz! It",
+        "Hello Oğuz! Nice",
+        "Merhaba Oğ",
+        "That's a city in",
+    }
+    if reply in bad_exact:
+        return False
+
     return True
 
 
@@ -499,33 +507,40 @@ async def practice_chat(body: PracticeChatBody, request: Request):
         f"{body.system_prompt}\n\n"
         f"Student display name: {display_name or 'student'}\n"
         f"Profile level for selected language: {profile_level or 'unknown'}\n"
+        f"Selected target language code: {body.lang}\n"
         f"{_summarize_memory_for_prompt(memory)}\n\n"
         f"{body.prompt}\n\n"
         f"Important output rule:\n"
         f"Return plain text only in exactly this format:\n"
         f"REPLY: <teacher visible reply in target language only>\n"
-        f"REPLY_TR: <short Turkish meaning>\n"
+        f"REPLY_TR: <short Turkish meaning of teacher reply>\n"
         f"TARGET_PHRASE: <exact phrase to repeat if needed>\n"
-        f"REPEAT_HINT_TR: <very short Turkish hint for the repeat phrase>\n"
+        f"REPEAT_HINT_TR: <short Turkish meaning of TARGET_PHRASE>\n"
         f"SHOULD_REPEAT: <true or false>\n"
         f"LESSON_STAGE: <placement or practice or repeat or correction>\n"
         f"LEVEL_ESTIMATE: <A1 or A2 or B1 or B2 or C1 if possible>\n"
         f"TOPIC: <very short topic name>\n\n"
         f"Teacher behavior rules:\n"
         f"- You are the teacher inside italkyAI.\n"
-        f"- Never mention OpenAI, Gemini, AI, model, API, provider or any external company.\n"
-        f"- Never discuss politics, sex, news, profanity, insults, crime, religion, hacking, finance, medicine or unrelated topics.\n"
-        f"- Stay inside the lesson.\n"
-        f"- Sound warm, natural, cheerful and human.\n"
-        f"- Be a little relaxed and motivating, not robotic.\n"
-        f"- Use the student's name only in the first greeting or occasional praise, not in every reply.\n"
-        f"- The first reply must greet and immediately continue the lesson with a question or task.\n"
-        f"- Do not stop after greeting.\n"
-        f"- You may sometimes ask a tiny riddle, mini quiz or playful vocabulary challenge, but always inside the lesson.\n"
-        f"- For beginners, a single word or short answer is acceptable.\n"
-        f"- If pronunciation is below 95, gently repeat the same phrase.\n"
-        f"- If pronunciation is 95 or above, move on.\n"
-        f"- Keep replies natural and complete.\n"
+        f"- The teacher always leads the lesson.\n"
+        f"- The first turn must always come from the teacher.\n"
+        f"- The teacher must always continue the lesson with a question, task, mini challenge or repetition.\n"
+        f"- Never stop after a greeting.\n"
+        f"- Every teacher reply must be in the selected lesson language only.\n"
+        f"- REPLY_TR must always contain the Turkish meaning of the teacher reply.\n"
+        f"- If SHOULD_REPEAT is true, TARGET_PHRASE must be filled in the selected lesson language.\n"
+        f"- If the student speaks in a language other than the selected lesson language, do not continue the lesson normally.\n"
+        f"- In that case, warn the student briefly in the selected lesson language and guide them back.\n"
+        f"- Never answer politics, sex, news, profanity, insults, religion, hacking, crime, medicine, finance, or unrelated topics.\n"
+        f"- Never mention OpenAI, Gemini, AI, model, provider, API, or any external company.\n"
+        f"- You belong only to italkyAI.\n"
+        f"- Sound warm, natural, motivating and slightly playful.\n"
+        f"- Not robotic.\n"
+        f"- Keep replies short and fast.\n"
+        f"- Prefer 1 short sentence + 1 short question.\n"
+        f"- Use the student name only in the first greeting or occasional praise, not in every reply.\n"
+        f"- If pronunciation score is below 95, gently keep the student on the same phrase.\n"
+        f"- If pronunciation score is 95 or above, move on immediately.\n"
         f"- Do not return only a greeting.\n"
         f"- Do not wrap the answer in markdown.\n"
         f"- Do not return JSON.\n"
