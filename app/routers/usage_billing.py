@@ -17,13 +17,14 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-CHARS_PER_JETON = 3000
+DEFAULT_CHARS_PER_JETON = 3000
+PRACTICE_CHARS_PER_JETON = 1500
 
 PAID_TEXT_MODULES = {
     "text_ai",
     "facetoface_ai",
     "eartoear_ai",
-    "practic_ai",
+    "practice_ai",
     "text_translate_paid",
     "culture_translate",
 }
@@ -34,6 +35,7 @@ PAID_VOICE_MODULES = {
     "voice_ai",
     "voice_preset_use",
     "voice_live",
+    "practice_ai",
 }
 
 FREE_VOICE_MODULES = {
@@ -45,9 +47,10 @@ class UsageBillingReq(BaseModel):
     user_id: str = Field(min_length=1)
     module: str = Field(min_length=1)
     char_count: int = Field(gt=0, le=500_000)
-    usage_kind: str = Field(min_length=1)  # text | voice
+    usage_kind: str = Field(min_length=1)  # text | voice | text_in | text_out | voice_out
     note: Optional[str] = None
     meta: Optional[Dict[str, Any]] = None
+    chars_per_jeton: Optional[int] = None
 
 
 def _safe_data(res: Any):
@@ -73,31 +76,44 @@ def _get_profile_or_404(user_id: str) -> Dict[str, Any]:
 
 
 def _normalize_module(module: str) -> str:
-    return str(module or "").strip().lower()
+    value = str(module or "").strip().lower()
+    if value == "practic_ai":
+        return "practice_ai"
+    if value in {"practice", "practiceai"}:
+        return "practice_ai"
+    return value
 
 
 def _normalize_kind(kind: str) -> str:
     value = str(kind or "").strip().lower()
-    if value not in {"text", "voice"}:
+    if value not in {"text", "voice", "text_in", "text_out", "voice_out"}:
         raise HTTPException(status_code=400, detail="invalid usage_kind")
     return value
 
 
 def _counter_field_for_kind(kind: str) -> str:
-    if kind == "text":
+    if kind in {"text", "text_in", "text_out"}:
         return "char_text_remaining"
     return "char_voice_remaining"
 
 
 def _wallet_type_for(module: str, kind: str) -> str:
-    if kind == "voice":
+    if module == "practice_ai":
+        if kind == "text_in":
+            return "usage_teacher"
+        if kind == "text_out":
+            return "usage_teacher"
+        if kind in {"voice", "voice_out"}:
+            return "usage_teacher"
+        return "usage_teacher"
+
+    if kind in {"voice", "voice_out"}:
         return "usage_voice"
 
     mapping = {
         "text_ai": "usage_text",
         "facetoface_ai": "usage_face_to_face",
         "eartoear_ai": "usage_side_to_side",
-        "practic_ai": "usage_teacher",
         "text_translate_paid": "usage_text",
         "culture_translate": "usage_text",
     }
@@ -108,10 +124,10 @@ def _requires_billing(module: str, kind: str) -> bool:
     if module in FREE_VOICE_MODULES:
         return False
 
-    if kind == "text":
+    if kind in {"text", "text_in", "text_out"}:
         return module in PAID_TEXT_MODULES
 
-    if kind == "voice":
+    if kind in {"voice", "voice_out"}:
         return module in PAID_VOICE_MODULES
 
     return False
@@ -141,30 +157,43 @@ def _update_profile_fields(user_id: str, payload: Dict[str, Any]):
     return supabase.table("profiles").update(payload).eq("id", user_id).execute()
 
 
-def _reason_for(module: str, kind: str, startup: bool, char_count: int) -> str:
-    if kind == "voice":
-        if module == "voice_clone_preview":
-            return "Jetonlu model kullanımı • Kendi Sesim Önizleme"
-        if module == "voice_preset_use":
-            return "Jetonlu model kullanımı • Özel Ses"
-        if module == "voice_clone":
-            return "Jetonlu model kullanımı • Kendi Sesim"
-        if startup:
-            return f"Jetonlu model kullanımı • Ses ({char_count} karakter)"
-        return f"Jetonlu model kullanımı • Ses ({char_count} karakter)"
+def _reason_for(module: str, kind: str) -> str:
+    if module == "practice_ai":
+        if kind == "text_in":
+            return "Practice AI • Öğrenci konuşması"
+        if kind == "text_out":
+            return "Practice AI • Öğretmen cevabı"
+        if kind in {"voice", "voice_out"}:
+            return "Practice AI • Öğretmen sesi"
+        return "Practice AI"
 
-    if module == "practic_ai":
-        return "Jetonlu model kullanımı • Practice AI"
-    if module in {"text_ai", "culture_translate", "text_translate_paid"}:
-        return "Jetonlu model kullanımı • Kültürel Translate"
+    if module == "voice_clone_preview":
+        return "Kendi Sesim Önizleme"
+    if module == "voice_preset_use":
+        return "Özel Ses"
+    if module == "voice_clone":
+        return "Kendi Sesim"
+    if module == "text_ai":
+        return "Kültürel Translate"
     if module == "facetoface_ai":
-        return "Jetonlu model kullanımı • FaceToFace"
+        return "FaceToFace"
     if module == "eartoear_ai":
-        return "Jetonlu model kullanımı • SideToSide"
+        return "SideToSide"
 
-    if startup:
-        return f"Jetonlu model kullanımı ({char_count} karakter)"
-    return f"Jetonlu model kullanımı ({char_count} karakter)"
+    if kind in {"voice", "voice_out"}:
+        return "Ses Kullanımı"
+
+    return "Jeton Kullanımı"
+
+
+def _resolve_chars_per_jeton(module: str, req_value: Optional[int]) -> int:
+    if req_value and int(req_value) > 0:
+        return int(req_value)
+
+    if module == "practice_ai":
+        return PRACTICE_CHARS_PER_JETON
+
+    return DEFAULT_CHARS_PER_JETON
 
 
 @router.post("/api/usage/commit")
@@ -176,6 +205,7 @@ async def usage_commit(req: UsageBillingReq):
     module = _normalize_module(req.module)
     usage_kind = _normalize_kind(req.usage_kind)
     char_count = int(req.char_count or 0)
+    chars_per_jeton = _resolve_chars_per_jeton(module, req.chars_per_jeton)
 
     if char_count <= 0:
         raise HTTPException(status_code=422, detail="char_count required")
@@ -185,14 +215,13 @@ async def usage_commit(req: UsageBillingReq):
     if bool(profile.get("blocked")):
         raise HTTPException(status_code=403, detail="user blocked")
 
-    # ücretsiz preview ise sadece log
     if not _requires_billing(module, usage_kind):
         try:
             _insert_wallet_tx(
                 user_id=user_id,
                 tx_type=_wallet_type_for(module, usage_kind),
                 amount=0,
-                reason=req.note or f"Ücretsiz kullanım: {module}",
+                reason=req.note or _reason_for(module, usage_kind),
                 meta={
                     "module": module,
                     "usage_kind": usage_kind,
@@ -219,13 +248,12 @@ async def usage_commit(req: UsageBillingReq):
 
     charged_tokens = 0
 
-    # ilk kullanımda 1 jeton peşin
     if consumed_chars == 0:
         charged_tokens += 1
 
-    old_step = consumed_chars // CHARS_PER_JETON
+    old_step = consumed_chars // chars_per_jeton
     new_total = consumed_chars + char_count
-    new_step = new_total // CHARS_PER_JETON
+    new_step = new_total // chars_per_jeton
 
     if new_step > old_step:
         charged_tokens += (new_step - old_step)
@@ -253,8 +281,8 @@ async def usage_commit(req: UsageBillingReq):
     if charged_tokens > 0:
         temp_balance = tokens_before
         first_consumed = consumed_chars == 0
-        old_step2 = consumed_chars // CHARS_PER_JETON
-        new_step2 = new_total // CHARS_PER_JETON
+        old_step2 = consumed_chars // chars_per_jeton
+        new_step2 = new_total // chars_per_jeton
 
         if first_consumed:
             temp_balance -= 1
@@ -262,7 +290,7 @@ async def usage_commit(req: UsageBillingReq):
                 user_id=user_id,
                 tx_type=_wallet_type_for(module, usage_kind),
                 amount=-1,
-                reason=req.note or _reason_for(module, usage_kind, True, char_count),
+                reason=req.note or _reason_for(module, usage_kind),
                 meta={
                     "module": module,
                     "usage_kind": usage_kind,
@@ -280,13 +308,14 @@ async def usage_commit(req: UsageBillingReq):
                     user_id=user_id,
                     tx_type=_wallet_type_for(module, usage_kind),
                     amount=-1,
-                    reason=req.note or _reason_for(module, usage_kind, False, char_count),
+                    reason=req.note or _reason_for(module, usage_kind),
                     meta={
                         "module": module,
                         "usage_kind": usage_kind,
                         "char_count": char_count,
-                        "charge_type": "3000_step",
+                        "charge_type": "step",
                         "step_index": step_index + 1,
+                        "chars_per_jeton": chars_per_jeton,
                         "balance_after": temp_balance,
                         **(req.meta or {}),
                     },
@@ -303,5 +332,5 @@ async def usage_commit(req: UsageBillingReq):
         "counter_field": counter_field,
         "counter_before": consumed_chars,
         "counter_after": new_total,
-        "chars_per_jeton": CHARS_PER_JETON,
+        "chars_per_jeton": chars_per_jeton,
     }
