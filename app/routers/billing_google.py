@@ -21,7 +21,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # Jeton ürünleri
 PRODUCT_TOKENS = {
     "jeton_10": 10,
-    "jeton_20": 20,
+    "jeton_20": 25,
     "jeton_50": 50,
     "jeton_100": 100,
     "jeton_250": 250,
@@ -326,16 +326,17 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
 
     if _purchase_exists(purchase_token):
         prof = _profile_or_404(user_id)
+        current_tokens = int(prof.get("tokens") or 0)
         return {
             "ok": True,
             "already_processed": True,
-            "tokens": int(prof.get("tokens") or 0),
+            "product_id": product_id,
+            "loaded_tokens": 0,
+            "tokens": current_tokens,
+            "tokens_after": current_tokens,
         }
 
     prof = _profile_or_404(user_id)
-
-    if not _has_active_package(prof):
-        raise HTTPException(status_code=403, detail="active package required before token purchase")
 
     current_tokens = int(prof.get("tokens") or 0)
     next_tokens = current_tokens + amount
@@ -344,7 +345,14 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     _insert_purchase_log(user_id, product_id, amount, purchase_token)
     _insert_wallet_tx(user_id, "purchase", amount, next_tokens, f"Jeton satın alma: {product_id}")
 
-    return {"ok": True, "tokens": next_tokens}
+    return {
+        "ok": True,
+        "already_processed": False,
+        "product_id": product_id,
+        "loaded_tokens": amount,
+        "tokens": next_tokens,
+        "tokens_after": next_tokens,
+    }
 
 
 @router.post("/api/billing/google/package")
