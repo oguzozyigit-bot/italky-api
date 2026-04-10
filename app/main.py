@@ -16,7 +16,7 @@ from app.routers.license import router as license_router
 from app.routers.delete_account import router as delete_account_router
 from app.routers.nfc_tokens import router as nfc_tokens_router
 from app.routers.italkyai_chat import router as italkyai_chat_router
-
+from app.routers.italkyai_voice import router as italkyai_voice_router
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers.onetoall_ws import router as onetoall_ws_router
@@ -119,6 +119,7 @@ app.include_router(onetoall_ws_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
 app.include_router(nfc_tokens_router, prefix="/api")
 app.include_router(italkyai_chat_router)
+app.include_router(italkyai_voice_router)
 
 app.include_router(nfc_router)
 app.include_router(session_router)
