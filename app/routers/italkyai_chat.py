@@ -75,6 +75,40 @@ def normalize_text(text: str) -> str:
     return (text or "").strip()
 
 
+def is_capability_question(text: str) -> bool:
+    t = normalize_text(text).lower()
+    checks = [
+        "kendinden bahset",
+        "özelliklerin neler",
+        "ozelliklerin neler",
+        "neler yapabiliyorsun",
+        "ne yapabiliyorsun",
+        "sen nesin",
+        "sen kimsin",
+        "senin özelliklerin",
+        "bana kendini anlat",
+        "italkyai nedir",
+        "who are you",
+        "what can you do",
+        "tell me about yourself"
+    ]
+    return any(x in t for x in checks)
+
+
+def build_capability_reply() -> str:
+    return (
+        "Ben italkyAI’yim. "
+        "Seninle doğal sohbet edebilirim, rol bazlı konuşabilirim, "
+        "anne, baba, sevgili, arkadaş, muhalif ya da ünlü karakter tonuna geçebilirim. "
+        "Verdiğin bilgileri hatırlar, yeni sohbetlerde de uygun yerde kullanırım. "
+        "Kayıtlı sohbetlerine kaldığın yerden devam ederim. "
+        "TTS, kendi sesim, 2. ses ve hatıra sesi gibi ortak ses modlarıyla çalışabilirim. "
+        "Yazılı ve sesli sohbet akışında sana eşlik ederim. "
+        "FaceToFace ve diğer italkyAI modülleriyle aynı ekosistemin parçasıyım. "
+        "Kısacası sadece cevap veren bir bot değil, seni tanıyıp sana göre şekillenen bir italkyAI deneyimiyim."
+    )
+
+
 def detect_persona_from_text(text: str) -> PersonaState:
     t = normalize_text(text).lower()
     state = PersonaState()
@@ -332,9 +366,23 @@ def calculate_token_cost(text: str, input_mode: InputMode) -> int:
     chars = len(normalize_text(text))
     if chars <= 0:
         return 0
-
     divisor = 500 if input_mode == "voice" else 1000
     return max(1, math.ceil(chars / divisor))
+
+
+def _extract_wallet_amount(data: dict) -> int:
+    if not data:
+        return 0
+
+    for key in ["tokens", "balance", "amount", "jeton", "credit"]:
+        value = data.get(key)
+        if value is None:
+            continue
+        try:
+            return int(float(value))
+        except Exception:
+            continue
+    return 0
 
 
 def get_profile_tokens(user_id: Optional[str]) -> int:
@@ -342,12 +390,92 @@ def get_profile_tokens(user_id: Optional[str]) -> int:
         return 0
 
     try:
-        res = supabase.table("profiles").select("tokens").eq("id", user_id).maybeSingle().execute()
+        res = (
+            supabase.table("wallets")
+            .select("*")
+            .eq("user_id", user_id)
+            .maybeSingle()
+            .execute()
+        )
         data = res.data or {}
-        return int(data.get("tokens") or 0)
+        amount = _extract_wallet_amount(data)
+        if amount > 0:
+            return amount
     except Exception as e:
-        print("get_profile_tokens error:", e)
+        print("wallets token read error:", e)
+
+    try:
+        res = (
+            supabase.table("profiles")
+            .select("tokens")
+            .eq("id", user_id)
+            .maybeSingle()
+            .execute()
+        )
+        data = res.data or {}
+        return int(float(data.get("tokens") or 0))
+    except Exception as e:
+        print("profiles token read error:", e)
         return 0
+
+
+def set_profile_tokens(user_id: Optional[str], new_total: int) -> int:
+    if not supabase or not user_id:
+        return 0
+
+    try:
+        wallet_res = (
+            supabase.table("wallets")
+            .select("*")
+            .eq("user_id", user_id)
+            .maybeSingle()
+            .execute()
+        )
+        wallet = wallet_res.data or None
+
+        if wallet:
+            payload = {}
+            if "tokens" in wallet:
+                payload["tokens"] = new_total
+            elif "balance" in wallet:
+                payload["balance"] = new_total
+            elif "amount" in wallet:
+                payload["amount"] = new_total
+            elif "jeton" in wallet:
+                payload["jeton"] = new_total
+            else:
+                payload["tokens"] = new_total
+
+            (
+                supabase.table("wallets")
+                .update(payload)
+                .eq("user_id", user_id)
+                .execute()
+            )
+        else:
+            (
+                supabase.table("wallets")
+                .insert({
+                    "user_id": user_id,
+                    "tokens": new_total,
+                    "created_at": now_iso()
+                })
+                .execute()
+            )
+    except Exception as e:
+        print("wallets update error:", e)
+
+    try:
+        (
+            supabase.table("profiles")
+            .update({"tokens": new_total})
+            .eq("id", user_id)
+            .execute()
+        )
+    except Exception as e:
+        print("profiles update error:", e)
+
+    return new_total
 
 
 def update_profile_tokens(user_id: Optional[str], delta: int) -> int:
@@ -359,48 +487,30 @@ def update_profile_tokens(user_id: Optional[str], delta: int) -> int:
     if new_total < 0:
         raise HTTPException(status_code=402, detail="insufficient_tokens")
 
-    try:
-        supabase.table("profiles").update({
-            "tokens": new_total
-        }).eq("id", user_id).execute()
-    except Exception as e:
-        print("update_profile_tokens error:", e)
-        raise HTTPException(status_code=500, detail="token_update_failed")
-
-    return new_total
+    return set_profile_tokens(user_id, new_total)
 
 
 def log_wallet_tx(user_id: Optional[str], delta: int, reason: str, body: ChatBody) -> None:
     if not supabase or not user_id or delta == 0:
         return
 
-    payloads = [
-        {
-            "user_id": user_id,
-            "delta": delta,
-            "reason": reason,
-            "meta": {
-                "session_id": body.session_id,
-                "input_mode": body.input_mode,
-                "chars": len(normalize_text(body.text))
-            },
-            "created_at": now_iso()
+    payload = {
+        "user_id": user_id,
+        "amount": delta,
+        "type": "debit" if delta < 0 else "credit",
+        "description": reason,
+        "meta": {
+            "session_id": body.session_id,
+            "input_mode": body.input_mode,
+            "chars": len(normalize_text(body.text))
         },
-        {
-            "user_id": user_id,
-            "amount": delta,
-            "type": "debit" if delta < 0 else "credit",
-            "description": reason,
-            "created_at": now_iso()
-        }
-    ]
+        "created_at": now_iso()
+    }
 
-    for payload in payloads:
-        try:
-            supabase.table("wallet_tx").insert(payload).execute()
-            return
-        except Exception:
-            continue
+    try:
+        supabase.table("wallet_tx").insert(payload).execute()
+    except Exception as e:
+        print("wallet_tx insert error:", e)
 
 
 def get_global_memory(user_id: Optional[str]) -> str:
@@ -543,6 +653,28 @@ async def italkyai_chat(body: ChatBody):
     if not user_text:
         raise HTTPException(status_code=400, detail="empty_text")
 
+    if is_capability_question(user_text):
+        reply = build_capability_reply()
+        save_message(body.session_id, "user", user_text)
+        save_message(body.session_id, "assistant", reply)
+        upsert_saved_chat(body, PersonaState(), reply)
+        update_global_memory(body.user_id, user_text)
+        return {
+            "ok": True,
+            "reply": reply,
+            "model": "italkyai_internal",
+            "token_cost": 0,
+            "tokens_remaining": get_profile_tokens(body.user_id),
+            "persona": {
+                "persona_type": "default",
+                "persona_name": None,
+                "celebrity_name": None,
+                "tone_level": "warm",
+                "always_oppositional": False,
+                "selected_voice_mode": body.voice_mode or "tts",
+            }
+        }
+
     if body.user_id:
         token_cost = calculate_token_cost(user_text, body.input_mode)
         current_tokens = get_profile_tokens(body.user_id)
@@ -613,4 +745,4 @@ async def italkyai_chat(body: ChatBody):
             "always_oppositional": persona_state.always_oppositional,
             "selected_voice_mode": persona_state.selected_voice_mode,
         }
-                                                             }
+    }
