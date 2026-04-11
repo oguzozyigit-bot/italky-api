@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import uuid
+from typing import Optional
+
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from supabase import create_client
 
@@ -16,15 +18,22 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 VOICE_BUCKET = "voice-profiles"
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+def _safe_name(value: Optional[str], fallback: str) -> str:
+    text = (value or "").strip()
+    return text if text else fallback
 
 
 @router.post("/api/italkyai/voice/upload")
 async def upload_voice(
     user_id: str = Form(...),
-    voice_type: str = Form(...),
+    voice_type: str = Form(...),   # mine | second | memory
     voice_name: str = Form(""),
     audio_file: UploadFile = File(...)
 ):
+    voice_type = (voice_type or "").strip().lower()
     if voice_type not in {"mine", "second", "memory"}:
         raise HTTPException(status_code=400, detail="invalid_voice_type")
 
@@ -32,12 +41,19 @@ async def upload_voice(
     if not content:
         raise HTTPException(status_code=400, detail="empty_audio")
 
-    # dosya boyutu: 10 MB
-    if len(content) > 10 * 1024 * 1024:
+    if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="file_too_large")
 
     original_name = (audio_file.filename or "").lower()
-    ext = "mp3" if original_name.endswith(".mp3") else "webm"
+    content_type = (audio_file.content_type or "").lower()
+
+    if original_name.endswith(".mp3") or content_type == "audio/mpeg":
+        ext = "mp3"
+        final_content_type = "audio/mpeg"
+    else:
+        ext = "webm"
+        final_content_type = "audio/webm"
+
     filename = f"{uuid.uuid4().hex}.{ext}"
     storage_path = f"{user_id}/{voice_type}/{filename}"
 
@@ -45,26 +61,24 @@ async def upload_voice(
         supabase.storage.from_(VOICE_BUCKET).upload(
             storage_path,
             content,
-            {"content-type": audio_file.content_type or ("audio/mpeg" if ext == "mp3" else "audio/webm")}
+            {"content-type": final_content_type}
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"upload_failed: {str(e)}")
 
     public_url = supabase.storage.from_(VOICE_BUCKET).get_public_url(storage_path)
 
-    # ham kayıt bilgisi istersen burada ayrı tabloya da yazılabilir
     try:
         supabase.table("voice_profiles").upsert({
             "user_id": user_id,
             "voice_type": voice_type,
-            "voice_name": voice_name.strip() if voice_name else None,
+            "voice_name": _safe_name(voice_name, voice_type),
             "storage_path": storage_path,
             "audio_url": public_url
         }, on_conflict="user_id,voice_type").execute()
     except Exception:
         pass
 
-    # profiles ortak havuzu güncelle
     try:
         if voice_type == "mine":
             supabase.table("profiles").update({
@@ -75,7 +89,7 @@ async def upload_voice(
 
         elif voice_type == "second":
             supabase.table("profiles").update({
-                "second_voice_name": voice_name.strip() if voice_name else None,
+                "second_voice_name": _safe_name(voice_name, "2. Ses"),
                 "second_voice_sample_path": storage_path,
                 "second_tts_voice_ready": True,
                 "second_tts_voice_id": storage_path
@@ -83,7 +97,7 @@ async def upload_voice(
 
         elif voice_type == "memory":
             supabase.table("profiles").update({
-                "memory_voice_name": voice_name.strip() if voice_name else None,
+                "memory_voice_name": _safe_name(voice_name, "Hatıra Sesi"),
                 "memory_voice_sample_path": storage_path,
                 "memory_tts_voice_ready": True,
                 "memory_tts_voice_id": storage_path
@@ -94,7 +108,7 @@ async def upload_voice(
     return {
         "ok": True,
         "voice_type": voice_type,
-        "voice_name": voice_name,
+        "voice_name": _safe_name(voice_name, voice_type),
         "audio_url": public_url,
         "storage_path": storage_path
     }
