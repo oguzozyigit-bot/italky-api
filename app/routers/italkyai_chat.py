@@ -88,9 +88,11 @@ def is_capability_question(text: str) -> bool:
         "senin özelliklerin",
         "bana kendini anlat",
         "italkyai nedir",
-        "who are you",
         "what can you do",
-        "tell me about yourself"
+        "who are you",
+        "tell me about yourself",
+        "what are your features",
+        "kendini anlat"
     ]
     return any(x in t for x in checks)
 
@@ -104,7 +106,7 @@ def build_capability_reply() -> str:
         "Kayıtlı sohbetlerine kaldığın yerden devam ederim. "
         "TTS, kendi sesim, 2. ses ve hatıra sesi gibi ortak ses modlarıyla çalışabilirim. "
         "Yazılı ve sesli sohbet akışında sana eşlik ederim. "
-        "FaceToFace ve diğer italkyAI modülleriyle aynı ekosistemin parçasıyım. "
+        "FaceToFace, çeviri ve ortak ses havuzu mantığıyla bağlantılı çalışırım. "
         "Kısacası sadece cevap veren bir bot değil, seni tanıyıp sana göre şekillenen bir italkyAI deneyimiyim."
     )
 
@@ -366,6 +368,7 @@ def calculate_token_cost(text: str, input_mode: InputMode) -> int:
     chars = len(normalize_text(text))
     if chars <= 0:
         return 0
+
     divisor = 500 if input_mode == "voice" else 1000
     return max(1, math.ceil(chars / divisor))
 
@@ -484,6 +487,7 @@ def update_profile_tokens(user_id: Optional[str], delta: int) -> int:
 
     current = get_profile_tokens(user_id)
     new_total = current + delta
+
     if new_total < 0:
         raise HTTPException(status_code=402, detail="insufficient_tokens")
 
