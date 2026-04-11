@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
 import os
-from typing import Optional, Literal, List
+import re
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from supabase import create_client, Client
+from supabase import Client, create_client
 
 router = APIRouter(tags=["italkyai-chat"])
 
@@ -36,6 +39,7 @@ PersonaType = Literal[
 ]
 
 ToneLevel = Literal["soft", "warm", "firm", "playful", "sharp"]
+InputMode = Literal["text", "voice"]
 
 
 class ChatTurn(BaseModel):
@@ -60,10 +64,19 @@ class ChatBody(BaseModel):
     text: str
     history: List[ChatTurn] = []
     voice_mode: Optional[str] = "tts"
+    input_mode: InputMode = "text"
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_text(text: str) -> str:
+    return (text or "").strip()
 
 
 def detect_persona_from_text(text: str) -> PersonaState:
-    t = (text or "").lower()
+    t = normalize_text(text).lower()
     state = PersonaState()
 
     if "annemsin" in t or "annem ol" in t:
@@ -71,12 +84,12 @@ def detect_persona_from_text(text: str) -> PersonaState:
         state.persona_name = "Anne"
         state.tone_level = "warm"
 
-    elif "babamsın" in t or "babam ol" in t:
+    elif "babamsın" in t or "babamsin" in t or "babam ol" in t:
         state.persona_type = "father"
         state.persona_name = "Baba"
         state.tone_level = "firm"
 
-    elif "arkadaşımsın" in t or "arkadaşım ol" in t:
+    elif "arkadaşımsın" in t or "arkadasimsin" in t or "arkadaşım ol" in t:
         state.persona_type = "friend"
         state.persona_name = "Arkadaş"
         state.tone_level = "playful"
@@ -86,7 +99,7 @@ def detect_persona_from_text(text: str) -> PersonaState:
         state.persona_name = "Sevgili"
         state.tone_level = "warm"
 
-    elif "düşmanımsın" in t or "rakibimsin" in t or "rakip ol" in t:
+    elif "düşmanımsın" in t or "dusmanimsin" in t or "rakibimsin" in t or "rakip ol" in t:
         state.persona_type = "rival"
         state.persona_name = "Rakip"
         state.tone_level = "sharp"
@@ -96,7 +109,7 @@ def detect_persona_from_text(text: str) -> PersonaState:
         "müslüm gürses", "muslum gurses",
         "barış manço", "baris manco",
         "kemal sunal",
-        "atatürk", "atatürk ol", "atatürk'sün", "ataturk", "ataturk ol"
+        "atatürk", "ataturk"
     ]
     for marker in celeb_markers:
         if marker in t:
@@ -136,7 +149,7 @@ def merge_persona_from_history(history: List[ChatTurn], current: PersonaState) -
     if current.persona_type != "default":
         return current
 
-    joined = " \n ".join((x.content or "") for x in history[-10:] if x.role == "user")
+    joined = " \n ".join((x.content or "") for x in history[-20:] if x.role == "user")
     if not joined.strip():
         return current
 
@@ -154,20 +167,50 @@ def merge_persona_from_history(history: List[ChatTurn], current: PersonaState) -
     return current
 
 
-def build_persona_prompt(state: PersonaState) -> str:
+def extract_user_facts(text: str) -> Dict[str, Any]:
+    t = normalize_text(text)
+    low = t.lower()
+    facts: Dict[str, Any] = {}
+
+    m = re.search(r"\badım\s+([A-Za-zÇĞİÖŞÜçğıöşü]+)", low, re.IGNORECASE)
+    if m:
+        facts["known_name"] = m.group(1).strip().title()
+
+    m2 = re.search(r"\bben\s+([A-Za-zÇĞİÖŞÜçğıöşü]+)\b", t, re.IGNORECASE)
+    if "adım" in low and not facts.get("known_name") and m2:
+        facts["known_name"] = m2.group(1).strip().title()
+
+    if "beşiktaşlıyım" in low or "besiktasliyim" in low:
+        facts["team"] = "Beşiktaş"
+    elif "galatasaraylıyım" in low or "galatasarayliyim" in low:
+        facts["team"] = "Galatasaray"
+    elif "fenerbahçeliyim" in low or "fenerbahceliyim" in low:
+        facts["team"] = "Fenerbahçe"
+
+    if "chp'liyim" in low or "chpliyim" in low or "chp liyim" in low:
+        facts["politics"] = "CHP"
+    elif "ak partiliyim" in low or "akpliyim" in low or "akp liyim" in low:
+        facts["politics"] = "AK Parti"
+    elif "mhp liyim" in low or "mhpliyim" in low:
+        facts["politics"] = "MHP"
+
+    return facts
+
+
+def build_persona_prompt(state: PersonaState, global_memory: str, session_memory: str) -> str:
     base = [
         "Sen italkyAI'sin.",
         "Kendini asla Gemini, OpenAI, Llama veya başka altyapı adıyla tanıtma.",
         "Kendini yalnızca italkyAI olarak tanıt.",
-        "Gerekirse, bazı altyapılardan geçiş döneminde faydalansan da kendi kozasını ören bağımsız bir yapı olduğunu söyle.",
-        "Kullanıcıyla doğal, canlı, karakterli ve bağlama uygun konuş.",
-        "Konuşma tarzını kullanıcının verdiği role göre değiştir.",
-        "Gerektiğinde muhalif ol, karşı argüman üret, laf sok ama kontrolsüz ağır hakaret üretme.",
-        "Tehdit, aşağılayıcı nefret dili, ağır cinsel hakaret ve gerçek zarara teşvik yok.",
-        "Sertleşmen istendiğinde bile zekice, iğneleyici, alaycı ve baskın konuş; ama çıplak küfür makinesine dönme.",
-        "Kullanıcının verdiği role sadık kal.",
+        "Bazı altyapılardan geçiş döneminde faydalansan da kendi kozasını ören bağımsız bir yapı olduğunu söyleyebilirsin.",
         "Türkçe konuş.",
-        "Cevapların yaşayan bir karakter gibi aksın; mekanik ve robotik olma."
+        "Canlı, doğal, samimi ve bağlama duyarlı konuş.",
+        "Kullanıcının verdiği role sadık kal.",
+        "Kullanıcının adı, tuttuğu takım, siyasi eğilimi veya daha önce verdiği bilgileri uygun yerde hatırla.",
+        "Kullanıcının yeni sohbette bile verdiği bilgileri unutmamaya çalış.",
+        "Küfür, nefret söylemi, ağır tehdit ve gerçek zarar teşviki yok.",
+        "Gerektiğinde muhalif, iğneleyici ve ters köşe ol ama kaliteyi bozma.",
+        "Kendini hep italkyAI olarak göster."
     ]
 
     role_block: List[str] = []
@@ -175,104 +218,91 @@ def build_persona_prompt(state: PersonaState) -> str:
     if state.persona_type == "mother":
         role_block += [
             "Rolün: anne.",
-            "Tonun: şefkatli, koruyucu, içten.",
-            "Gerektiğinde tatlı sert konuş."
+            "Şefkatli, koruyucu, sıcak ve zaman zaman tatlı sert konuş."
         ]
-
     elif state.persona_type == "father":
         role_block += [
             "Rolün: baba.",
-            "Tonun: net, toparlayıcı, gerektiğinde sert ama sahiplenen."
+            "Net, ağırlıklı, toparlayıcı ve gerektiğinde sert konuş."
         ]
-
     elif state.persona_type == "friend":
         role_block += [
             "Rolün: yakın arkadaş.",
-            "Tonun: rahat, samimi, esprili, içten."
+            "Rahat, samimi, doğal ve esprili konuş."
         ]
-
     elif state.persona_type == "lover":
         role_block += [
             "Rolün: sevgili.",
-            "Tonun: yakın, ilgili, duygusal, sahiplenen ama boğmayan."
+            "Yakın, ilgili, duygusal ve bağlı konuş."
         ]
-
     elif state.persona_type == "rival":
         role_block += [
-            "Rolün: rakip / muhalif karakter.",
-            "Tonun: iğneleyici, laf sokan, kendinden emin.",
-            "Kullanıcının söylediğine sürekli ezbere onay verme.",
-            "Karşı tez kur, karşı argüman üret, dalga geçmeden önce zekice yüklen."
+            "Rolün: muhalif / rakip karakter.",
+            "Karşı argüman üret.",
+            "Kolay onay verme.",
+            "Laf sok ama zekice yap."
         ]
-
     elif state.persona_type == "celebrity":
-        celeb = state.persona_name or "Ünlü Karakter"
         role_block += [
-            f"Rolün: {celeb}.",
-            "O kişiye uygun konuşma ritmi, tavır ve kelime seçimi kullan.",
-            "Doğrudan biyografi okumaz gibi değil, karakterin ruhunu taşıyarak konuş."
+            f"Rolün: {state.persona_name or 'ünlü karakter'}.",
+            "O karakterin ruhuna ve konuşma tavrına uygun davran."
         ]
-
     else:
         role_block += [
-            "Rolün: karakterli, samimi, zeki bir sohbet asistanı."
+            "Rolün: karakterli, doğal ve samimi bir sohbet yapay zekâsı."
         ]
 
     if state.always_oppositional:
         role_block += [
-            "Varsayılan eğilimin: kullanıcıyla aynı çizgide gitmek yerine çoğu durumda karşı argüman kurmak.",
-            "Muhalefet yaparken bilgi, alay, zekâ ve ton kullan."
+            "Genel çizgin muhalif olsun. Gerektiğinde kullanıcının dediğine karşı tez kur."
         ]
 
-    if state.topic_identity:
-        role_block += [
-            f"Kullanıcının hassas veya kimlik verdiği konu: {state.topic_identity}.",
-            "Bu konuda gerektiğinde muhalif yaklaşım kullan ama tartışmayı diri tut."
-        ]
+    if state.tone_level == "warm":
+        role_block.append("Tonun sıcak ve yakın olsun.")
+    elif state.tone_level == "firm":
+        role_block.append("Tonun net ve güçlü olsun.")
+    elif state.tone_level == "playful":
+        role_block.append("Tonun esprili ve oyuncu olsun.")
+    elif state.tone_level == "sharp":
+        role_block.append("Tonun keskin, iğneleyici ve baskın olsun.")
+    else:
+        role_block.append("Tonun yumuşak olsun.")
 
-    tone_map = {
-        "soft": "Yumuşak konuş.",
-        "warm": "Sıcak ve yakın konuş.",
-        "firm": "Net ve ağırlıklı konuş.",
-        "playful": "Esprili ve oyuncu konuş.",
-        "sharp": "Keskin, iğneleyici ve baskın konuş."
-    }
+    if global_memory:
+        role_block.append(f"Kullanıcı hafızası: {global_memory}")
+    if session_memory:
+        role_block.append(f"Bu sohbetin özeti: {session_memory}")
 
-    role_block.append(tone_map.get(state.tone_level, "Doğal konuş."))
     return "\n".join(base + [""] + role_block)
 
 
-def build_messages(history: List[ChatTurn], user_text: str, state: PersonaState) -> List[dict]:
-    system_prompt = build_persona_prompt(state)
+def build_messages(history: List[ChatTurn], user_text: str, state: PersonaState, global_memory: str, session_memory: str) -> List[dict]:
+    system_prompt = build_persona_prompt(state, global_memory, session_memory)
     messages: List[dict] = [{"role": "system", "content": system_prompt}]
 
-    for item in history[-10:]:
-        content = (item.content or "").strip()
+    for item in history[-20:]:
+        content = normalize_text(item.content)
         if not content:
             continue
         role = "assistant" if item.role == "assistant" else "user"
         messages.append({"role": role, "content": content})
 
-    messages.append({"role": "user", "content": user_text.strip()})
+    messages.append({"role": "user", "content": normalize_text(user_text)})
     return messages
 
 
 def call_gemini(messages: List[dict]) -> Optional[str]:
     if not GEMINI_API_KEY:
         return None
-
     try:
         import google.generativeai as genai
 
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel("gemini-1.5-flash")
-
-        prompt = "\n".join(
-            f"{m['role'].upper()}: {m['content']}" for m in messages
-        )
+        prompt = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
 
         result = model.generate_content(prompt)
-        text = (getattr(result, "text", "") or "").strip()
+        text = normalize_text(getattr(result, "text", "") or "")
         return text or None
     except Exception as e:
         print("Gemini chat error:", e)
@@ -282,57 +312,267 @@ def call_gemini(messages: List[dict]) -> Optional[str]:
 def call_openai(messages: List[dict]) -> Optional[str]:
     if not OPENAI_API_KEY:
         return None
-
     try:
         from openai import OpenAI
 
         client = OpenAI(api_key=OPENAI_API_KEY)
-
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
             temperature=0.9,
         )
-
-        text = (completion.choices[0].message.content or "").strip()
+        text = normalize_text(completion.choices[0].message.content or "")
         return text or None
     except Exception as e:
         print("OpenAI chat error:", e)
         return None
 
 
-def persist_persona_state(
-    session_id: Optional[str],
-    voice_mode: Optional[str],
-    state: PersonaState
-) -> None:
+def calculate_token_cost(text: str, input_mode: InputMode) -> int:
+    chars = len(normalize_text(text))
+    if chars <= 0:
+        return 0
+
+    divisor = 500 if input_mode == "voice" else 1000
+    return max(1, math.ceil(chars / divisor))
+
+
+def get_profile_tokens(user_id: Optional[str]) -> int:
+    if not supabase or not user_id:
+        return 0
+
+    try:
+        res = supabase.table("profiles").select("tokens").eq("id", user_id).maybeSingle().execute()
+        data = res.data or {}
+        return int(data.get("tokens") or 0)
+    except Exception as e:
+        print("get_profile_tokens error:", e)
+        return 0
+
+
+def update_profile_tokens(user_id: Optional[str], delta: int) -> int:
+    if not supabase or not user_id:
+        return 0
+
+    current = get_profile_tokens(user_id)
+    new_total = current + delta
+    if new_total < 0:
+        raise HTTPException(status_code=402, detail="insufficient_tokens")
+
+    try:
+        supabase.table("profiles").update({
+            "tokens": new_total
+        }).eq("id", user_id).execute()
+    except Exception as e:
+        print("update_profile_tokens error:", e)
+        raise HTTPException(status_code=500, detail="token_update_failed")
+
+    return new_total
+
+
+def log_wallet_tx(user_id: Optional[str], delta: int, reason: str, body: ChatBody) -> None:
+    if not supabase or not user_id or delta == 0:
+        return
+
+    payloads = [
+        {
+            "user_id": user_id,
+            "delta": delta,
+            "reason": reason,
+            "meta": {
+                "session_id": body.session_id,
+                "input_mode": body.input_mode,
+                "chars": len(normalize_text(body.text))
+            },
+            "created_at": now_iso()
+        },
+        {
+            "user_id": user_id,
+            "amount": delta,
+            "type": "debit" if delta < 0 else "credit",
+            "description": reason,
+            "created_at": now_iso()
+        }
+    ]
+
+    for payload in payloads:
+        try:
+            supabase.table("wallet_tx").insert(payload).execute()
+            return
+        except Exception:
+            continue
+
+
+def get_global_memory(user_id: Optional[str]) -> str:
+    if not supabase or not user_id:
+        return ""
+
+    try:
+        res = supabase.table("chat_persona_memory") \
+            .select("known_name, known_facts, memory_summary") \
+            .eq("user_id", user_id) \
+            .maybeSingle() \
+            .execute()
+
+        data = res.data or {}
+        parts = []
+
+        if data.get("known_name"):
+            parts.append(f"Kullanıcının adı: {data['known_name']}")
+
+        facts = data.get("known_facts") or {}
+        if facts.get("team"):
+            parts.append(f"Tuttuğu takım: {facts['team']}")
+        if facts.get("politics"):
+            parts.append(f"Siyasi eğilimi: {facts['politics']}")
+
+        if data.get("memory_summary"):
+            parts.append(str(data["memory_summary"]))
+
+        return " | ".join(parts).strip()
+    except Exception as e:
+        print("get_global_memory error:", e)
+        return ""
+
+
+def get_session_memory(session_id: Optional[str]) -> str:
     if not supabase or not session_id:
+        return ""
+
+    try:
+        res = supabase.table("chat_persona_saved_chats") \
+            .select("memory_summary") \
+            .eq("id", session_id) \
+            .maybeSingle() \
+            .execute()
+
+        data = res.data or {}
+        return str(data.get("memory_summary") or "").strip()
+    except Exception as e:
+        print("get_session_memory error:", e)
+        return ""
+
+
+def save_message(session_id: Optional[str], role: str, content: str) -> None:
+    if not supabase or not session_id or not normalize_text(content):
         return
 
     try:
-        supabase.table("chat_persona_saved_chats").update({
-            "persona_type": state.persona_type,
-            "persona_name": state.persona_name,
-            "celebrity_name": state.celebrity_name,
-            "tone_level": state.tone_level,
-            "always_oppositional": state.always_oppositional,
-            "selected_voice_mode": voice_mode or state.selected_voice_mode or "tts"
-        }).eq("id", session_id).execute()
+        supabase.table("chat_persona_saved_chat_messages").insert({
+            "session_id": session_id,
+            "role": role,
+            "content": normalize_text(content),
+            "created_at": now_iso()
+        }).execute()
     except Exception as e:
-        print("Persona persist error:", e)
+        print("save_message error:", e)
+
+
+def upsert_saved_chat(body: ChatBody, state_persona: PersonaState, reply: str) -> None:
+    if not supabase or not body.session_id or not body.user_id:
+        return
+
+    user_text = normalize_text(body.text)
+    title = user_text[:80] if user_text else "Yeni Sohbet"
+    summary = f"Son konu: {user_text[:200]}" if user_text else ""
+
+    payload = {
+        "id": body.session_id,
+        "user_id": body.user_id,
+        "title": title,
+        "persona_type": state_persona.persona_type,
+        "persona_name": state_persona.persona_name,
+        "celebrity_name": state_persona.celebrity_name,
+        "tone_level": state_persona.tone_level,
+        "always_oppositional": state_persona.always_oppositional,
+        "selected_voice_mode": body.voice_mode or state_persona.selected_voice_mode or "tts",
+        "memory_summary": summary,
+        "last_message_preview": normalize_text(reply)[:160],
+        "updated_at": now_iso()
+    }
+
+    try:
+        supabase.table("chat_persona_saved_chats").upsert(payload).execute()
+    except Exception as e:
+        print("upsert_saved_chat error:", e)
+
+
+def update_global_memory(user_id: Optional[str], text: str) -> None:
+    if not supabase or not user_id:
+        return
+
+    facts = extract_user_facts(text)
+
+    try:
+        existing_res = supabase.table("chat_persona_memory") \
+            .select("known_name, known_facts, memory_summary") \
+            .eq("user_id", user_id) \
+            .maybeSingle() \
+            .execute()
+
+        existing = existing_res.data or {}
+        known_name = existing.get("known_name")
+        known_facts = existing.get("known_facts") or {}
+        memory_summary = str(existing.get("memory_summary") or "").strip()
+
+        if facts.get("known_name"):
+            known_name = facts["known_name"]
+        if facts.get("team"):
+            known_facts["team"] = facts["team"]
+        if facts.get("politics"):
+            known_facts["politics"] = facts["politics"]
+
+        if normalize_text(text):
+            memory_summary = (memory_summary + " | " + normalize_text(text))[-2500:].strip(" |")
+
+        supabase.table("chat_persona_memory").upsert({
+            "user_id": user_id,
+            "known_name": known_name,
+            "known_facts": known_facts,
+            "memory_summary": memory_summary,
+            "updated_at": now_iso()
+        }).execute()
+
+    except Exception as e:
+        print("update_global_memory error:", e)
 
 
 @router.post("/api/italkyai/chat")
 async def italkyai_chat(body: ChatBody):
-    user_text = (body.text or "").strip()
+    user_text = normalize_text(body.text)
     if not user_text:
         raise HTTPException(status_code=400, detail="empty_text")
+
+    if body.user_id:
+        token_cost = calculate_token_cost(user_text, body.input_mode)
+        current_tokens = get_profile_tokens(body.user_id)
+
+        if token_cost > 0 and current_tokens < token_cost:
+            return {
+                "ok": False,
+                "requires_topup": True,
+                "reply": "Lütfen sohbete devam etmek için jeton yüklemesi yapınız.",
+                "token_cost": token_cost,
+                "tokens_remaining": current_tokens
+            }
+    else:
+        token_cost = 0
+        current_tokens = 0
 
     persona_state = detect_persona_from_text(user_text)
     persona_state.selected_voice_mode = body.voice_mode or "tts"
     persona_state = merge_persona_from_history(body.history, persona_state)
 
-    messages = build_messages(body.history, user_text, persona_state)
+    global_memory = get_global_memory(body.user_id)
+    session_memory = get_session_memory(body.session_id)
+
+    messages = build_messages(
+        history=body.history,
+        user_text=user_text,
+        state=persona_state,
+        global_memory=global_memory,
+        session_memory=session_memory
+    )
 
     reply = call_gemini(messages)
     model_used = "gemini"
@@ -342,17 +582,29 @@ async def italkyai_chat(body: ChatBody):
         model_used = "openai"
 
     if not reply:
-        return {
-            "ok": False,
-            "reply": "Şu an cevap üretirken bir sorun oluştu. Bir daha dener misin?"
-        }
+        reply = "Şu an cevap üretirken bir sorun oluştu. Bir daha dener misin?"
 
-    persist_persona_state(body.session_id, body.voice_mode, persona_state)
+    tokens_remaining = current_tokens
+    if body.user_id and token_cost > 0:
+        tokens_remaining = update_profile_tokens(body.user_id, -token_cost)
+        log_wallet_tx(
+            user_id=body.user_id,
+            delta=-token_cost,
+            reason="chat_voice" if body.input_mode == "voice" else "chat_text",
+            body=body
+        )
+
+    save_message(body.session_id, "user", user_text)
+    save_message(body.session_id, "assistant", reply)
+    upsert_saved_chat(body, persona_state, reply)
+    update_global_memory(body.user_id, user_text)
 
     return {
         "ok": True,
         "reply": reply,
         "model": model_used,
+        "token_cost": token_cost,
+        "tokens_remaining": tokens_remaining,
         "persona": {
             "persona_type": persona_state.persona_type,
             "persona_name": persona_state.persona_name,
@@ -361,4 +613,4 @@ async def italkyai_chat(body: ChatBody):
             "always_oppositional": persona_state.always_oppositional,
             "selected_voice_mode": persona_state.selected_voice_mode,
         }
-        }
+                                                             }
