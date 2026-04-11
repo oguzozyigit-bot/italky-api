@@ -26,6 +26,16 @@ def _safe_name(value: Optional[str], fallback: str) -> str:
     return text if text else fallback
 
 
+def _delete_old_storage_path(path: Optional[str]) -> None:
+    old_path = (path or "").strip()
+    if not old_path:
+      return
+    try:
+        supabase.storage.from_(VOICE_BUCKET).remove([old_path])
+    except Exception:
+        pass
+
+
 @router.post("/api/italkyai/voice/upload")
 async def upload_voice(
     user_id: str = Form(...),
@@ -43,6 +53,23 @@ async def upload_voice(
 
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="file_too_large")
+
+    # Eski path'i önce öğren
+    old_mine_path = None
+    old_second_path = None
+    old_memory_path = None
+
+    try:
+        profile_res = supabase.table("profiles").select(
+            "voice_sample_path,second_voice_sample_path,memory_voice_sample_path"
+        ).eq("id", user_id).maybeSingle().execute()
+
+        profile_data = getattr(profile_res, "data", None) or {}
+        old_mine_path = profile_data.get("voice_sample_path")
+        old_second_path = profile_data.get("second_voice_sample_path")
+        old_memory_path = profile_data.get("memory_voice_sample_path")
+    except Exception:
+        pass
 
     original_name = (audio_file.filename or "").lower()
     content_type = (audio_file.content_type or "").lower()
@@ -86,6 +113,7 @@ async def upload_voice(
                 "tts_voice_ready": True,
                 "tts_voice_id": storage_path
             }).eq("id", user_id).execute()
+            _delete_old_storage_path(old_mine_path)
 
         elif voice_type == "second":
             supabase.table("profiles").update({
@@ -94,6 +122,7 @@ async def upload_voice(
                 "second_tts_voice_ready": True,
                 "second_tts_voice_id": storage_path
             }).eq("id", user_id).execute()
+            _delete_old_storage_path(old_second_path)
 
         elif voice_type == "memory":
             supabase.table("profiles").update({
@@ -102,11 +131,14 @@ async def upload_voice(
                 "memory_tts_voice_ready": True,
                 "memory_tts_voice_id": storage_path
             }).eq("id", user_id).execute()
+            _delete_old_storage_path(old_memory_path)
+
     except Exception:
         pass
 
     return {
         "ok": True,
+        "message": "voice_saved",
         "voice_type": voice_type,
         "voice_name": _safe_name(voice_name, voice_type),
         "audio_url": public_url,
