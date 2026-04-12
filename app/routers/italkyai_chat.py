@@ -442,7 +442,7 @@ def set_profile_tokens(user_id: Optional[str], new_total: int) -> int:
             elif "jeton" in wallet:
                 payload["jeton"] = new_total
             else:
-                payload["tokens"] = new_total
+                payload["balance"] = new_total
 
             (
                 supabase.table("wallets")
@@ -452,11 +452,12 @@ def set_profile_tokens(user_id: Optional[str], new_total: int) -> int:
             )
         else:
             (
-                supabase.table("wallets").insert({
-    "user_id": user_id,
-    "balance": new_total,
-    "created_at": now_iso()
-})
+                supabase.table("wallets")
+                .insert({
+                    "user_id": user_id,
+                    "balance": new_total,
+                    "created_at": now_iso(),
+                })
                 .execute()
             )
     except Exception as e:
@@ -520,7 +521,7 @@ def get_global_memory(user_id: Optional[str]) -> str:
             supabase.table("chat_persona_memory")
             .select("known_name, known_facts, memory_summary")
             .eq("user_id", user_id)
-            .maybe_single())
+            .maybe_single()
             .execute()
         )
 
@@ -554,7 +555,7 @@ def get_session_memory(session_id: Optional[str]) -> str:
             supabase.table("chat_persona_saved_chats")
             .select("memory_summary")
             .eq("id", session_id)
-            .maybeSingle()
+            .maybe_single()
             .execute()
         )
 
