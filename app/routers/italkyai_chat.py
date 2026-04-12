@@ -728,4 +728,4 @@ async def italkyai_chat(body: ChatBody):
             "always_oppositional": persona_state.always_oppositional,
             "selected_voice_mode": persona_state.selected_voice_mode,
         },
-        }
+    }
