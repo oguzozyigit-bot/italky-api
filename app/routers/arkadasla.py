@@ -69,12 +69,12 @@ def get_current_user_id(auth_header: Optional[str]) -> str:
         timeout=20,
     )
     if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid user session")
+        raise HTTPException(status_code=401, detail="Geçersiz oturum")
 
     data = resp.json() or {}
     uid = data.get("id")
     if not uid:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="Kullanıcı bulunamadı")
     return uid
 
 
@@ -229,7 +229,7 @@ def arkadasla_me(authorization: Optional[str] = Header(default=None)):
         limit=1,
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="Profile not found")
+        raise HTTPException(status_code=404, detail="Profile bulunamadı")
 
     profile = rows[0]
     chat_code = normalize_chat_code(profile.get("chat_code") or "")
@@ -422,12 +422,12 @@ def send_chat_request(
         limit=1,
     )
     if not my_rows:
-        raise HTTPException(status_code=404, detail="Requester profile not found")
+        raise HTTPException(status_code=404, detail="Requester profile bulunamadı")
 
     me = my_rows[0]
     my_code = normalize_chat_code(str(me.get("chat_code") or ""))
     if not is_valid_chat_code(my_code):
-        raise HTTPException(status_code=400, detail="Requester chat_code missing or invalid")
+        raise HTTPException(status_code=400, detail="Requester chat_code eksik veya geçersiz")
 
     target_code = normalize_chat_code(body.target_code)
 
@@ -441,7 +441,7 @@ def send_chat_request(
         limit=1,
     )
     if not target_rows:
-        raise HTTPException(status_code=404, detail="Target code not found")
+        raise HTTPException(status_code=404, detail="Hedef kod bulunamadı")
 
     target = target_rows[0]
     target_user_id = target["id"]
@@ -565,7 +565,7 @@ def respond_chat_request(
         limit=1,
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="Request not found")
+        raise HTTPException(status_code=404, detail="İstek bulunamadı")
 
     req = rows[0]
     if req.get("status") != "pending":
@@ -737,7 +737,7 @@ def send_message(
         limit=1,
     )
     if not conv_rows:
-        raise HTTPException(status_code=404, detail="Active conversation not found")
+        raise HTTPException(status_code=404, detail="Aktif konuşma bulunamadı")
 
     inserted = sb_insert("arkadasla_messages", {
         "id": str(uuid.uuid4()),
@@ -779,7 +779,7 @@ def list_messages(
         limit=1,
     )
     if not conv_rows:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+        raise HTTPException(status_code=404, detail="Konuşma bulunamadı")
 
     rows = sb_select(
         "arkadasla_messages",
@@ -813,7 +813,7 @@ def end_conversation(
         limit=1,
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="Active conversation not found")
+        raise HTTPException(status_code=404, detail="Aktif konuşma bulunamadı")
 
     conv = rows[0]
     updated = sb_patch(
@@ -936,7 +936,7 @@ def get_saved_chat(saved_chat_id: str, authorization: Optional[str] = Header(def
         limit=1,
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="Saved chat not found")
+        raise HTTPException(status_code=404, detail="Kayıtlı sohbet bulunamadı")
 
     saved = rows[0]
 
