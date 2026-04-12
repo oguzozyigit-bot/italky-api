@@ -299,7 +299,13 @@ def build_persona_prompt(state: PersonaState, global_memory: str, session_memory
     return "\n".join(base + [""] + identity_block + [""] + capability_block + [""] + role_block)
 
 
-def build_messages(history: List[ChatTurn], user_text: str, state: PersonaState, global_memory: str, session_memory: str) -> List[dict]:
+def build_messages(
+    history: List[ChatTurn],
+    user_text: str,
+    state: PersonaState,
+    global_memory: str,
+    session_memory: str,
+) -> List[dict]:
     system_prompt = build_persona_prompt(state, global_memory, session_memory)
     messages: List[dict] = [{"role": "system", "content": system_prompt}]
 
@@ -317,6 +323,7 @@ def build_messages(history: List[ChatTurn], user_text: str, state: PersonaState,
 def call_gemini(messages: List[dict]) -> Optional[str]:
     if not GEMINI_API_KEY:
         return None
+
     try:
         import google.generativeai as genai
 
@@ -335,6 +342,7 @@ def call_gemini(messages: List[dict]) -> Optional[str]:
 def call_openai(messages: List[dict]) -> Optional[str]:
     if not OPENAI_API_KEY:
         return None
+
     try:
         from openai import OpenAI
 
@@ -355,6 +363,7 @@ def calculate_token_cost(text: str, input_mode: InputMode) -> int:
     chars = len(normalize_text(text))
     if chars <= 0:
         return 0
+
     divisor = 500 if input_mode == "voice" else 1000
     return max(1, math.ceil(chars / divisor))
 
@@ -447,7 +456,7 @@ def set_profile_tokens(user_id: Optional[str], new_total: int) -> int:
                 .insert({
                     "user_id": user_id,
                     "tokens": new_total,
-                    "created_at": now_iso()
+                    "created_at": now_iso(),
                 })
                 .execute()
             )
@@ -492,9 +501,9 @@ def log_wallet_tx(user_id: Optional[str], delta: int, reason: str, body: ChatBod
         "meta": {
             "session_id": body.session_id,
             "input_mode": body.input_mode,
-            "chars": len(normalize_text(body.text))
+            "chars": len(normalize_text(body.text)),
         },
-        "created_at": now_iso()
+        "created_at": now_iso(),
     }
 
     try:
@@ -508,11 +517,13 @@ def get_global_memory(user_id: Optional[str]) -> str:
         return ""
 
     try:
-        res = supabase.table("chat_persona_memory") \
-            .select("known_name, known_facts, memory_summary") \
-            .eq("user_id", user_id) \
-            .maybeSingle() \
+        res = (
+            supabase.table("chat_persona_memory")
+            .select("known_name, known_facts, memory_summary")
+            .eq("user_id", user_id)
+            .maybeSingle()
             .execute()
+        )
 
         data = res.data or {}
         parts = []
@@ -540,11 +551,13 @@ def get_session_memory(session_id: Optional[str]) -> str:
         return ""
 
     try:
-        res = supabase.table("chat_persona_saved_chats") \
-            .select("memory_summary") \
-            .eq("id", session_id) \
-            .maybeSingle() \
+        res = (
+            supabase.table("chat_persona_saved_chats")
+            .select("memory_summary")
+            .eq("id", session_id)
+            .maybeSingle()
             .execute()
+        )
 
         data = res.data or {}
         return str(data.get("memory_summary") or "").strip()
@@ -562,7 +575,7 @@ def save_message(session_id: Optional[str], role: str, content: str) -> None:
             "session_id": session_id,
             "role": role,
             "content": normalize_text(content),
-            "created_at": now_iso()
+            "created_at": now_iso(),
         }).execute()
     except Exception as e:
         print("save_message error:", e)
@@ -588,7 +601,7 @@ def upsert_saved_chat(body: ChatBody, state_persona: PersonaState, reply: str) -
         "selected_voice_mode": body.voice_mode or state_persona.selected_voice_mode or "tts",
         "memory_summary": summary,
         "last_message_preview": normalize_text(reply)[:160],
-        "updated_at": now_iso()
+        "updated_at": now_iso(),
     }
 
     try:
@@ -604,11 +617,13 @@ def update_global_memory(user_id: Optional[str], text: str) -> None:
     facts = extract_user_facts(text)
 
     try:
-        existing_res = supabase.table("chat_persona_memory") \
-            .select("known_name, known_facts, memory_summary") \
-            .eq("user_id", user_id) \
-            .maybeSingle() \
+        existing_res = (
+            supabase.table("chat_persona_memory")
+            .select("known_name, known_facts, memory_summary")
+            .eq("user_id", user_id)
+            .maybeSingle()
             .execute()
+        )
 
         existing = existing_res.data or {}
         known_name = existing.get("known_name")
@@ -630,7 +645,7 @@ def update_global_memory(user_id: Optional[str], text: str) -> None:
             "known_name": known_name,
             "known_facts": known_facts,
             "memory_summary": memory_summary,
-            "updated_at": now_iso()
+            "updated_at": now_iso(),
         }).execute()
 
     except Exception as e:
@@ -653,7 +668,7 @@ async def italkyai_chat(body: ChatBody):
                 "requires_topup": True,
                 "reply": "Lütfen sohbete devam etmek için jeton yüklemesi yapınız.",
                 "token_cost": token_cost,
-                "tokens_remaining": current_tokens
+                "tokens_remaining": current_tokens,
             }
     else:
         token_cost = 0
@@ -671,7 +686,7 @@ async def italkyai_chat(body: ChatBody):
         user_text=user_text,
         state=persona_state,
         global_memory=global_memory,
-        session_memory=session_memory
+        session_memory=session_memory,
     )
 
     reply = call_gemini(messages)
@@ -691,7 +706,7 @@ async def italkyai_chat(body: ChatBody):
             user_id=body.user_id,
             delta=-token_cost,
             reason="chat_voice" if body.input_mode == "voice" else "chat_text",
-            body=body
+            body=body,
         )
 
     save_message(body.session_id, "user", user_text)
@@ -712,5 +727,5 @@ async def italkyai_chat(body: ChatBody):
             "tone_level": persona_state.tone_level,
             "always_oppositional": persona_state.always_oppositional,
             "selected_voice_mode": persona_state.selected_voice_mode,
-        }
+        },
         }
