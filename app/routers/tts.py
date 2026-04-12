@@ -427,7 +427,7 @@ async def tts(req: TTSRequest):
             )
 
     # 2) Kendi Sesim / clone -> Cartesia
-    if voice == "clone" and voice_ready and voice_id:
+    if voice == "clone" and voice_ready and voice_id and is_uuid(voice_id):
         audio = await cartesia_tts(text, req.lang, voice_id, tone, True)
         if audio:
             return TTSResponse(ok=True, audio_base64=audio, provider_used="clone-tone")
@@ -448,7 +448,7 @@ async def tts(req: TTSRequest):
             return TTSResponse(ok=True, audio_base64=audio, provider_used="openai-female")
 
     # 4) auto -> önce clone varsa Cartesia, yoksa frontend cihaz sesi kullansın
-    if voice == "auto" and voice_ready and voice_id:
+    if voice == "auto" and voice_ready and voice_id and is_uuid(voice_id):
         audio = await cartesia_tts(text, req.lang, voice_id, tone, True)
         if audio:
             return TTSResponse(ok=True, audio_base64=audio, provider_used="auto-clone-tone")
