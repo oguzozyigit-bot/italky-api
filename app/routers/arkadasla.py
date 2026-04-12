@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, Literal
 
 import requests
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 router = APIRouter(prefix="/api/arkadasla", tags=["arkadasla"])
 
@@ -22,6 +23,22 @@ SB_HEADERS = {
     "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
     "Content-Type": "application/json",
 }
+
+CHAT_CODE_RE = re.compile(r"^[A-Z]{2}[0-9]{4}$")
+FORBIDDEN_PREFIXES = {"AK", "FG"}
+
+
+def normalize_chat_code(code: str) -> str:
+    return (code or "").strip().upper()
+
+
+def is_valid_chat_code(code: str) -> bool:
+    code = normalize_chat_code(code)
+    if not CHAT_CODE_RE.fullmatch(code):
+        return False
+    if code[:2] in FORBIDDEN_PREFIXES:
+        return False
+    return True
 
 
 def utc_now_iso() -> str:
@@ -102,6 +119,14 @@ class StartRequestBody(BaseModel):
     target_code: str = Field(..., min_length=6, max_length=6)
     requester_lang: str = Field(default="tr", min_length=2, max_length=8)
 
+    @field_validator("target_code")
+    @classmethod
+    def validate_target_code(cls, v: str) -> str:
+        code = normalize_chat_code(v)
+        if not is_valid_chat_code(code):
+            raise ValueError("Kod formatı geçersiz. Örnek: RM4821")
+        return code
+
 
 class RespondRequestBody(BaseModel):
     request_id: str
@@ -129,10 +154,12 @@ def arkadasla_me(authorization: Optional[str] = Header(default=None)):
         raise HTTPException(status_code=404, detail="Profile not found")
 
     profile = rows[0]
+    chat_code = normalize_chat_code(profile.get("chat_code") or "")
+
     return {
         "ok": True,
         "user_id": user_id,
-        "chat_code": profile.get("chat_code"),
+        "chat_code": chat_code,
         "full_name": profile.get("full_name"),
         "email": profile.get("email"),
     }
@@ -155,17 +182,19 @@ def send_chat_request(
         raise HTTPException(status_code=404, detail="Requester profile not found")
 
     me = my_rows[0]
-    my_code = str(me.get("chat_code") or "").strip()
-    if not my_code:
-        raise HTTPException(status_code=400, detail="Requester chat_code missing")
+    my_code = normalize_chat_code(str(me.get("chat_code") or ""))
+    if not is_valid_chat_code(my_code):
+        raise HTTPException(status_code=400, detail="Requester chat_code missing or invalid")
 
-    if body.target_code == my_code:
+    target_code = normalize_chat_code(body.target_code)
+
+    if target_code == my_code:
         raise HTTPException(status_code=400, detail="Kendi koduna istek gönderemezsin")
 
     target_rows = sb_select(
         "profiles",
         select="id,full_name,chat_code",
-        filters={"chat_code": f"eq.{body.target_code}"},
+        filters={"chat_code": f"eq.{target_code}"},
         limit=1,
     )
     if not target_rows:
@@ -198,7 +227,7 @@ def send_chat_request(
         "requester_user_id": requester_id,
         "target_user_id": target_user_id,
         "requester_code": my_code,
-        "target_code": body.target_code,
+        "target_code": target_code,
         "requester_lang": body.requester_lang,
         "status": "pending",
         "created_at": utc_now_iso(),
@@ -249,7 +278,7 @@ def list_incoming_requests(authorization: Optional[str] = Header(default=None)):
             "request_id": r["id"],
             "requester_user_id": r["requester_user_id"],
             "requester_name": rp.get("full_name") or "Karşı Taraf",
-            "requester_code": r.get("requester_code"),
+            "requester_code": normalize_chat_code(r.get("requester_code") or ""),
             "requester_lang": r.get("requester_lang") or "tr",
             "status": r.get("status"),
             "created_at": r.get("created_at"),
@@ -364,7 +393,7 @@ def get_current_conversation(authorization: Optional[str] = Header(default=None)
             "status": conv["status"],
             "other_user_id": other_user_id,
             "other_name": other.get("full_name") or "Karşı Taraf",
-            "other_code": other.get("chat_code"),
+            "other_code": normalize_chat_code(other.get("chat_code") or ""),
             "created_at": conv.get("created_at"),
             "updated_at": conv.get("updated_at"),
         }
@@ -469,7 +498,12 @@ def end_conversation(
     updated = sb_patch(
         "arkadasla_conversations",
         {"id": f"eq.{conversation_id}"},
-        {"status": "ended", "updated_at": utc_now_iso()},
+        {
+            "status": "ended",
+            "ended_by": user_id,
+            "ended_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+        },
     )[0]
 
     return {
