@@ -392,7 +392,7 @@ def get_profile_tokens(user_id: Optional[str]) -> int:
             supabase.table("wallets")
             .select("*")
             .eq("user_id", user_id)
-            .maybeSingle()
+            .maybe_single()
             .execute()
         )
         data = res.data or {}
@@ -407,7 +407,7 @@ def get_profile_tokens(user_id: Optional[str]) -> int:
             supabase.table("profiles")
             .select("tokens")
             .eq("id", user_id)
-            .maybeSingle()
+            .maybe_single()
             .execute()
         )
         data = res.data or {}
@@ -426,7 +426,7 @@ def set_profile_tokens(user_id: Optional[str], new_total: int) -> int:
             supabase.table("wallets")
             .select("*")
             .eq("user_id", user_id)
-            .maybeSingle()
+            .maybe_single()
             .execute()
         )
         wallet = wallet_res.data or None
@@ -521,7 +521,7 @@ def get_global_memory(user_id: Optional[str]) -> str:
             supabase.table("chat_persona_memory")
             .select("known_name, known_facts, memory_summary")
             .eq("user_id", user_id)
-            .maybeSingle()
+            .maybe_single())
             .execute()
         )
 
@@ -621,7 +621,7 @@ def update_global_memory(user_id: Optional[str], text: str) -> None:
             supabase.table("chat_persona_memory")
             .select("known_name, known_facts, memory_summary")
             .eq("user_id", user_id)
-            .maybeSingle()
+            .maybe_single()
             .execute()
         )
 
