@@ -20,6 +20,7 @@ from app.routers.italkyai_voice import router as italkyai_voice_router
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers.onetoall_ws import router as onetoall_ws_router
+from app.routers.arkadasla import router as arkadasla_router
 
 # CORE ROUTERS
 from app.routers.chat_ai import router as chat_ai_router
@@ -120,6 +121,7 @@ app.include_router(ui_translate_router, prefix="/api")
 app.include_router(nfc_tokens_router, prefix="/api")
 app.include_router(italkyai_chat_router)
 app.include_router(italkyai_voice_router)
+app.include_router(arkadasla_router)
 
 app.include_router(nfc_router)
 app.include_router(session_router)
