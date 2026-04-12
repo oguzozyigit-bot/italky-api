@@ -28,6 +28,13 @@ CHAT_CODE_RE = re.compile(r"^[A-Z]{2}[0-9]{4}$")
 FORBIDDEN_PREFIXES = {"AK", "FG"}
 
 
+# =========================================================
+# HELPERS
+# =========================================================
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def normalize_chat_code(code: str) -> str:
     return (code or "").strip().upper()
 
@@ -39,10 +46,6 @@ def is_valid_chat_code(code: str) -> bool:
     if code[:2] in FORBIDDEN_PREFIXES:
         return False
     return True
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _get_bearer(auth_header: Optional[str]) -> str:
@@ -115,9 +118,47 @@ def sb_patch(table: str, filters: dict[str, str], payload: dict) -> list[dict]:
     return resp.json() or []
 
 
+def sb_upsert(table: str, payload: dict | list[dict], on_conflict: Optional[str] = None) -> list[dict]:
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {**SB_HEADERS, "Prefer": "return=representation,resolution=merge-duplicates"}
+    params: dict[str, str] = {}
+    if on_conflict:
+        params["on_conflict"] = on_conflict
+
+    resp = requests.post(url, headers=headers, params=params, json=payload, timeout=20)
+    if resp.status_code >= 300:
+        raise HTTPException(status_code=500, detail=f"{table} upsert failed: {resp.text}")
+    return resp.json() or []
+
+
+def sb_delete(table: str, filters: dict[str, str]) -> list[dict]:
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {**SB_HEADERS, "Prefer": "return=representation"}
+    resp = requests.delete(url, headers=headers, params=filters, timeout=20)
+    if resp.status_code >= 300:
+        raise HTTPException(status_code=500, detail=f"{table} delete failed: {resp.text}")
+    return resp.json() or []
+
+
+def flag_from_lang(code: str) -> str:
+    mapping = {
+        "tr": "🇹🇷",
+        "en": "🇬🇧",
+        "de": "🇩🇪",
+        "fr": "🇫🇷",
+        "it": "🇮🇹",
+        "es": "🇪🇸",
+    }
+    return mapping.get((code or "").lower(), "🌐")
+
+
+# =========================================================
+# MODELS
+# =========================================================
 class StartRequestBody(BaseModel):
     target_code: str = Field(..., min_length=6, max_length=6)
     requester_lang: str = Field(default="tr", min_length=2, max_length=8)
+    requester_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
 
     @field_validator("target_code")
     @classmethod
@@ -137,9 +178,46 @@ class SendMessageBody(BaseModel):
     conversation_id: str
     text: str = Field(..., min_length=1, max_length=4000)
     source_lang: str = Field(default="tr", min_length=2, max_length=8)
+    source_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
     translated_text: Optional[str] = None
 
 
+class PresenceUpdateBody(BaseModel):
+    app_state: Literal["foreground", "background", "inactive"] = "foreground"
+    selected_lang: str = Field(default="tr", min_length=2, max_length=8)
+    selected_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
+    is_busy: bool = False
+    current_conversation_id: Optional[str] = None
+
+
+class AddContactBody(BaseModel):
+    contact_code: str = Field(..., min_length=6, max_length=6)
+    contact_name: str = Field(..., min_length=1, max_length=80)
+    contact_lang: Optional[str] = Field(default=None, min_length=2, max_length=8)
+    contact_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
+
+    @field_validator("contact_code")
+    @classmethod
+    def validate_contact_code(cls, v: str) -> str:
+        code = normalize_chat_code(v)
+        if not is_valid_chat_code(code):
+            raise ValueError("Kod formatı geçersiz. Örnek: RM4821")
+        return code
+
+
+class SaveChatBody(BaseModel):
+    conversation_id: Optional[str] = None
+    title: str = Field(..., min_length=1, max_length=120)
+    peer_user_id: Optional[str] = None
+    peer_name: Optional[str] = None
+    peer_lang: Optional[str] = Field(default=None, min_length=2, max_length=8)
+    peer_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
+    messages: list[dict] = Field(default_factory=list)
+
+
+# =========================================================
+# BASIC / ME
+# =========================================================
 @router.get("/me")
 def arkadasla_me(authorization: Optional[str] = Header(default=None)):
     user_id = get_current_user_id(authorization)
@@ -165,6 +243,171 @@ def arkadasla_me(authorization: Optional[str] = Header(default=None)):
     }
 
 
+# =========================================================
+# PRESENCE
+# =========================================================
+@router.post("/presence")
+def upsert_presence(
+    body: PresenceUpdateBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    user_id = get_current_user_id(authorization)
+
+    row = sb_upsert(
+        "arkadasla_presence",
+        {
+            "user_id": user_id,
+            "is_online": body.app_state in ("foreground", "background"),
+            "is_busy": body.is_busy,
+            "app_state": body.app_state,
+            "current_conversation_id": body.current_conversation_id,
+            "selected_lang": body.selected_lang,
+            "selected_flag": body.selected_flag or flag_from_lang(body.selected_lang),
+            "last_seen_at": utc_now_iso(),
+            "updated_at": utc_now_iso(),
+        },
+        on_conflict="user_id",
+    )[0]
+
+    return {"ok": True, "presence": row}
+
+
+@router.post("/presence/offline")
+def set_presence_offline(authorization: Optional[str] = Header(default=None)):
+    user_id = get_current_user_id(authorization)
+
+    rows = sb_patch(
+        "arkadasla_presence",
+        {"user_id": f"eq.{user_id}"},
+        {
+            "is_online": False,
+            "is_busy": False,
+            "app_state": "inactive",
+            "current_conversation_id": None,
+            "updated_at": utc_now_iso(),
+        },
+    )
+
+    return {"ok": True, "presence": rows[0] if rows else None}
+
+
+# =========================================================
+# CONTACTS / REHBER
+# =========================================================
+@router.post("/contacts")
+def add_contact(
+    body: AddContactBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    owner_user_id = get_current_user_id(authorization)
+
+    target_rows = sb_select(
+        "profiles",
+        select="id,full_name,chat_code",
+        filters={"chat_code": f"eq.{body.contact_code}"},
+        limit=1,
+    )
+    target = target_rows[0] if target_rows else None
+
+    inserted = sb_upsert(
+        "arkadasla_contacts",
+        {
+            "owner_user_id": owner_user_id,
+            "contact_user_id": target["id"] if target else None,
+            "contact_name": body.contact_name.strip(),
+            "contact_code": body.contact_code,
+            "contact_lang": body.contact_lang,
+            "contact_flag": body.contact_flag or flag_from_lang(body.contact_lang or "tr"),
+            "updated_at": utc_now_iso(),
+        },
+        on_conflict="owner_user_id,contact_code",
+    )[0]
+
+    return {"ok": True, "contact": inserted}
+
+
+@router.get("/contacts")
+def list_contacts(authorization: Optional[str] = Header(default=None)):
+    owner_user_id = get_current_user_id(authorization)
+
+    contacts = sb_select(
+        "arkadasla_contacts",
+        select="id,owner_user_id,contact_user_id,contact_name,contact_code,contact_lang,contact_flag,created_at,updated_at",
+        filters={"owner_user_id": f"eq.{owner_user_id}"},
+        order="updated_at.desc",
+        limit=200,
+    )
+
+    if not contacts:
+        return {"ok": True, "items": []}
+
+    codes = [normalize_chat_code(c["contact_code"]) for c in contacts if c.get("contact_code")]
+    if codes:
+        code_filter = ",".join(codes)
+        profiles = sb_select(
+            "profiles",
+            select="id,full_name,chat_code",
+            filters={"chat_code": f"in.({code_filter})"},
+            limit=500,
+        )
+    else:
+        profiles = []
+
+    profile_by_code = {normalize_chat_code(p["chat_code"]): p for p in profiles if p.get("chat_code")}
+
+    user_ids = [p["id"] for p in profiles if p.get("id")]
+    if user_ids:
+        uid_filter = ",".join(user_ids)
+        presences = sb_select(
+            "arkadasla_presence",
+            select="user_id,is_online,is_busy,app_state,current_conversation_id,selected_lang,selected_flag,last_seen_at,updated_at",
+            filters={"user_id": f"in.({uid_filter})"},
+            limit=1000,
+        )
+    else:
+        presences = []
+
+    presence_by_user = {p["user_id"]: p for p in presences if p.get("user_id")}
+
+    items = []
+    for c in contacts:
+        code = normalize_chat_code(c["contact_code"])
+        prof = profile_by_code.get(code, {})
+        prs = presence_by_user.get(prof.get("id"), {})
+
+        items.append({
+            "id": c["id"],
+            "contact_name": c.get("contact_name") or prof.get("full_name") or "Kişi",
+            "contact_code": code,
+            "contact_lang": c.get("contact_lang") or prs.get("selected_lang") or "tr",
+            "contact_flag": c.get("contact_flag") or prs.get("selected_flag") or "🌐",
+            "contact_user_id": prof.get("id"),
+            "is_online": bool(prs.get("is_online", False)),
+            "is_busy": bool(prs.get("is_busy", False)),
+            "last_seen_at": prs.get("last_seen_at"),
+            "updated_at": c.get("updated_at"),
+        })
+
+    return {"ok": True, "items": items}
+
+
+@router.delete("/contacts/{contact_id}")
+def delete_contact(contact_id: str, authorization: Optional[str] = Header(default=None)):
+    owner_user_id = get_current_user_id(authorization)
+
+    sb_delete(
+        "arkadasla_contacts",
+        {
+            "id": f"eq.{contact_id}",
+            "owner_user_id": f"eq.{owner_user_id}",
+        },
+    )
+    return {"ok": True}
+
+
+# =========================================================
+# REQUESTS
+# =========================================================
 @router.post("/request")
 def send_chat_request(
     body: StartRequestBody,
@@ -203,6 +446,20 @@ def send_chat_request(
     target = target_rows[0]
     target_user_id = target["id"]
 
+    target_presence_rows = sb_select(
+        "arkadasla_presence",
+        select="user_id,is_online,is_busy,app_state,current_conversation_id,selected_lang,selected_flag,last_seen_at",
+        filters={"user_id": f"eq.{target_user_id}"},
+        limit=1,
+    )
+    target_presence = target_presence_rows[0] if target_presence_rows else None
+
+    if not target_presence or not bool(target_presence.get("is_online", False)):
+        raise HTTPException(status_code=409, detail="Bu kullanıcı şu anda çevrimdışı.")
+
+    if bool(target_presence.get("is_busy", False)):
+        raise HTTPException(status_code=409, detail="Bu kullanıcı şu anda meşgul.")
+
     existing = sb_select(
         "arkadasla_requests",
         select="id,status,requester_user_id,target_user_id",
@@ -229,6 +486,7 @@ def send_chat_request(
         "requester_code": my_code,
         "target_code": target_code,
         "requester_lang": body.requester_lang,
+        "requester_flag": body.requester_flag or flag_from_lang(body.requester_lang),
         "status": "pending",
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -241,6 +499,8 @@ def send_chat_request(
         "status": row["status"],
         "target_user_id": target_user_id,
         "target_name": target.get("full_name") or "Karşı Taraf",
+        "target_lang": target_presence.get("selected_lang") if target_presence else None,
+        "target_flag": target_presence.get("selected_flag") if target_presence else None,
     }
 
 
@@ -250,7 +510,7 @@ def list_incoming_requests(authorization: Optional[str] = Header(default=None)):
 
     rows = sb_select(
         "arkadasla_requests",
-        select="id,requester_user_id,target_user_id,requester_code,target_code,requester_lang,status,created_at",
+        select="id,requester_user_id,target_user_id,requester_code,target_code,requester_lang,requester_flag,status,created_at",
         filters={
             "target_user_id": f"eq.{user_id}",
             "status": "eq.pending",
@@ -280,6 +540,7 @@ def list_incoming_requests(authorization: Optional[str] = Header(default=None)):
             "requester_name": rp.get("full_name") or "Karşı Taraf",
             "requester_code": normalize_chat_code(r.get("requester_code") or ""),
             "requester_lang": r.get("requester_lang") or "tr",
+            "requester_flag": r.get("requester_flag") or flag_from_lang(r.get("requester_lang") or "tr"),
             "status": r.get("status"),
             "created_at": r.get("created_at"),
         })
@@ -350,6 +611,51 @@ def respond_chat_request(
         },
     )[0]
 
+    requester_presence = sb_select(
+        "arkadasla_presence",
+        select="user_id,selected_lang,selected_flag,app_state",
+        filters={"user_id": f"eq.{requester_user_id}"},
+        limit=1,
+    )
+    target_presence = sb_select(
+        "arkadasla_presence",
+        select="user_id,selected_lang,selected_flag,app_state",
+        filters={"user_id": f"eq.{target_user_id}"},
+        limit=1,
+    )
+
+    rp = requester_presence[0] if requester_presence else {}
+    tp = target_presence[0] if target_presence else {}
+
+    sb_upsert(
+        "arkadasla_presence",
+        [
+            {
+                "user_id": requester_user_id,
+                "is_online": True,
+                "is_busy": True,
+                "app_state": rp.get("app_state") or "foreground",
+                "current_conversation_id": conversation_id,
+                "selected_lang": rp.get("selected_lang") or req.get("requester_lang") or "tr",
+                "selected_flag": rp.get("selected_flag") or req.get("requester_flag") or flag_from_lang(req.get("requester_lang") or "tr"),
+                "last_seen_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            },
+            {
+                "user_id": target_user_id,
+                "is_online": True,
+                "is_busy": True,
+                "app_state": tp.get("app_state") or "foreground",
+                "current_conversation_id": conversation_id,
+                "selected_lang": tp.get("selected_lang") or "tr",
+                "selected_flag": tp.get("selected_flag") or flag_from_lang(tp.get("selected_lang") or "tr"),
+                "last_seen_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            },
+        ],
+        on_conflict="user_id",
+    )
+
     return {
         "ok": True,
         "request_id": updated["id"],
@@ -358,6 +664,9 @@ def respond_chat_request(
     }
 
 
+# =========================================================
+# CONVERSATION
+# =========================================================
 @router.get("/conversation/current")
 def get_current_conversation(authorization: Optional[str] = Header(default=None)):
     user_id = get_current_user_id(authorization)
@@ -386,6 +695,14 @@ def get_current_conversation(authorization: Optional[str] = Header(default=None)
     )
     other = profile_rows[0] if profile_rows else {}
 
+    other_presence_rows = sb_select(
+        "arkadasla_presence",
+        select="selected_lang,selected_flag,is_online,is_busy",
+        filters={"user_id": f"eq.{other_user_id}"},
+        limit=1,
+    )
+    other_presence = other_presence_rows[0] if other_presence_rows else {}
+
     return {
         "ok": True,
         "conversation": {
@@ -394,6 +711,8 @@ def get_current_conversation(authorization: Optional[str] = Header(default=None)
             "other_user_id": other_user_id,
             "other_name": other.get("full_name") or "Karşı Taraf",
             "other_code": normalize_chat_code(other.get("chat_code") or ""),
+            "other_lang": other_presence.get("selected_lang") or "tr",
+            "other_flag": other_presence.get("selected_flag") or flag_from_lang(other_presence.get("selected_lang") or "tr"),
             "created_at": conv.get("created_at"),
             "updated_at": conv.get("updated_at"),
         }
@@ -426,6 +745,7 @@ def send_message(
         "sender_user_id": sender_user_id,
         "text": body.text,
         "source_lang": body.source_lang,
+        "source_flag": body.source_flag or flag_from_lang(body.source_lang),
         "translated_text": body.translated_text,
         "created_at": utc_now_iso(),
     })[0]
@@ -495,6 +815,7 @@ def end_conversation(
     if not rows:
         raise HTTPException(status_code=404, detail="Active conversation not found")
 
+    conv = rows[0]
     updated = sb_patch(
         "arkadasla_conversations",
         {"id": f"eq.{conversation_id}"},
@@ -506,8 +827,140 @@ def end_conversation(
         },
     )[0]
 
+    user_a = conv["user_a"]
+    user_b = conv["user_b"]
+
+    sb_upsert(
+        "arkadasla_presence",
+        [
+            {
+                "user_id": user_a,
+                "is_online": True,
+                "is_busy": False,
+                "app_state": "foreground",
+                "current_conversation_id": None,
+                "last_seen_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            },
+            {
+                "user_id": user_b,
+                "is_online": True,
+                "is_busy": False,
+                "app_state": "foreground",
+                "current_conversation_id": None,
+                "last_seen_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            },
+        ],
+        on_conflict="user_id",
+    )
+
     return {
         "ok": True,
         "conversation_id": updated["id"],
         "status": updated["status"],
     }
+
+
+# =========================================================
+# SAVED CHATS
+# =========================================================
+@router.post("/saved")
+def save_chat(
+    body: SaveChatBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    owner_user_id = get_current_user_id(authorization)
+
+    saved = sb_insert("arkadasla_saved_chats", {
+        "id": str(uuid.uuid4()),
+        "owner_user_id": owner_user_id,
+        "conversation_id": body.conversation_id,
+        "title": body.title.strip(),
+        "peer_user_id": body.peer_user_id,
+        "peer_name": body.peer_name,
+        "peer_lang": body.peer_lang,
+        "peer_flag": body.peer_flag or flag_from_lang(body.peer_lang or "tr"),
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    })[0]
+
+    message_rows = []
+    for item in body.messages:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        message_rows.append({
+            "id": str(uuid.uuid4()),
+            "saved_chat_id": saved["id"],
+            "side": item.get("side") or "left",
+            "sender_name": item.get("sender_name") or item.get("name"),
+            "text": text,
+            "translated_text": item.get("translated_text"),
+            "meta": item.get("meta"),
+            "created_at": utc_now_iso(),
+        })
+
+    if message_rows:
+        sb_insert("arkadasla_saved_chat_messages", message_rows)
+
+    return {"ok": True, "saved_chat": saved}
+
+
+@router.get("/saved")
+def list_saved_chats(authorization: Optional[str] = Header(default=None)):
+    owner_user_id = get_current_user_id(authorization)
+
+    rows = sb_select(
+        "arkadasla_saved_chats",
+        select="id,title,peer_user_id,peer_name,peer_lang,peer_flag,conversation_id,created_at,updated_at",
+        filters={"owner_user_id": f"eq.{owner_user_id}"},
+        order="updated_at.desc",
+        limit=200,
+    )
+
+    return {"ok": True, "items": rows}
+
+
+@router.get("/saved/{saved_chat_id}")
+def get_saved_chat(saved_chat_id: str, authorization: Optional[str] = Header(default=None)):
+    owner_user_id = get_current_user_id(authorization)
+
+    rows = sb_select(
+        "arkadasla_saved_chats",
+        select="*",
+        filters={
+            "id": f"eq.{saved_chat_id}",
+            "owner_user_id": f"eq.{owner_user_id}",
+        },
+        limit=1,
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Saved chat not found")
+
+    saved = rows[0]
+
+    messages = sb_select(
+        "arkadasla_saved_chat_messages",
+        select="id,side,sender_name,text,translated_text,meta,created_at",
+        filters={"saved_chat_id": f"eq.{saved_chat_id}"},
+        order="created_at.asc",
+        limit=1000,
+    )
+
+    return {"ok": True, "saved_chat": saved, "messages": messages}
+
+
+@router.delete("/saved/{saved_chat_id}")
+def delete_saved_chat(saved_chat_id: str, authorization: Optional[str] = Header(default=None)):
+    owner_user_id = get_current_user_id(authorization)
+
+    sb_delete(
+        "arkadasla_saved_chats",
+        {
+            "id": f"eq.{saved_chat_id}",
+            "owner_user_id": f"eq.{owner_user_id}",
+        },
+    )
+
+    return {"ok": True}
