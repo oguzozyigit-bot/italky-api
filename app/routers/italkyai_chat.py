@@ -452,12 +452,11 @@ def set_profile_tokens(user_id: Optional[str], new_total: int) -> int:
             )
         else:
             (
-                supabase.table("wallets")
-                .insert({
-                    "user_id": user_id,
-                    "tokens": new_total,
-                    "created_at": now_iso(),
-                })
+                supabase.table("wallets").insert({
+    "user_id": user_id,
+    "balance": new_total,
+    "created_at": now_iso()
+})
                 .execute()
             )
     except Exception as e:
