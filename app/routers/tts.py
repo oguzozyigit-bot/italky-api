@@ -4,6 +4,7 @@ import os
 import logging
 import base64
 import hashlib
+import uuid
 from typing import Optional, Dict
 
 import httpx
@@ -83,6 +84,15 @@ PRESET_VOICE_CONFIG: Dict[str, Dict[str, str]] = {
     },
 }
 
+
+def is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(str(value).strip())
+        return True
+    except Exception:
+        return False
+
+
 def canon_lang(code: str) -> str:
     return (code or "tr").strip().lower().replace("_", "-")
 
@@ -94,7 +104,7 @@ def lang_base(code: str) -> str:
 def canon_voice(value: Optional[str]) -> str:
     v = (value or "auto").strip().lower()
 
-    if v in ("own", "my"):
+    if v in ("own", "my", "mine", "kendi", "kendi sesim"):
         return "clone"
 
     if v in ("female", "male", "clone", "auto", "preset"):
@@ -185,7 +195,13 @@ async def get_user_profile(user_id: Optional[str]) -> Optional[dict]:
         return data[0] if data else None
 
 
-async def cartesia_tts(text: str, lang: str, voice_id: str, tone: str, use_tone: bool = True):
+async def cartesia_tts(
+    text: str,
+    lang: str,
+    voice_id: str,
+    tone: str,
+    use_tone: bool = True,
+):
     if not CARTESIA_API_KEY or not voice_id:
         return None
 
