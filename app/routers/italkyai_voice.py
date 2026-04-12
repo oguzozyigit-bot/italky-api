@@ -17,7 +17,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-VOICE_BUCKET = "voice-profiles"
+VOICE_BUCKET = "voice-samples"
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
@@ -108,30 +108,31 @@ async def upload_voice(
 
     try:
         if voice_type == "mine":
-            supabase.table("profiles").update({
-                "voice_sample_path": storage_path,
-                "tts_voice_ready": True,
-                "tts_voice_id": storage_path
-            }).eq("id", user_id).execute()
-            _delete_old_storage_path(old_mine_path)
+    supabase.table("profiles").update({
+        "voice_sample_path": storage_path,
+        "tts_voice_ready": False,
+        "tts_voice_id": None,
+        "tts_voice_last_error": None
+    }).eq("id", user_id).execute()
+    _delete_old_storage_path(old_mine_path)
 
         elif voice_type == "second":
-            supabase.table("profiles").update({
-                "second_voice_name": _safe_name(voice_name, "2. Ses"),
-                "second_voice_sample_path": storage_path,
-                "second_tts_voice_ready": True,
-                "second_tts_voice_id": storage_path
-            }).eq("id", user_id).execute()
-            _delete_old_storage_path(old_second_path)
+    supabase.table("profiles").update({
+        "second_voice_name": _safe_name(voice_name, "2. Ses"),
+        "second_voice_sample_path": storage_path,
+        "second_tts_voice_ready": False,
+        "second_tts_voice_id": None
+    }).eq("id", user_id).execute()
+    _delete_old_storage_path(old_second_path)
 
         elif voice_type == "memory":
-            supabase.table("profiles").update({
-                "memory_voice_name": _safe_name(voice_name, "Hatıra Sesi"),
-                "memory_voice_sample_path": storage_path,
-                "memory_tts_voice_ready": True,
-                "memory_tts_voice_id": storage_path
-            }).eq("id", user_id).execute()
-            _delete_old_storage_path(old_memory_path)
+    supabase.table("profiles").update({
+        "memory_voice_name": _safe_name(voice_name, "Hatıra Sesi"),
+        "memory_voice_sample_path": storage_path,
+        "memory_tts_voice_ready": False,
+        "memory_tts_voice_id": None
+    }).eq("id", user_id).execute()
+    _delete_old_storage_path(old_memory_path)
 
     except Exception:
         pass
