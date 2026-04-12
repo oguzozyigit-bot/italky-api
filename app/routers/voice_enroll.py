@@ -156,16 +156,26 @@ def _cartesia_clone(user_id: str, sample_url: str, lang: str) -> dict:
         data=data,
         timeout=60,
     )
+
+    if r.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Cartesia clone failed: {r.text}")
+
+    try:
+        j = r.json()
+    except Exception:
+        raise HTTPException(status_code=500, detail="Cartesia clone response is not valid JSON")
+
     voice_id = j.get("id") or j.get("voice_id")
-if not voice_id:
-    raise HTTPException(status_code=500, detail="Cartesia voice_id missing")
+    if not voice_id:
+        raise HTTPException(status_code=500, detail="Cartesia voice_id missing")
 
-logger.warning("CARTESIA_CLONE_OK user=%s voice_id=%s", user_id, voice_id)
+    logger.warning("CARTESIA_CLONE_OK user=%s voice_id=%s", user_id, voice_id)
 
-return {
-    "provider": "cartesia",
-    "voice_id": voice_id,
-}
+    return {
+        "provider": "cartesia",
+        "voice_id": voice_id,
+    }
+
 
 def _mock_enroll(user_id: str, paths: list[str]) -> dict:
     return {
@@ -264,7 +274,7 @@ def _enroll_voice_by_type(voice_type: str, authorization: Optional[str]) -> dict
 
     except HTTPException as e:
         try:
-          _update_profile(user_id, _failure_payload_for_type(str(e.detail), voice_type))
+            _update_profile(user_id, _failure_payload_for_type(str(e.detail), voice_type))
         except Exception:
             pass
         raise
