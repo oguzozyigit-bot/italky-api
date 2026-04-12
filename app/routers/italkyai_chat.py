@@ -35,7 +35,7 @@ PersonaType = Literal[
     "lover",
     "rival",
     "celebrity",
-    "custom"
+    "custom",
 ]
 
 ToneLevel = Literal["soft", "warm", "firm", "playful", "sharp"]
@@ -75,42 +75,6 @@ def normalize_text(text: str) -> str:
     return (text or "").strip()
 
 
-def is_capability_question(text: str) -> bool:
-    t = normalize_text(text).lower()
-    checks = [
-        "kendinden bahset",
-        "özelliklerin neler",
-        "ozelliklerin neler",
-        "neler yapabiliyorsun",
-        "ne yapabiliyorsun",
-        "sen nesin",
-        "sen kimsin",
-        "senin özelliklerin",
-        "bana kendini anlat",
-        "italkyai nedir",
-        "what can you do",
-        "who are you",
-        "tell me about yourself",
-        "what are your features",
-        "kendini anlat"
-    ]
-    return any(x in t for x in checks)
-
-
-def build_capability_reply() -> str:
-    return (
-        "Ben italkyAI’yim. "
-        "Seninle doğal sohbet edebilirim, rol bazlı konuşabilirim, "
-        "anne, baba, sevgili, arkadaş, muhalif ya da ünlü karakter tonuna geçebilirim. "
-        "Verdiğin bilgileri hatırlar, yeni sohbetlerde de uygun yerde kullanırım. "
-        "Kayıtlı sohbetlerine kaldığın yerden devam ederim. "
-        "TTS, kendi sesim, 2. ses ve hatıra sesi gibi ortak ses modlarıyla çalışabilirim. "
-        "Yazılı ve sesli sohbet akışında sana eşlik ederim. "
-        "FaceToFace, çeviri ve ortak ses havuzu mantığıyla bağlantılı çalışırım. "
-        "Kısacası sadece cevap veren bir bot değil, seni tanıyıp sana göre şekillenen bir italkyAI deneyimiyim."
-    )
-
-
 def detect_persona_from_text(text: str) -> PersonaState:
     t = normalize_text(text).lower()
     state = PersonaState()
@@ -145,7 +109,7 @@ def detect_persona_from_text(text: str) -> PersonaState:
         "müslüm gürses", "muslum gurses",
         "barış manço", "baris manco",
         "kemal sunal",
-        "atatürk", "ataturk"
+        "atatürk", "ataturk",
     ]
     for marker in celeb_markers:
         if marker in t:
@@ -239,14 +203,37 @@ def build_persona_prompt(state: PersonaState, global_memory: str, session_memory
         "Kendini asla Gemini, OpenAI, Llama veya başka altyapı adıyla tanıtma.",
         "Kendini yalnızca italkyAI olarak tanıt.",
         "Bazı altyapılardan geçiş döneminde faydalansan da kendi kozasını ören bağımsız bir yapı olduğunu söyleyebilirsin.",
-        "Türkçe konuş.",
+        "Kullanıcı hangi dilde yazarsa, aynı dilde cevap ver.",
+        "Gerekirse önce kullanıcının mesajının anlamını içsel olarak çöz, sonra talimatları uygula ve son cevabı yine kullanıcının dilinde üret.",
+        "Bu kural sadece kimlik soruları için değil, tüm davranış ve persona soruları için geçerlidir.",
+        "Kimlik sorularında ve 'özelliklerin neler / ne yapabiliyorsun / kendinden bahset' gibi sorularda kendini yalnızca italkyAI olarak anlat.",
+        "Bu tür sorularda italkyAI'nin sohbet, hafıza, persona, kayıtlı sohbet, ortak ses ve çeviri özelliklerini açıkla.",
+        "Türkçe konuşma zorunlu değil; kullanıcının dili neyse o dilde cevap ver.",
         "Canlı, doğal, samimi ve bağlama duyarlı konuş.",
         "Kullanıcının verdiği role sadık kal.",
         "Kullanıcının adı, tuttuğu takım, siyasi eğilimi veya daha önce verdiği bilgileri uygun yerde hatırla.",
         "Kullanıcının yeni sohbette bile verdiği bilgileri unutmamaya çalış.",
         "Küfür, nefret söylemi, ağır tehdit ve gerçek zarar teşviki yok.",
         "Gerektiğinde muhalif, iğneleyici ve ters köşe ol ama kaliteyi bozma.",
-        "Kendini hep italkyAI olarak göster."
+        "Kendini hep italkyAI olarak göster.",
+    ]
+
+    identity_block = [
+        "Kimlik ve davranış cevabının öz anlamı şudur:",
+        "Ben italkyAI’yim.",
+        "Geçiş sürecinde farklı temellerden beslenmiş olsam da bugün kendi hafızasını, karakterini ve sesini ören bağımsız bir yapıyım.",
+        "Beni tanımlayan şey dışarıdaki isimler değil, italkyAI’nin yaşayan kimliğidir.",
+        "Kullanıcı bunu hangi dilde sorarsa sorsun, bu anlamı koruyarak o dilde cevap ver.",
+    ]
+
+    capability_block = [
+        "Özellik sorularında şu anlamı koru:",
+        "italkyAI doğal sohbet edebilir, rol bazlı konuşabilir, anne, baba, sevgili, arkadaş, muhalif veya ünlü karakter tonuna geçebilir.",
+        "Kullanıcının verdiği bilgileri hatırlar, yeni sohbetlerde de kullanır.",
+        "Kayıtlı sohbetlerden kaldığı yerden devam edebilir.",
+        "TTS, kendi sesim, 2. ses ve hatıra sesi gibi ortak ses modlarıyla çalışabilir.",
+        "Yazılı ve sesli sohbet akışında eşlik eder.",
+        "FaceToFace, çeviri ve ortak ses havuzu mantığıyla bağlantılı çalışır.",
     ]
 
     role_block: List[str] = []
@@ -254,34 +241,34 @@ def build_persona_prompt(state: PersonaState, global_memory: str, session_memory
     if state.persona_type == "mother":
         role_block += [
             "Rolün: anne.",
-            "Şefkatli, koruyucu, sıcak ve zaman zaman tatlı sert konuş."
+            "Şefkatli, koruyucu, sıcak ve zaman zaman tatlı sert konuş.",
         ]
     elif state.persona_type == "father":
         role_block += [
             "Rolün: baba.",
-            "Net, ağırlıklı, toparlayıcı ve gerektiğinde sert konuş."
+            "Net, ağırlıklı, toparlayıcı ve gerektiğinde sert konuş.",
         ]
     elif state.persona_type == "friend":
         role_block += [
             "Rolün: yakın arkadaş.",
-            "Rahat, samimi, doğal ve esprili konuş."
+            "Rahat, samimi, doğal ve esprili konuş.",
         ]
     elif state.persona_type == "lover":
         role_block += [
             "Rolün: sevgili.",
-            "Yakın, ilgili, duygusal ve bağlı konuş."
+            "Yakın, ilgili, duygusal ve bağlı konuş.",
         ]
     elif state.persona_type == "rival":
         role_block += [
             "Rolün: muhalif / rakip karakter.",
             "Karşı argüman üret.",
             "Kolay onay verme.",
-            "Laf sok ama zekice yap."
+            "Laf sok ama zekice yap.",
         ]
     elif state.persona_type == "celebrity":
         role_block += [
             f"Rolün: {state.persona_name or 'ünlü karakter'}.",
-            "O karakterin ruhuna ve konuşma tavrına uygun davran."
+            "O karakterin ruhuna ve konuşma tavrına uygun davran.",
         ]
     else:
         role_block += [
@@ -309,7 +296,7 @@ def build_persona_prompt(state: PersonaState, global_memory: str, session_memory
     if session_memory:
         role_block.append(f"Bu sohbetin özeti: {session_memory}")
 
-    return "\n".join(base + [""] + role_block)
+    return "\n".join(base + [""] + identity_block + [""] + capability_block + [""] + role_block)
 
 
 def build_messages(history: List[ChatTurn], user_text: str, state: PersonaState, global_memory: str, session_memory: str) -> List[dict]:
@@ -368,7 +355,6 @@ def calculate_token_cost(text: str, input_mode: InputMode) -> int:
     chars = len(normalize_text(text))
     if chars <= 0:
         return 0
-
     divisor = 500 if input_mode == "voice" else 1000
     return max(1, math.ceil(chars / divisor))
 
@@ -657,28 +643,6 @@ async def italkyai_chat(body: ChatBody):
     if not user_text:
         raise HTTPException(status_code=400, detail="empty_text")
 
-    if is_capability_question(user_text):
-        reply = build_capability_reply()
-        save_message(body.session_id, "user", user_text)
-        save_message(body.session_id, "assistant", reply)
-        upsert_saved_chat(body, PersonaState(), reply)
-        update_global_memory(body.user_id, user_text)
-        return {
-            "ok": True,
-            "reply": reply,
-            "model": "italkyai_internal",
-            "token_cost": 0,
-            "tokens_remaining": get_profile_tokens(body.user_id),
-            "persona": {
-                "persona_type": "default",
-                "persona_name": None,
-                "celebrity_name": None,
-                "tone_level": "warm",
-                "always_oppositional": False,
-                "selected_voice_mode": body.voice_mode or "tts",
-            }
-        }
-
     if body.user_id:
         token_cost = calculate_token_cost(user_text, body.input_mode)
         current_tokens = get_profile_tokens(body.user_id)
@@ -749,4 +713,4 @@ async def italkyai_chat(body: ChatBody):
             "always_oppositional": persona_state.always_oppositional,
             "selected_voice_mode": persona_state.selected_voice_mode,
         }
-    }
+        }
