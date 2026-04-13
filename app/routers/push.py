@@ -9,16 +9,24 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from supabase import create_client
 
+from google.oauth2 import service_account
+from google.auth.transport.requests import Request
+
 router = APIRouter(prefix="/api/push", tags=["push"])
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-FCM_SERVER_KEY = os.getenv("FCM_SERVER_KEY", "").strip()
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+
+# Render Secret File yolu
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv(
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "/etc/secrets/gcp-sa.json"
+).strip()
 
 
 class SaveTokenBody(BaseModel):
@@ -53,34 +61,79 @@ def get_fcm_token(user_id: str) -> str:
     return str(row.get("fcm_token") or "").strip()
 
 
-def send_fcm_to_token(token: str, data: dict) -> dict:
-    if not FCM_SERVER_KEY:
-        raise HTTPException(status_code=500, detail="FCM_SERVER_KEY missing")
+def load_service_account_info() -> dict:
+    if not os.path.exists(GOOGLE_APPLICATION_CREDENTIALS):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Service account file not found: {GOOGLE_APPLICATION_CREDENTIALS}"
+        )
 
-    headers = {
-        "Authorization": f"key={FCM_SERVER_KEY}",
-        "Content-Type": "application/json",
-    }
+    try:
+        with open(GOOGLE_APPLICATION_CREDENTIALS, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Service account file read failed: {str(e)}")
+
+
+def get_google_access_token() -> tuple[str, str]:
+    info = load_service_account_info()
+    project_id = str(info.get("project_id") or "").strip()
+
+    if not project_id:
+        raise HTTPException(status_code=500, detail="project_id missing in service account json")
+
+    try:
+        credentials = service_account.Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+        )
+        credentials.refresh(Request())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Google access token failed: {str(e)}")
+
+    token = str(credentials.token or "").strip()
+    if not token:
+        raise HTTPException(status_code=500, detail="Google access token empty")
+
+    return token, project_id
+
+
+def send_fcm_v1_to_token(token: str, data: dict) -> dict:
+    access_token, project_id = get_google_access_token()
+
+    url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
 
     payload = {
-        "to": token,
-        "priority": "high",
-        "data": data,
-        "notification": {
-            "title": data.get("title") or "italkyAI",
-            "body": data.get("body") or "Yeni bildirimin var",
-        },
+        "message": {
+            "token": token,
+            "notification": {
+                "title": data.get("title") or "italkyAI",
+                "body": data.get("body") or "Yeni bildirimin var",
+            },
+            "data": {k: str(v) for k, v in data.items() if v is not None},
+            "android": {
+                "priority": "HIGH",
+                "notification": {
+                    "channel_id": "italky_arkadasla_channel",
+                    "sound": "default",
+                    "default_sound": True
+                }
+            }
+        }
     }
 
     resp = requests.post(
-        "https://fcm.googleapis.com/fcm/send",
-        headers=headers,
-        data=json.dumps(payload),
+        url,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json; charset=UTF-8",
+        },
+        json=payload,
         timeout=20,
     )
 
     if resp.status_code >= 300:
-        raise HTTPException(status_code=500, detail=f"FCM send failed: {resp.text}")
+        raise HTTPException(status_code=500, detail=f"FCM v1 send failed: {resp.text}")
 
     return resp.json() or {"ok": True}
 
@@ -127,7 +180,7 @@ def push_to_user(
     if open_page:
         data["open_page"] = open_page
 
-    result = send_fcm_to_token(token, data)
+    result = send_fcm_v1_to_token(token, data)
     return {"ok": True, "result": result}
 
 
