@@ -10,6 +10,8 @@ import requests
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+from app.routers.push import push_to_user
+
 router = APIRouter(prefix="/api/arkadasla", tags=["arkadasla"])
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
@@ -160,6 +162,11 @@ def flag_from_lang(code: str) -> str:
         "es": "🇪🇸",
     }
     return mapping.get((code or "").lower(), "🌐")
+
+
+def safe_name(value: Optional[str], fallback: str = "Karşı Taraf") -> str:
+    clean = str(value or "").strip()
+    return clean or fallback
 
 
 # =========================================================
@@ -395,7 +402,11 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
     else:
         profiles = []
 
-    profile_by_code = {normalize_chat_code(p["chat_code"]): p for p in profiles if p.get("chat_code")}
+    profile_by_code = {
+        normalize_chat_code(p["chat_code"]): p
+        for p in profiles
+        if p.get("chat_code")
+    }
 
     user_ids = [p["id"] for p in profiles if p.get("id")]
     if user_ids:
@@ -413,23 +424,23 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
 
     items = []
     for c in contacts:
-      code = normalize_chat_code(c["contact_code"])
-      prof = profile_by_code.get(code, {})
-      prs = presence_by_user.get(prof.get("id"), {})
+        code = normalize_chat_code(c["contact_code"])
+        prof = profile_by_code.get(code, {})
+        prs = presence_by_user.get(prof.get("id"), {})
 
-      items.append({
-          "id": c["id"],
-          "contact_name": c.get("contact_name") or prof.get("full_name") or "Kişi",
-          "contact_code": code,
-          "contact_lang": c.get("contact_lang") or prs.get("selected_lang") or "tr",
-          "contact_flag": c.get("contact_flag") or prs.get("selected_flag") or "🌐",
-          "contact_voice": c.get("contact_voice") or prs.get("selected_voice") or "auto",
-          "contact_user_id": prof.get("id"),
-          "is_online": bool(prs.get("is_online", False)),
-          "is_busy": bool(prs.get("is_busy", False)),
-          "last_seen_at": prs.get("last_seen_at"),
-          "updated_at": c.get("updated_at"),
-      })
+        items.append({
+            "id": c["id"],
+            "contact_name": c.get("contact_name") or prof.get("full_name") or "Kişi",
+            "contact_code": code,
+            "contact_lang": c.get("contact_lang") or prs.get("selected_lang") or "tr",
+            "contact_flag": c.get("contact_flag") or prs.get("selected_flag") or "🌐",
+            "contact_voice": c.get("contact_voice") or prs.get("selected_voice") or "auto",
+            "contact_user_id": prof.get("id"),
+            "is_online": bool(prs.get("is_online", False)),
+            "is_busy": bool(prs.get("is_busy", False)),
+            "last_seen_at": prs.get("last_seen_at"),
+            "updated_at": c.get("updated_at"),
+        })
 
     return {"ok": True, "items": items}
 
@@ -468,6 +479,7 @@ def send_chat_request(
         raise HTTPException(status_code=404, detail="Requester profile bulunamadı")
 
     me = my_rows[0]
+    my_name = safe_name(me.get("full_name"), "Bir kullanıcı")
     my_code = normalize_chat_code(str(me.get("chat_code") or ""))
     if not is_valid_chat_code(my_code):
         raise HTTPException(status_code=400, detail="Requester chat_code eksik veya geçersiz")
@@ -537,6 +549,19 @@ def send_chat_request(
     })
 
     row = inserted[0]
+
+    try:
+        push_to_user(
+            target_user_id,
+            title="italkyAI",
+            body=f"{my_name} seninle sohbet etmek istiyor",
+            type_="arkadasla_request",
+            requester_name=my_name,
+            open_page="/pages/arkadasla.html",
+        )
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "request_id": row["id"],
@@ -567,7 +592,9 @@ def list_incoming_requests(authorization: Optional[str] = Header(default=None)):
     if not rows:
         return {"ok": True, "items": []}
 
-    requester_ids = ",".join(r["requester_user_id"] for r in rows if r.get("requester_user_id"))
+    requester_ids = ",".join(
+        r["requester_user_id"] for r in rows if r.get("requester_user_id")
+    )
     profiles = sb_select(
         "profiles",
         select="id,full_name,chat_code",
@@ -704,6 +731,29 @@ def respond_chat_request(
         on_conflict="user_id",
     )
 
+    try:
+        accepter_rows = sb_select(
+            "profiles",
+            select="full_name",
+            filters={"id": f"eq.{target_user_id}"},
+            limit=1,
+        )
+        accepter_name = safe_name(
+            accepter_rows[0].get("full_name") if accepter_rows else None,
+            "Karşı taraf"
+        )
+
+        push_to_user(
+            requester_user_id,
+            title="italkyAI",
+            body=f"{accepter_name} ile bağlantı kuruldu",
+            type_="arkadasla_connected",
+            peer_name=accepter_name,
+            open_page="/pages/arkadasla.html",
+        )
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "request_id": updated["id"],
@@ -788,6 +838,8 @@ def send_message(
     if not conv_rows:
         raise HTTPException(status_code=404, detail="Aktif konuşma bulunamadı")
 
+    conv = conv_rows[0]
+
     inserted = sb_insert("arkadasla_messages", {
         "id": str(uuid.uuid4()),
         "conversation_id": body.conversation_id,
@@ -805,6 +857,32 @@ def send_message(
         {"id": f"eq.{body.conversation_id}"},
         {"updated_at": utc_now_iso()},
     )
+
+    other_user_id = conv["user_b"] if conv["user_a"] == sender_user_id else conv["user_a"]
+
+    try:
+        sender_rows = sb_select(
+            "profiles",
+            select="full_name",
+            filters={"id": f"eq.{sender_user_id}"},
+            limit=1,
+        )
+        sender_name = safe_name(
+            sender_rows[0].get("full_name") if sender_rows else None,
+            "Karşı taraf"
+        )
+
+        push_to_user(
+            other_user_id,
+            title="italkyAI",
+            body=f"{sender_name}: {body.translated_text or body.text}",
+            type_="arkadasla_message",
+            peer_name=sender_name,
+            preview=body.translated_text or body.text,
+            open_page="/pages/arkadasla.html",
+        )
+    except Exception:
+        pass
 
     return {
         "ok": True,
