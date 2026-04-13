@@ -36,7 +36,7 @@ def _get_bearer(auth_header: str | None) -> str:
 
 def _get_user_id_from_token(access_token: str) -> str:
     r = requests.get(
-      ֆ"{SUPABASE_URL}/auth/v1/user",
+        f"{SUPABASE_URL}/auth/v1/user",
         headers={
             "Authorization": f"Bearer {access_token}",
             "apikey": SUPABASE_SERVICE_ROLE,
