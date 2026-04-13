@@ -15,11 +15,10 @@ router = APIRouter(tags=["voice-enroll"])
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-VOICE_PROVIDER = os.getenv("VOICE_PROVIDER", "mock").strip().lower()
+VOICE_PROVIDER = os.getenv("VOICE_PROVIDER", "cartesia").strip().lower()
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "").strip()
 CARTESIA_VERSION = os.getenv("CARTESIA_VERSION", "2026-03-01").strip()
 
-# italkyai_voice.py ile aynı bucket olmalı
 VOICE_BUCKET = os.getenv("VOICE_BUCKET", "voice-samples").strip()
 
 
@@ -37,7 +36,7 @@ def _get_bearer(auth_header: str | None) -> str:
 
 def _get_user_id_from_token(access_token: str) -> str:
     r = requests.get(
-        f"{SUPABASE_URL}/auth/v1/user",
+      ֆ"{SUPABASE_URL}/auth/v1/user",
         headers={
             "Authorization": f"Bearer {access_token}",
             "apikey": SUPABASE_SERVICE_ROLE,
@@ -177,13 +176,6 @@ def _cartesia_clone(user_id: str, sample_url: str, lang: str) -> dict:
     }
 
 
-def _mock_enroll(user_id: str, paths: list[str]) -> dict:
-    return {
-        "provider": "mock",
-        "voice_id": f"mock-{user_id[:8]}-{len(paths)}",
-    }
-
-
 def _resolve_paths(profile: dict, voice_type: str) -> list[str]:
     if voice_type == "mine":
         return _parse_paths(profile.get("voice_sample_path"))
@@ -260,15 +252,15 @@ def _enroll_voice_by_type(voice_type: str, authorization: Optional[str]) -> dict
         raise HTTPException(status_code=400, detail="No voice samples found")
 
     try:
-        if VOICE_PROVIDER == "cartesia":
-            sample_url = _signed_url_for_storage_path(paths[0])
-            result = _cartesia_clone(
-                user_id=user_id,
-                sample_url=sample_url,
-                lang=str(profile.get("voice_profile_lang") or "en"),
-            )
-        else:
-            result = _mock_enroll(user_id, paths)
+        if VOICE_PROVIDER != "cartesia":
+            raise HTTPException(status_code=500, detail="VOICE_PROVIDER must be cartesia")
+
+        sample_url = _signed_url_for_storage_path(paths[0])
+        result = _cartesia_clone(
+            user_id=user_id,
+            sample_url=sample_url,
+            lang=str(profile.get("voice_profile_lang") or "en"),
+        )
 
         _update_profile(user_id, _success_payload_for_type(result, voice_type))
 
