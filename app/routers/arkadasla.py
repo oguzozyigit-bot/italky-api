@@ -60,6 +60,11 @@ def is_valid_chat_code(code: str) -> bool:
     return True
 
 
+def safe_name(value: Optional[str], fallback: str = "Karşı Taraf") -> str:
+    clean = str(value or "").strip()
+    return clean or fallback
+
+
 def _get_bearer(auth_header: Optional[str]) -> str:
     if not auth_header:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
@@ -162,11 +167,6 @@ def flag_from_lang(code: str) -> str:
         "es": "🇪🇸",
     }
     return mapping.get((code or "").lower(), "🌐")
-
-
-def safe_name(value: Optional[str], fallback: str = "Karşı Taraf") -> str:
-    clean = str(value or "").strip()
-    return clean or fallback
 
 
 # =========================================================
@@ -391,6 +391,7 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
         return {"ok": True, "items": []}
 
     codes = [normalize_chat_code(c["contact_code"]) for c in contacts if c.get("contact_code")]
+    profiles = []
     if codes:
         code_filter = ",".join(codes)
         profiles = sb_select(
@@ -399,8 +400,6 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
             filters={"chat_code": f"in.({code_filter})"},
             limit=500,
         )
-    else:
-        profiles = []
 
     profile_by_code = {
         normalize_chat_code(p["chat_code"]): p
@@ -409,6 +408,7 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
     }
 
     user_ids = [p["id"] for p in profiles if p.get("id")]
+    presences = []
     if user_ids:
         uid_filter = ",".join(user_ids)
         presences = sb_select(
@@ -417,8 +417,6 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
             filters={"user_id": f"in.({uid_filter})"},
             limit=1000,
         )
-    else:
-        presences = []
 
     presence_by_user = {p["user_id"]: p for p in presences if p.get("user_id")}
 
@@ -485,7 +483,6 @@ def send_chat_request(
         raise HTTPException(status_code=400, detail="Requester chat_code eksik veya geçersiz")
 
     target_code = normalize_chat_code(body.target_code)
-
     if target_code == my_code:
         raise HTTPException(status_code=400, detail="Kendi koduna istek gönderemezsin")
 
