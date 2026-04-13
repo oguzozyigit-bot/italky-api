@@ -26,6 +26,7 @@ SB_HEADERS = {
 
 CHAT_CODE_RE = re.compile(r"^[A-Z]{2}[0-9]{4}$")
 FORBIDDEN_PREFIXES = {"AK", "FG"}
+VOICE_CHOICES = {"auto", "mine", "second", "memory"}
 
 
 # =========================================================
@@ -37,6 +38,15 @@ def utc_now_iso() -> str:
 
 def normalize_chat_code(code: str) -> str:
     return (code or "").strip().upper()
+
+
+def normalize_voice_name(value: Optional[str]) -> str:
+    v = str(value or "auto").strip().lower()
+    if v in VOICE_CHOICES:
+        return v
+    if v in ("clone", "kendi", "kendi sesim"):
+        return "mine"
+    return "auto"
 
 
 def is_valid_chat_code(code: str) -> bool:
@@ -159,6 +169,7 @@ class StartRequestBody(BaseModel):
     target_code: str = Field(..., min_length=6, max_length=6)
     requester_lang: str = Field(default="tr", min_length=2, max_length=8)
     requester_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
+    requester_voice: Optional[str] = Field(default="auto", max_length=20)
 
     @field_validator("target_code")
     @classmethod
@@ -167,6 +178,11 @@ class StartRequestBody(BaseModel):
         if not is_valid_chat_code(code):
             raise ValueError("Kod formatı geçersiz. Örnek: RM4821")
         return code
+
+    @field_validator("requester_voice")
+    @classmethod
+    def validate_requester_voice(cls, v: Optional[str]) -> str:
+        return normalize_voice_name(v)
 
 
 class RespondRequestBody(BaseModel):
@@ -179,15 +195,27 @@ class SendMessageBody(BaseModel):
     text: str = Field(..., min_length=1, max_length=4000)
     source_lang: str = Field(default="tr", min_length=2, max_length=8)
     source_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
+    source_voice: Optional[str] = Field(default="auto", max_length=20)
     translated_text: Optional[str] = None
+
+    @field_validator("source_voice")
+    @classmethod
+    def validate_source_voice(cls, v: Optional[str]) -> str:
+        return normalize_voice_name(v)
 
 
 class PresenceUpdateBody(BaseModel):
     app_state: Literal["foreground", "background", "inactive"] = "foreground"
     selected_lang: str = Field(default="tr", min_length=2, max_length=8)
     selected_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
+    selected_voice: Optional[str] = Field(default="auto", max_length=20)
     is_busy: bool = False
     current_conversation_id: Optional[str] = None
+
+    @field_validator("selected_voice")
+    @classmethod
+    def validate_selected_voice(cls, v: Optional[str]) -> str:
+        return normalize_voice_name(v)
 
 
 class AddContactBody(BaseModel):
@@ -195,6 +223,7 @@ class AddContactBody(BaseModel):
     contact_name: str = Field(..., min_length=1, max_length=80)
     contact_lang: Optional[str] = Field(default=None, min_length=2, max_length=8)
     contact_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
+    contact_voice: Optional[str] = Field(default="auto", max_length=20)
 
     @field_validator("contact_code")
     @classmethod
@@ -204,6 +233,11 @@ class AddContactBody(BaseModel):
             raise ValueError("Kod formatı geçersiz. Örnek: RM4821")
         return code
 
+    @field_validator("contact_voice")
+    @classmethod
+    def validate_contact_voice(cls, v: Optional[str]) -> str:
+        return normalize_voice_name(v)
+
 
 class SaveChatBody(BaseModel):
     conversation_id: Optional[str] = None
@@ -212,7 +246,13 @@ class SaveChatBody(BaseModel):
     peer_name: Optional[str] = None
     peer_lang: Optional[str] = Field(default=None, min_length=2, max_length=8)
     peer_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
+    peer_voice: Optional[str] = Field(default="auto", max_length=20)
     messages: list[dict] = Field(default_factory=list)
+
+    @field_validator("peer_voice")
+    @classmethod
+    def validate_peer_voice(cls, v: Optional[str]) -> str:
+        return normalize_voice_name(v)
 
 
 # =========================================================
@@ -263,6 +303,7 @@ def upsert_presence(
             "current_conversation_id": body.current_conversation_id,
             "selected_lang": body.selected_lang,
             "selected_flag": body.selected_flag or flag_from_lang(body.selected_lang),
+            "selected_voice": normalize_voice_name(body.selected_voice),
             "last_seen_at": utc_now_iso(),
             "updated_at": utc_now_iso(),
         },
@@ -318,6 +359,7 @@ def add_contact(
             "contact_code": body.contact_code,
             "contact_lang": body.contact_lang,
             "contact_flag": body.contact_flag or flag_from_lang(body.contact_lang or "tr"),
+            "contact_voice": normalize_voice_name(body.contact_voice),
             "updated_at": utc_now_iso(),
         },
         on_conflict="owner_user_id,contact_code",
@@ -332,7 +374,7 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
 
     contacts = sb_select(
         "arkadasla_contacts",
-        select="id,owner_user_id,contact_user_id,contact_name,contact_code,contact_lang,contact_flag,created_at,updated_at",
+        select="id,owner_user_id,contact_user_id,contact_name,contact_code,contact_lang,contact_flag,contact_voice,created_at,updated_at",
         filters={"owner_user_id": f"eq.{owner_user_id}"},
         order="updated_at.desc",
         limit=200,
@@ -360,7 +402,7 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
         uid_filter = ",".join(user_ids)
         presences = sb_select(
             "arkadasla_presence",
-            select="user_id,is_online,is_busy,app_state,current_conversation_id,selected_lang,selected_flag,last_seen_at,updated_at",
+            select="user_id,is_online,is_busy,app_state,current_conversation_id,selected_lang,selected_flag,selected_voice,last_seen_at,updated_at",
             filters={"user_id": f"in.({uid_filter})"},
             limit=1000,
         )
@@ -371,22 +413,23 @@ def list_contacts(authorization: Optional[str] = Header(default=None)):
 
     items = []
     for c in contacts:
-        code = normalize_chat_code(c["contact_code"])
-        prof = profile_by_code.get(code, {})
-        prs = presence_by_user.get(prof.get("id"), {})
+      code = normalize_chat_code(c["contact_code"])
+      prof = profile_by_code.get(code, {})
+      prs = presence_by_user.get(prof.get("id"), {})
 
-        items.append({
-            "id": c["id"],
-            "contact_name": c.get("contact_name") or prof.get("full_name") or "Kişi",
-            "contact_code": code,
-            "contact_lang": c.get("contact_lang") or prs.get("selected_lang") or "tr",
-            "contact_flag": c.get("contact_flag") or prs.get("selected_flag") or "🌐",
-            "contact_user_id": prof.get("id"),
-            "is_online": bool(prs.get("is_online", False)),
-            "is_busy": bool(prs.get("is_busy", False)),
-            "last_seen_at": prs.get("last_seen_at"),
-            "updated_at": c.get("updated_at"),
-        })
+      items.append({
+          "id": c["id"],
+          "contact_name": c.get("contact_name") or prof.get("full_name") or "Kişi",
+          "contact_code": code,
+          "contact_lang": c.get("contact_lang") or prs.get("selected_lang") or "tr",
+          "contact_flag": c.get("contact_flag") or prs.get("selected_flag") or "🌐",
+          "contact_voice": c.get("contact_voice") or prs.get("selected_voice") or "auto",
+          "contact_user_id": prof.get("id"),
+          "is_online": bool(prs.get("is_online", False)),
+          "is_busy": bool(prs.get("is_busy", False)),
+          "last_seen_at": prs.get("last_seen_at"),
+          "updated_at": c.get("updated_at"),
+      })
 
     return {"ok": True, "items": items}
 
@@ -448,7 +491,7 @@ def send_chat_request(
 
     target_presence_rows = sb_select(
         "arkadasla_presence",
-        select="user_id,is_online,is_busy,app_state,current_conversation_id,selected_lang,selected_flag,last_seen_at",
+        select="user_id,is_online,is_busy,app_state,current_conversation_id,selected_lang,selected_flag,selected_voice,last_seen_at",
         filters={"user_id": f"eq.{target_user_id}"},
         limit=1,
     )
@@ -487,6 +530,7 @@ def send_chat_request(
         "target_code": target_code,
         "requester_lang": body.requester_lang,
         "requester_flag": body.requester_flag or flag_from_lang(body.requester_lang),
+        "requester_voice": normalize_voice_name(body.requester_voice),
         "status": "pending",
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -501,6 +545,7 @@ def send_chat_request(
         "target_name": target.get("full_name") or "Karşı Taraf",
         "target_lang": target_presence.get("selected_lang") if target_presence else None,
         "target_flag": target_presence.get("selected_flag") if target_presence else None,
+        "target_voice": target_presence.get("selected_voice") if target_presence else "auto",
     }
 
 
@@ -510,7 +555,7 @@ def list_incoming_requests(authorization: Optional[str] = Header(default=None)):
 
     rows = sb_select(
         "arkadasla_requests",
-        select="id,requester_user_id,target_user_id,requester_code,target_code,requester_lang,requester_flag,status,created_at",
+        select="id,requester_user_id,target_user_id,requester_code,target_code,requester_lang,requester_flag,requester_voice,status,created_at",
         filters={
             "target_user_id": f"eq.{user_id}",
             "status": "eq.pending",
@@ -541,6 +586,7 @@ def list_incoming_requests(authorization: Optional[str] = Header(default=None)):
             "requester_code": normalize_chat_code(r.get("requester_code") or ""),
             "requester_lang": r.get("requester_lang") or "tr",
             "requester_flag": r.get("requester_flag") or flag_from_lang(r.get("requester_lang") or "tr"),
+            "requester_voice": normalize_voice_name(r.get("requester_voice")),
             "status": r.get("status"),
             "created_at": r.get("created_at"),
         })
@@ -613,13 +659,13 @@ def respond_chat_request(
 
     requester_presence = sb_select(
         "arkadasla_presence",
-        select="user_id,selected_lang,selected_flag,app_state",
+        select="user_id,selected_lang,selected_flag,selected_voice,app_state",
         filters={"user_id": f"eq.{requester_user_id}"},
         limit=1,
     )
     target_presence = sb_select(
         "arkadasla_presence",
-        select="user_id,selected_lang,selected_flag,app_state",
+        select="user_id,selected_lang,selected_flag,selected_voice,app_state",
         filters={"user_id": f"eq.{target_user_id}"},
         limit=1,
     )
@@ -638,6 +684,7 @@ def respond_chat_request(
                 "current_conversation_id": conversation_id,
                 "selected_lang": rp.get("selected_lang") or req.get("requester_lang") or "tr",
                 "selected_flag": rp.get("selected_flag") or req.get("requester_flag") or flag_from_lang(req.get("requester_lang") or "tr"),
+                "selected_voice": normalize_voice_name(rp.get("selected_voice") or req.get("requester_voice") or "auto"),
                 "last_seen_at": utc_now_iso(),
                 "updated_at": utc_now_iso(),
             },
@@ -649,6 +696,7 @@ def respond_chat_request(
                 "current_conversation_id": conversation_id,
                 "selected_lang": tp.get("selected_lang") or "tr",
                 "selected_flag": tp.get("selected_flag") or flag_from_lang(tp.get("selected_lang") or "tr"),
+                "selected_voice": normalize_voice_name(tp.get("selected_voice") or "auto"),
                 "last_seen_at": utc_now_iso(),
                 "updated_at": utc_now_iso(),
             },
@@ -697,7 +745,7 @@ def get_current_conversation(authorization: Optional[str] = Header(default=None)
 
     other_presence_rows = sb_select(
         "arkadasla_presence",
-        select="selected_lang,selected_flag,is_online,is_busy",
+        select="selected_lang,selected_flag,selected_voice,is_online,is_busy",
         filters={"user_id": f"eq.{other_user_id}"},
         limit=1,
     )
@@ -713,6 +761,7 @@ def get_current_conversation(authorization: Optional[str] = Header(default=None)
             "other_code": normalize_chat_code(other.get("chat_code") or ""),
             "other_lang": other_presence.get("selected_lang") or "tr",
             "other_flag": other_presence.get("selected_flag") or flag_from_lang(other_presence.get("selected_lang") or "tr"),
+            "other_voice": normalize_voice_name(other_presence.get("selected_voice")),
             "created_at": conv.get("created_at"),
             "updated_at": conv.get("updated_at"),
         }
@@ -746,6 +795,7 @@ def send_message(
         "text": body.text,
         "source_lang": body.source_lang,
         "source_flag": body.source_flag or flag_from_lang(body.source_lang),
+        "source_voice": normalize_voice_name(body.source_voice),
         "translated_text": body.translated_text,
         "created_at": utc_now_iso(),
     })[0]
@@ -881,6 +931,7 @@ def save_chat(
         "peer_name": body.peer_name,
         "peer_lang": body.peer_lang,
         "peer_flag": body.peer_flag or flag_from_lang(body.peer_lang or "tr"),
+        "peer_voice": normalize_voice_name(body.peer_voice),
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
     })[0]
@@ -895,6 +946,7 @@ def save_chat(
             "saved_chat_id": saved["id"],
             "side": item.get("side") or "left",
             "sender_name": item.get("sender_name") or item.get("name"),
+            "sender_voice": normalize_voice_name(item.get("sender_voice")),
             "text": text,
             "translated_text": item.get("translated_text"),
             "meta": item.get("meta"),
@@ -913,7 +965,7 @@ def list_saved_chats(authorization: Optional[str] = Header(default=None)):
 
     rows = sb_select(
         "arkadasla_saved_chats",
-        select="id,title,peer_user_id,peer_name,peer_lang,peer_flag,conversation_id,created_at,updated_at",
+        select="id,title,peer_user_id,peer_name,peer_lang,peer_flag,peer_voice,conversation_id,created_at,updated_at",
         filters={"owner_user_id": f"eq.{owner_user_id}"},
         order="updated_at.desc",
         limit=200,
@@ -942,7 +994,7 @@ def get_saved_chat(saved_chat_id: str, authorization: Optional[str] = Header(def
 
     messages = sb_select(
         "arkadasla_saved_chat_messages",
-        select="id,side,sender_name,text,translated_text,meta,created_at",
+        select="id,side,sender_name,sender_voice,text,translated_text,meta,created_at",
         filters={"saved_chat_id": f"eq.{saved_chat_id}"},
         order="created_at.asc",
         limit=1000,
