@@ -56,7 +56,10 @@ def _get_profile(user_id: str) -> dict:
     r = requests.get(
         f"{SUPABASE_URL}/rest/v1/profiles"
         f"?id=eq.{user_id}"
-        f"&select=id,voice_sample_path,second_voice_sample_path,memory_voice_sample_path,voice_profile_lang,plan",
+        f"&select="
+        f"id,"
+        f"voice_sample_path,second_voice_sample_path,memory_voice_sample_path,"
+        f"voice_profile_lang,plan",
         headers={
             "apikey": SUPABASE_SERVICE_ROLE,
             "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
@@ -140,8 +143,8 @@ def _cartesia_clone(user_id: str, sample_url: str, lang: str) -> dict:
         "clip": (f"sample.{ext}", audio_resp.content, mime)
     }
     data = {
-        "name": f"italky-{user_id[:8]}",
-        "description": "italky interpreter custom voice",
+        "name": f"italky-{user_id[:8]}-{uuid_safe_tail(user_id)}",
+        "description": f"italky {user_id[:8]} custom voice",
         "language": (lang or "en").split("-")[0].lower(),
     }
 
@@ -174,6 +177,11 @@ def _cartesia_clone(user_id: str, sample_url: str, lang: str) -> dict:
         "provider": "cartesia",
         "voice_id": voice_id,
     }
+
+
+def uuid_safe_tail(user_id: str) -> str:
+    cleaned = str(user_id or "").replace("-", "")
+    return cleaned[-8:] if cleaned else "voice"
 
 
 def _resolve_paths(profile: dict, voice_type: str) -> list[str]:
