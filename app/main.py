@@ -22,7 +22,7 @@ from app.routers.ui_translate import router as ui_translate_router
 from app.routers.onetoall_ws import router as onetoall_ws_router
 from app.routers.arkadasla import router as arkadasla_router
 from app.routers.push import router as push_router
-from backend.routers.wallet import router as wallet_router
+from app.routers.wallet import router as wallet_router
 
 # CORE ROUTERS
 from app.routers.chat_ai import router as chat_ai_router
