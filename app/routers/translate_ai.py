@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
+from supabase import Client, create_client
 
 router = APIRouter(tags=["translate_ai"])
 
@@ -15,6 +16,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+supabase: Optional[Client] = None
+if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 class TranslateBody(BaseModel):
@@ -79,7 +87,6 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
     if not s:
         return False
 
-    # kısa ve düz cümlelerde AI'a gitme
     words = re.findall(r"\S+", s)
     word_count = len(words)
     char_count = len(s)
@@ -94,7 +101,6 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
         if any(x in low for x in simple_hits):
             return False
 
-    # kültürel fark gerektiren tetikleyiciler
     emotional_hits = [
         "kırıldım", "kirildim", "alındım", "alindim", "gönül", "gonul",
         "kalbim", "içim", "icim", "ayıp oldu", "ayip oldu", "bozuldu",
@@ -416,13 +422,133 @@ def fast_translate_fallback(text: str, source: str, target: str) -> str:
     return translated
 
 
+def _require_supabase() -> Client:
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="Supabase ayarları eksik")
+    return supabase
+
+
+def _get_bearer(auth_header: Optional[str]) -> str:
+    if not auth_header:
+        raise HTTPException(status_code=401, detail="authorization_missing")
+
+    parts = auth_header.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise HTTPException(status_code=401, detail="authorization_invalid")
+
+    return parts[1].strip()
+
+
+def _get_user_from_jwt(jwt_token: str) -> Dict[str, Any]:
+    sb = _require_supabase()
+    try:
+        res = sb.auth.get_user(jwt_token)
+        user = getattr(res, "user", None)
+        if not user or not getattr(user, "id", None):
+            raise HTTPException(status_code=401, detail="user_not_found")
+        return {
+            "id": str(user.id),
+            "email": getattr(user, "email", None),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"jwt_verify_failed: {e}")
+
+
+def _get_wallet_summary(user_id: str) -> Dict[str, Any]:
+    sb = _require_supabase()
+    try:
+        rpc = sb.rpc("get_wallet_summary", {"p_user_id": user_id}).execute()
+        data = rpc.data
+        if data is None:
+            raise HTTPException(status_code=500, detail="wallet_summary_empty")
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"wallet_summary_failed: {e}")
+
+
+def _precheck_text_charge(user_id: str, char_count: int) -> Dict[str, Any]:
+    summary = _get_wallet_summary(user_id)
+
+    tokens = int(summary.get("tokens") or 0)
+    text_bucket = int(summary.get("text_bucket") or 0)
+
+    total = text_bucket + max(0, int(char_count))
+    jetons_needed = total // 1000
+
+    return {
+        "tokens": tokens,
+        "text_bucket": text_bucket,
+        "jetons_needed": jetons_needed,
+        "can_afford": tokens >= jetons_needed,
+    }
+
+
+def _charge_text_usage(user_id: str, chars_used: int, source: str, description: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+    sb = _require_supabase()
+    try:
+        rpc = sb.rpc(
+            "apply_usage_charge",
+            {
+                "p_user_id": user_id,
+                "p_usage_kind": "text",
+                "p_chars_used": int(chars_used),
+                "p_source": source,
+                "p_description": description,
+                "p_meta": meta,
+            },
+        ).execute()
+
+        data = rpc.data
+        if data is None:
+            raise HTTPException(status_code=500, detail="usage_charge_empty")
+
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"usage_charge_failed: {e}")
+
+
+def _try_gemini_then_openai(
+    text: str,
+    source: str,
+    target: str,
+    tone: str,
+    style: str
+) -> Tuple[str, str]:
+    try:
+        print("[translate_ai] trying gemini cultural")
+        translated = gemini_cultural_translate(text, source, target, tone, style)
+        if translated:
+            return translated, "gemini"
+    except Exception as e1:
+        print("[translate_ai] gemini failed:", e1)
+
+    try:
+        print("[translate_ai] trying openai cultural fallback")
+        translated = openai_cultural_translate(text, source, target, tone, style)
+        if translated:
+            return translated, "openai"
+    except Exception as e2:
+        print("[translate_ai] openai failed:", e2)
+
+    raise RuntimeError("ai_translate_failed")
+
+
 @router.get("/translate_ai/health")
 def translate_ai_health():
     return {"ok": True, "service": "translate_ai"}
 
 
 @router.post("/translate_ai")
-def translate_ai(body: TranslateBody):
+def translate_ai(
+    body: TranslateBody,
+    authorization: Optional[str] = Header(default=None),
+):
     text = normalize_text(body.text)
     source = canonical(body.from_lang)
     target = canonical(body.to_lang)
@@ -446,61 +572,150 @@ def translate_ai(body: TranslateBody):
         return {"ok": False, "error": "missing_lang"}
 
     if source == target:
-        return {"ok": True, "translated": text}
+        return {
+            "ok": True,
+            "translated": text,
+            "provider": "none",
+            "ai_used": False,
+            "charged": False,
+        }
 
     if mode == "normal":
         try:
             translated = fast_translate_fallback(text, source, target)
             if translated:
-                return {"ok": True, "translated": translated}
+                return {
+                    "ok": True,
+                    "translated": translated,
+                    "provider": "google",
+                    "ai_used": False,
+                    "charged": False,
+                    "chars_used": len(text),
+                }
         except Exception as e:
             print("[translate_ai] normal failed:", e)
 
         return {"ok": False, "error": "normal_translate_failed"}
 
     if mode == "cultural":
-        # hız için: basit cümlelerde AI'a hiç gitme
         if not should_use_ai_for_cultural(text, tone, style):
-          try:
-              print("[translate_ai] cultural fast path -> google")
-              translated = fast_translate_fallback(text, source, target)
-              if translated:
-                  return {"ok": True, "translated": translated}
-          except Exception as e0:
-              print("[translate_ai] cultural fast path failed:", e0)
+            try:
+                print("[translate_ai] cultural fast path -> google")
+                translated = fast_translate_fallback(text, source, target)
+                if translated:
+                    return {
+                        "ok": True,
+                        "translated": translated,
+                        "provider": "google",
+                        "ai_used": False,
+                        "charged": False,
+                        "chars_used": len(text),
+                    }
+            except Exception as e0:
+                print("[translate_ai] cultural fast path failed:", e0)
+
+        jwt_token = _get_bearer(authorization)
+        user = _get_user_from_jwt(jwt_token)
+        user_id = user["id"]
+
+        char_count = len(text)
+        precheck = _precheck_text_charge(user_id, char_count)
+
+        if not precheck["can_afford"]:
+            return {
+                "ok": False,
+                "error": "insufficient_tokens",
+                "mode": "cultural",
+                "usage_kind": "text",
+                "chars_used": char_count,
+                "jetons_needed": precheck["jetons_needed"],
+                "tokens_before": precheck["tokens"],
+                "text_bucket_before": precheck["text_bucket"],
+            }
 
         try:
-            print("[translate_ai] trying gemini cultural")
-            translated = gemini_cultural_translate(text, source, target, tone, style)
-            if translated:
-                return {"ok": True, "translated": translated}
-        except Exception as e1:
-            print("[translate_ai] gemini failed:", e1)
+            translated, provider = _try_gemini_then_openai(text, source, target, tone, style)
+        except Exception:
+            try:
+                print("[translate_ai] trying google official fallback")
+                translated = google_translate_official(text, source, target)
+                if translated:
+                    return {
+                        "ok": True,
+                        "translated": translated,
+                        "provider": "google_official",
+                        "ai_used": False,
+                        "charged": False,
+                        "chars_used": char_count,
+                    }
+            except Exception as e3:
+                print("[translate_ai] google_official fallback failed:", e3)
 
-        try:
-            print("[translate_ai] trying openai cultural fallback")
-            translated = openai_cultural_translate(text, source, target, tone, style)
-            if translated:
-                return {"ok": True, "translated": translated}
-        except Exception as e2:
-            print("[translate_ai] openai failed:", e2)
+            try:
+                print("[translate_ai] trying google free fallback")
+                translated = google_translate_free(text, source, target)
+                if translated:
+                    return {
+                        "ok": True,
+                        "translated": translated,
+                        "provider": "google_free",
+                        "ai_used": False,
+                        "charged": False,
+                        "chars_used": char_count,
+                    }
+            except Exception as e4:
+                print("[translate_ai] google_free fallback failed:", e4)
 
-        try:
-            print("[translate_ai] trying google official fallback")
-            translated = google_translate_official(text, source, target)
-            if translated:
-                return {"ok": True, "translated": translated}
-        except Exception as e3:
-            print("[translate_ai] google_official fallback failed:", e3)
+            return {"ok": False, "error": "cultural_translate_failed"}
 
-        try:
-            print("[translate_ai] trying google free fallback")
-            translated = google_translate_free(text, source, target)
-            if translated:
-                return {"ok": True, "translated": translated}
-        except Exception as e4:
-            print("[translate_ai] google_free fallback failed:", e4)
+        charge = _charge_text_usage(
+            user_id=user_id,
+            chars_used=char_count,
+            source=f"translate_ai_{provider}",
+            description="Kültürel çeviri kullanımı",
+            meta={
+                "module": "translate_ai",
+                "mode": "cultural",
+                "provider": provider,
+                "from_lang": source,
+                "to_lang": target,
+                "tone": tone,
+                "style": style,
+            },
+        )
 
-        return {"ok": False, "error": "cultural_translate_failed"}
+        if not bool(charge.get("ok")):
+            return {
+                "ok": False,
+                "error": "usage_charge_failed",
+                "charge": charge,
+            }
+
+        if charge.get("reason") == "insufficient_tokens":
+            return {
+                "ok": False,
+                "error": "insufficient_tokens",
+                "mode": "cultural",
+                "usage_kind": "text",
+                "chars_used": char_count,
+                "jetons_needed": charge.get("jetons_needed", 0),
+                "tokens_before": charge.get("tokens_before", 0),
+                "text_bucket_before": precheck["text_bucket"],
+            }
+
+        return {
+            "ok": True,
+            "translated": translated,
+            "provider": provider,
+            "ai_used": True,
+            "charged": bool(charge.get("charged", False)),
+            "usage_kind": "text",
+            "chars_used": char_count,
+            "jetons_spent": int(charge.get("jetons_spent") or 0),
+            "tokens_before": int(charge.get("tokens_before") or precheck["tokens"]),
+            "tokens_after": int(charge.get("tokens_after") or precheck["tokens"]),
+            "text_bucket": int(charge.get("text_bucket") or 0),
+            "voice_bucket": int(charge.get("voice_bucket") or 0),
+        }
 
     return {"ok": False, "error": "invalid_mode"}
