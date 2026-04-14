@@ -11,6 +11,18 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from app.routers.push import push_to_user
+from app.routers.translate_ai import (
+    canonical,
+    canonical_style,
+    canonical_tone,
+    fast_translate_fallback,
+    should_use_ai_for_cultural,
+    _get_user_from_jwt as translate_ai_get_user_from_jwt,
+    _get_bearer as translate_ai_get_bearer,
+    _precheck_text_charge as translate_ai_precheck_text_charge,
+    _charge_text_usage as translate_ai_charge_text_usage,
+    _try_gemini_then_openai as translate_ai_try_gemini_then_openai,
+)
 
 router = APIRouter(prefix="/api/arkadasla", tags=["arkadasla"])
 
@@ -169,6 +181,139 @@ def flag_from_lang(code: str) -> str:
     return mapping.get((code or "").lower(), "🌐")
 
 
+def translate_for_arkadasla(
+    authorization: Optional[str],
+    text: str,
+    source_lang: str,
+    target_lang: str,
+    mode: str,
+    tone: str,
+    style: str,
+) -> dict:
+    text = str(text or "").strip()
+    source = canonical(source_lang)
+    target = canonical(target_lang)
+    mode = str(mode or "normal").strip().lower()
+    tone = canonical_tone(tone or "neutral")
+    style = canonical_style(style or "balanced")
+
+    if not text:
+        return {
+            "ok": False,
+            "error": "empty_text",
+        }
+
+    if not source or not target or source == target:
+        return {
+            "ok": True,
+            "translated": text,
+            "provider": "none",
+            "ai_used": False,
+            "charged": False,
+            "chars_used": len(text),
+        }
+
+    if mode == "normal":
+        translated = fast_translate_fallback(text, source, target)
+        return {
+            "ok": True,
+            "translated": translated,
+            "provider": "google",
+            "ai_used": False,
+            "charged": False,
+            "chars_used": len(text),
+        }
+
+    if mode == "cultural":
+        if not should_use_ai_for_cultural(text, tone, style):
+            translated = fast_translate_fallback(text, source, target)
+            return {
+                "ok": True,
+                "translated": translated,
+                "provider": "google",
+                "ai_used": False,
+                "charged": False,
+                "chars_used": len(text),
+            }
+
+        jwt_token = translate_ai_get_bearer(authorization)
+        user = translate_ai_get_user_from_jwt(jwt_token)
+        user_id = user["id"]
+
+        char_count = len(text)
+        precheck = translate_ai_precheck_text_charge(user_id, char_count)
+
+        if not precheck["can_afford"]:
+            return {
+                "ok": False,
+                "error": "insufficient_tokens",
+                "mode": "cultural",
+                "usage_kind": "text",
+                "chars_used": char_count,
+                "jetons_needed": precheck["jetons_needed"],
+                "tokens_before": precheck["tokens"],
+                "text_bucket_before": precheck["text_bucket"],
+            }
+
+        translated, provider = translate_ai_try_gemini_then_openai(
+            text, source, target, tone, style
+        )
+
+        charge = translate_ai_charge_text_usage(
+            user_id=user_id,
+            chars_used=char_count,
+            source=f"arkadasla_translate_{provider}",
+            description="Arkadaşla kültürel çeviri kullanımı",
+            meta={
+                "module": "arkadasla",
+                "mode": "cultural",
+                "provider": provider,
+                "from_lang": source,
+                "to_lang": target,
+                "tone": tone,
+                "style": style,
+            },
+        )
+
+        if not bool(charge.get("ok")):
+            return {
+                "ok": False,
+                "error": "usage_charge_failed",
+                "charge": charge,
+            }
+
+        if charge.get("reason") == "insufficient_tokens":
+            return {
+                "ok": False,
+                "error": "insufficient_tokens",
+                "mode": "cultural",
+                "usage_kind": "text",
+                "chars_used": char_count,
+                "jetons_needed": charge.get("jetons_needed", 0),
+                "tokens_before": charge.get("tokens_before", 0),
+                "text_bucket_before": precheck["text_bucket"],
+            }
+
+        return {
+            "ok": True,
+            "translated": translated,
+            "provider": provider,
+            "ai_used": True,
+            "charged": bool(charge.get("charged", False)),
+            "usage_kind": "text",
+            "chars_used": char_count,
+            "jetons_spent": int(charge.get("jetons_spent") or 0),
+            "tokens_after": int(charge.get("tokens_after") or precheck["tokens"]),
+            "text_bucket": int(charge.get("text_bucket") or 0),
+            "voice_bucket": int(charge.get("voice_bucket") or 0),
+        }
+
+    return {
+        "ok": False,
+        "error": "invalid_mode",
+    }
+
+
 # =========================================================
 # MODELS
 # =========================================================
@@ -201,8 +346,12 @@ class SendMessageBody(BaseModel):
     conversation_id: str
     text: str = Field(..., min_length=1, max_length=4000)
     source_lang: str = Field(default="tr", min_length=2, max_length=8)
+    target_lang: Optional[str] = Field(default=None, min_length=2, max_length=8)
     source_flag: Optional[str] = Field(default=None, min_length=1, max_length=8)
     source_voice: Optional[str] = Field(default="auto", max_length=20)
+    mode: Optional[str] = "normal"
+    tone: Optional[str] = "neutral"
+    style: Optional[str] = "balanced"
     translated_text: Optional[str] = None
 
     @field_validator("source_voice")
@@ -836,6 +985,54 @@ def send_message(
         raise HTTPException(status_code=404, detail="Aktif konuşma bulunamadı")
 
     conv = conv_rows[0]
+    other_user_id = conv["user_b"] if conv["user_a"] == sender_user_id else conv["user_a"]
+
+    target_lang = body.target_lang
+    if not target_lang:
+        other_presence_rows = sb_select(
+            "arkadasla_presence",
+            select="selected_lang",
+            filters={"user_id": f"eq.{other_user_id}"},
+            limit=1,
+        )
+        other_presence = other_presence_rows[0] if other_presence_rows else {}
+        target_lang = other_presence.get("selected_lang") or "tr"
+
+    translation_result = {
+        "ok": True,
+        "translated": body.translated_text,
+        "provider": "client",
+        "ai_used": False,
+        "charged": False,
+        "chars_used": len((body.text or "").strip()),
+        "jetons_spent": 0,
+        "tokens_after": None,
+        "text_bucket": None,
+        "voice_bucket": None,
+    }
+
+    if not (body.translated_text or "").strip():
+        translation_result = translate_for_arkadasla(
+            authorization=authorization,
+            text=body.text,
+            source_lang=body.source_lang,
+            target_lang=target_lang,
+            mode=body.mode or "normal",
+            tone=body.tone or "neutral",
+            style=body.style or "balanced",
+        )
+
+        if not translation_result.get("ok"):
+            if translation_result.get("error") == "insufficient_tokens":
+                return {
+                    "ok": False,
+                    "requires_topup": True,
+                    "reply": "Kültürel çeviri için jeton yüklemesi yapınız.",
+                    **translation_result,
+                }
+            return translation_result
+
+    translated_text = (translation_result.get("translated") or body.translated_text or "").strip() or None
 
     inserted = sb_insert("arkadasla_messages", {
         "id": str(uuid.uuid4()),
@@ -845,7 +1042,7 @@ def send_message(
         "source_lang": body.source_lang,
         "source_flag": body.source_flag or flag_from_lang(body.source_lang),
         "source_voice": normalize_voice_name(body.source_voice),
-        "translated_text": body.translated_text,
+        "translated_text": translated_text,
         "created_at": utc_now_iso(),
     })[0]
 
@@ -854,8 +1051,6 @@ def send_message(
         {"id": f"eq.{body.conversation_id}"},
         {"updated_at": utc_now_iso()},
     )
-
-    other_user_id = conv["user_b"] if conv["user_a"] == sender_user_id else conv["user_a"]
 
     try:
         sender_rows = sb_select(
@@ -872,10 +1067,10 @@ def send_message(
         push_to_user(
             other_user_id,
             title="italkyAI",
-            body=f"{sender_name}: {body.translated_text or body.text}",
+            body=f"{sender_name}: {translated_text or body.text}",
             type_="arkadasla_message",
             peer_name=sender_name,
-            preview=body.translated_text or body.text,
+            preview=translated_text or body.text,
             open_page="/pages/arkadasla.html",
         )
     except Exception:
@@ -884,6 +1079,17 @@ def send_message(
     return {
         "ok": True,
         "message": inserted,
+        "translation": {
+            "provider": translation_result.get("provider"),
+            "ai_used": bool(translation_result.get("ai_used", False)),
+            "charged": bool(translation_result.get("charged", False)),
+            "usage_kind": translation_result.get("usage_kind"),
+            "chars_used": int(translation_result.get("chars_used") or 0),
+            "jetons_spent": int(translation_result.get("jetons_spent") or 0),
+            "tokens_after": translation_result.get("tokens_after"),
+            "text_bucket": translation_result.get("text_bucket"),
+            "voice_bucket": translation_result.get("voice_bucket"),
+        },
     }
 
 
