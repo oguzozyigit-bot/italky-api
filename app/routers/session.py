@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import requests
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Header, HTTPException
 from supabase import create_client
@@ -83,14 +84,27 @@ def get_current_user_id(auth_header: str | None) -> str:
     return uid
 
 
+def _parse_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
 @router.get("/access-state")
 def get_access_state(authorization: str | None = Header(default=None)):
     user_id = get_current_user_id(authorization)
 
     res = (
-        supabase.table("user_access_state")
-        .select("*")
-        .eq("user_id", user_id)
+        supabase.table("profiles")
+        .select(
+            "id,tokens,"
+            "membership_status,membership_source,membership_product_id,"
+            "membership_started_at,membership_ends_at,membership_last_checked_at"
+        )
+        .eq("id", user_id)
         .maybe_single()
         .execute()
     )
@@ -99,14 +113,21 @@ def get_access_state(authorization: str | None = Header(default=None)):
     if not row:
         raise HTTPException(status_code=404, detail="Access state bulunamadı")
 
+    membership_status = str(row.get("membership_status") or "").strip().lower()
+    membership_ends_at = row.get("membership_ends_at")
+    end_dt = _parse_dt(membership_ends_at)
+    now_dt = datetime.now(timezone.utc)
+
+    access_open = membership_status == "active" and end_dt is not None and end_dt > now_dt
+
     return {
         "ok": True,
-        "user_id": row.get("user_id"),
-        "access_open": bool(row.get("access_open", False)),
-        "trial_started_at": row.get("trial_started_at"),
-        "trial_ends_at": row.get("trial_ends_at"),
-        "trial_used": bool(row.get("trial_used", False)),
-        "trial_days_left": int(row.get("trial_days_left") or 0),
+        "user_id": row.get("id"),
+        "access_open": access_open,
+        "trial_started_at": None,
+        "trial_ends_at": None,
+        "trial_used": False,
+        "trial_days_left": 0,
         "membership_status": row.get("membership_status"),
         "membership_source": row.get("membership_source"),
         "membership_product_id": row.get("membership_product_id"),
