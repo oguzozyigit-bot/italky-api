@@ -223,8 +223,10 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
 async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq):
     """
     italky_pro üyeliği için.
-    Play doğrulaması Android/backend tarafında yapıldıktan sonra
-    doğrulanmış subscription sonucu buraya yazılır.
+
+    purchase_token daha önce işlenmiş olsa bile membership alanları
+    yeniden güncellenir. Böylece restore / yeniden doğrulama /
+    zaten var olan aktif aboneliği tekrar eşleme akışları düzgün çalışır.
     """
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
@@ -240,18 +242,6 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
 
     if product_id != PLAY_SUBSCRIPTION_PRODUCT_ID:
         raise HTTPException(status_code=400, detail="invalid subscription product_id")
-
-    if _purchase_exists(purchase_token):
-        prof = _profile_or_404(user_id)
-        return {
-            "ok": True,
-            "already_processed": True,
-            "membership_status": prof.get("membership_status"),
-            "membership_product_id": prof.get("membership_product_id"),
-            "membership_started_at": prof.get("membership_started_at"),
-            "membership_ends_at": prof.get("membership_ends_at"),
-            "tokens": int(prof.get("tokens") or 0),
-        }
 
     now_dt = _now()
     now_iso = _iso(now_dt)
@@ -273,21 +263,26 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
         "membership_last_checked_at": now_iso,
     }
 
+    # Her doğrulamada membership alanlarını güncelle
     supabase.table("profiles").update(update_payload).eq("id", user_id).execute()
 
-    _insert_purchase_log(
-        user_id=user_id,
-        product_id=product_id,
-        amount=0,
-        purchase_token=purchase_token,
-        provider="google_play_subscription",
-    )
+    already_processed = _purchase_exists(purchase_token)
+
+    # Satın alma logunu sadece ilk kez yaz
+    if not already_processed:
+        _insert_purchase_log(
+            user_id=user_id,
+            product_id=product_id,
+            amount=0,
+            purchase_token=purchase_token,
+            provider="google_play_subscription",
+        )
 
     fresh = _profile_or_404(user_id)
 
     return {
         "ok": True,
-        "already_processed": False,
+        "already_processed": already_processed,
         "membership_status": fresh.get("membership_status"),
         "membership_product_id": fresh.get("membership_product_id"),
         "membership_started_at": fresh.get("membership_started_at"),
