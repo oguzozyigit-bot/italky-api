@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import os
 import re
 from datetime import datetime, timezone
@@ -359,157 +358,89 @@ def call_openai(messages: List[dict]) -> Optional[str]:
         return None
 
 
-def calculate_token_cost(text: str, input_mode: InputMode) -> int:
-    chars = len(normalize_text(text))
-    if chars <= 0:
-        return 0
-
-    divisor = 500 if input_mode == "voice" else 1000
-    return max(1, math.ceil(chars / divisor))
+def _require_supabase() -> Client:
+    if supabase is None:
+        raise HTTPException(status_code=500, detail="supabase_not_ready")
+    return supabase
 
 
-def _extract_wallet_amount(data: dict) -> int:
-    if not data:
-        return 0
+def _wallet_summary(user_id: Optional[str]) -> Dict[str, Any]:
+    if not user_id:
+        return {
+            "ok": True,
+            "tokens": 0,
+            "text_bucket": 0,
+            "voice_bucket": 0,
+            "progress_max": 1000,
+        }
 
-    for key in ["tokens", "balance", "amount", "jeton", "credit"]:
-        value = data.get(key)
-        if value is None:
-            continue
-        try:
-            return int(float(value))
-        except Exception:
-            continue
-    return 0
-
-
-def get_profile_tokens(user_id: Optional[str]) -> int:
-    if not supabase or not user_id:
-        return 0
-
+    sb = _require_supabase()
     try:
-        res = (
-            supabase.table("wallets")
-            .select("*")
-            .eq("user_id", user_id)
-            .maybe_single()
-            .execute()
-        )
-        data = res.data or {}
-        amount = _extract_wallet_amount(data)
-        if amount > 0:
-            return amount
+        rpc = sb.rpc("get_wallet_summary", {"p_user_id": user_id}).execute()
+        data = rpc.data
+        if data is None:
+            raise HTTPException(status_code=500, detail="wallet_summary_empty")
+        return data
+    except HTTPException:
+        raise
     except Exception as e:
-        print("wallets token read error:", e)
-
-    try:
-        res = (
-            supabase.table("profiles")
-            .select("tokens")
-            .eq("id", user_id)
-            .maybe_single()
-            .execute()
-        )
-        data = res.data or {}
-        return int(float(data.get("tokens") or 0))
-    except Exception as e:
-        print("profiles token read error:", e)
-        return 0
+        raise HTTPException(status_code=500, detail=f"wallet_summary_failed: {e}")
 
 
-def set_profile_tokens(user_id: Optional[str], new_total: int) -> int:
-    if not supabase or not user_id:
-        return 0
-
-    try:
-        wallet_res = (
-            supabase.table("wallets")
-            .select("*")
-            .eq("user_id", user_id)
-            .maybe_single()
-            .execute()
-        )
-        wallet = wallet_res.data or None
-
-        if wallet:
-            payload = {}
-            if "tokens" in wallet:
-                payload["tokens"] = new_total
-            elif "balance" in wallet:
-                payload["balance"] = new_total
-            elif "amount" in wallet:
-                payload["amount"] = new_total
-            elif "jeton" in wallet:
-                payload["jeton"] = new_total
-            else:
-                payload["balance"] = new_total
-
-            (
-                supabase.table("wallets")
-                .update(payload)
-                .eq("user_id", user_id)
-                .execute()
-            )
-        else:
-            (
-                supabase.table("wallets")
-                .insert({
-                    "user_id": user_id,
-                    "balance": new_total,
-                    "created_at": now_iso(),
-                })
-                .execute()
-            )
-    except Exception as e:
-        print("wallets update error:", e)
-
-    try:
-        (
-            supabase.table("profiles")
-            .update({"tokens": new_total})
-            .eq("id", user_id)
-            .execute()
-        )
-    except Exception as e:
-        print("profiles update error:", e)
-
-    return new_total
+def _resolve_usage_kind(input_mode: InputMode) -> str:
+    return "voice" if input_mode == "voice" else "text"
 
 
-def update_profile_tokens(user_id: Optional[str], delta: int) -> int:
-    if not supabase or not user_id:
-        return 0
+def _precheck_usage(user_id: str, usage_kind: str, chars_used: int) -> Dict[str, Any]:
+    summary = _wallet_summary(user_id)
 
-    current = get_profile_tokens(user_id)
-    new_total = current + delta
+    tokens = int(summary.get("tokens") or 0)
+    text_bucket = int(summary.get("text_bucket") or 0)
+    voice_bucket = int(summary.get("voice_bucket") or 0)
 
-    if new_total < 0:
-        raise HTTPException(status_code=402, detail="insufficient_tokens")
+    current_bucket = text_bucket if usage_kind == "text" else voice_bucket
+    total = current_bucket + max(0, int(chars_used))
+    jetons_needed = total // 1000
 
-    return set_profile_tokens(user_id, new_total)
-
-
-def log_wallet_tx(user_id: Optional[str], delta: int, reason: str, body: ChatBody) -> None:
-    if not supabase or not user_id or delta == 0:
-        return
-
-    payload = {
-        "user_id": user_id,
-        "amount": delta,
-        "type": "debit" if delta < 0 else "credit",
-        "description": reason,
-        "meta": {
-            "session_id": body.session_id,
-            "input_mode": body.input_mode,
-            "chars": len(normalize_text(body.text)),
-        },
-        "created_at": now_iso(),
+    return {
+        "tokens": tokens,
+        "text_bucket": text_bucket,
+        "voice_bucket": voice_bucket,
+        "jetons_needed": jetons_needed,
+        "can_afford": tokens >= jetons_needed,
     }
 
+
+def _apply_usage_charge(
+    user_id: str,
+    usage_kind: str,
+    chars_used: int,
+    source: str,
+    description: str,
+    meta: Dict[str, Any],
+) -> Dict[str, Any]:
+    sb = _require_supabase()
     try:
-        supabase.table("wallet_tx").insert(payload).execute()
+        rpc = sb.rpc(
+            "apply_usage_charge",
+            {
+                "p_user_id": user_id,
+                "p_usage_kind": usage_kind,
+                "p_chars_used": int(chars_used),
+                "p_source": source,
+                "p_description": description,
+                "p_meta": meta,
+            },
+        ).execute()
+
+        data = rpc.data
+        if data is None:
+            raise HTTPException(status_code=500, detail="usage_charge_empty")
+        return data
+    except HTTPException:
+        raise
     except Exception as e:
-        print("wallet_tx insert error:", e)
+        raise HTTPException(status_code=500, detail=f"usage_charge_failed: {e}")
 
 
 def get_global_memory(user_id: Optional[str]) -> str:
@@ -658,21 +589,24 @@ async def italkyai_chat(body: ChatBody):
     if not user_text:
         raise HTTPException(status_code=400, detail="empty_text")
 
-    if body.user_id:
-        token_cost = calculate_token_cost(user_text, body.input_mode)
-        current_tokens = get_profile_tokens(body.user_id)
+    usage_kind = _resolve_usage_kind(body.input_mode)
+    chars_used = len(user_text)
 
-        if token_cost > 0 and current_tokens < token_cost:
+    precheck = None
+    if body.user_id:
+        precheck = _precheck_usage(body.user_id, usage_kind, chars_used)
+        if not precheck["can_afford"]:
             return {
                 "ok": False,
                 "requires_topup": True,
                 "reply": "Lütfen sohbete devam etmek için jeton yüklemesi yapınız.",
-                "token_cost": token_cost,
-                "tokens_remaining": current_tokens,
+                "usage_kind": usage_kind,
+                "chars_used": chars_used,
+                "jetons_needed": precheck["jetons_needed"],
+                "tokens_before": precheck["tokens"],
+                "text_bucket": precheck["text_bucket"],
+                "voice_bucket": precheck["voice_bucket"],
             }
-    else:
-        token_cost = 0
-        current_tokens = 0
 
     persona_state = detect_persona_from_text(user_text)
     persona_state.selected_voice_mode = body.voice_mode or "tts"
@@ -697,17 +631,60 @@ async def italkyai_chat(body: ChatBody):
         model_used = "openai"
 
     if not reply:
-        reply = "Şu an cevap üretirken bir sorun oluştu. Bir daha dener misin?"
+        return {
+            "ok": False,
+            "error": "reply_generation_failed",
+            "reply": "Şu an cevap üretirken bir sorun oluştu. Bir daha dener misin?",
+            "charged": False,
+            "usage_kind": usage_kind,
+            "chars_used": chars_used,
+        }
 
-    tokens_remaining = current_tokens
-    if body.user_id and token_cost > 0:
-        tokens_remaining = update_profile_tokens(body.user_id, -token_cost)
-        log_wallet_tx(
+    charge_result: Dict[str, Any] = {
+        "ok": True,
+        "charged": False,
+        "jetons_spent": 0,
+        "tokens_after": int(precheck["tokens"]) if precheck else 0,
+        "text_bucket": int(precheck["text_bucket"]) if precheck else 0,
+        "voice_bucket": int(precheck["voice_bucket"]) if precheck else 0,
+    }
+
+    if body.user_id:
+        charge_result = _apply_usage_charge(
             user_id=body.user_id,
-            delta=-token_cost,
-            reason="chat_voice" if body.input_mode == "voice" else "chat_text",
-            body=body,
+            usage_kind=usage_kind,
+            chars_used=chars_used,
+            source=f"chat_{usage_kind}_{model_used}",
+            description="AI sesli sohbet kullanımı" if usage_kind == "voice" else "AI yazılı sohbet kullanımı",
+            meta={
+                "module": "italkyai_chat",
+                "session_id": body.session_id,
+                "input_mode": body.input_mode,
+                "voice_mode": body.voice_mode,
+                "chars_used": chars_used,
+                "model": model_used,
+            },
         )
+
+        if not bool(charge_result.get("ok")):
+            return {
+                "ok": False,
+                "error": "usage_charge_failed",
+                "charge": charge_result,
+            }
+
+        if charge_result.get("reason") == "insufficient_tokens":
+            return {
+                "ok": False,
+                "requires_topup": True,
+                "reply": "Lütfen sohbete devam etmek için jeton yüklemesi yapınız.",
+                "usage_kind": usage_kind,
+                "chars_used": chars_used,
+                "jetons_needed": charge_result.get("jetons_needed", 0),
+                "tokens_before": charge_result.get("tokens_before", 0),
+                "text_bucket": charge_result.get("text_bucket", 0),
+                "voice_bucket": charge_result.get("voice_bucket", 0),
+            }
 
     save_message(body.session_id, "user", user_text)
     save_message(body.session_id, "assistant", reply)
@@ -718,8 +695,13 @@ async def italkyai_chat(body: ChatBody):
         "ok": True,
         "reply": reply,
         "model": model_used,
-        "token_cost": token_cost,
-        "tokens_remaining": tokens_remaining,
+        "charged": bool(charge_result.get("charged", False)),
+        "usage_kind": usage_kind,
+        "chars_used": chars_used,
+        "jetons_spent": int(charge_result.get("jetons_spent") or 0),
+        "tokens_after": int(charge_result.get("tokens_after") or 0),
+        "text_bucket": int(charge_result.get("text_bucket") or 0),
+        "voice_bucket": int(charge_result.get("voice_bucket") or 0),
         "persona": {
             "persona_type": persona_state.persona_type,
             "persona_name": persona_state.persona_name,
