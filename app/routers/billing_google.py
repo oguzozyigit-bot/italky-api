@@ -24,7 +24,7 @@ PLAY_SUBSCRIPTION_PRODUCT_ID = "italky_pro"
 # Tek seferlik jeton ürünleri
 PRODUCT_TOKENS = {
     "jeton_10": 10,
-    "jeton_20": 20,
+    "jeton_20": 25,
     "jeton_50": 50,
     "jeton_100": 100,
     "jeton_250": 250,
@@ -89,16 +89,27 @@ def _insert_purchase_log(
     ).execute()
 
 
-def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, balance_after: int, note: str):
+def _insert_wallet_credit_tx(
+    user_id: str,
+    amount: int,
+    balance_before: int,
+    balance_after: int,
+    source: str,
+    description: str,
+    meta: dict | None = None,
+):
     supabase.table("wallet_tx").insert(
         {
             "user_id": user_id,
-            "type": tx_type,
-            "amount": amount,
-            "reason": note,
-            "meta": {
-                "balance_after": balance_after
-            }
+            "tx_type": "credit",
+            "source": source,
+            "usage_kind": None,
+            "chars_used": 0,
+            "jetons": amount,
+            "balance_before": balance_before,
+            "balance_after": balance_after,
+            "description": description,
+            "meta": meta or {},
         }
     ).execute()
 
@@ -129,16 +140,6 @@ def _parse_dt(raw: str | None) -> datetime | None:
         return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except Exception:
         return None
-
-
-def _active_membership(profile_row: dict[str, Any]) -> bool:
-    status = str(profile_row.get("membership_status") or "").strip().lower()
-    end_dt = _parse_dt(profile_row.get("membership_ends_at"))
-    if status != "active":
-      return False
-    if not end_dt:
-      return False
-    return end_dt > _now()
 
 
 @router.post("/api/billing/google/confirm")
@@ -191,12 +192,21 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     ).eq("id", user_id).execute()
 
     _insert_purchase_log(user_id, product_id, amount, purchase_token, "google_play")
-    _insert_wallet_tx(
+
+    _insert_wallet_credit_tx(
         user_id=user_id,
-        tx_type="purchase",
         amount=amount,
+        balance_before=current_tokens,
         balance_after=next_tokens,
-        note=f"Jeton satın alma: {product_id}",
+        source="google_play_token_load",
+        description=f"Google Play jeton yükleme: {product_id}",
+        meta={
+            "provider": "google_play",
+            "product_id": product_id,
+            "purchase_token": purchase_token,
+            "loaded_tokens": amount,
+            "balance_after": next_tokens,
+        },
     )
 
     return {
@@ -242,8 +252,6 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
             "membership_ends_at": prof.get("membership_ends_at"),
             "tokens": int(prof.get("tokens") or 0),
         }
-
-    profile = _profile_or_404(user_id)
 
     now_dt = _now()
     now_iso = _iso(now_dt)
@@ -294,7 +302,6 @@ async def billing_google_subscription_cancel(req: GoogleSubscriptionConfirmReq):
     """
     İptal geldiğinde hemen erişim kapatmayız.
     membership_ends_at tarihine kadar aktif kalır.
-    İstersen status'u cancelled yapabilirsin ama access kontrolü tarihten çalışmalı.
     """
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
