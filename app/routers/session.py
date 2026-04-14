@@ -1,7 +1,10 @@
-from fastapi import APIRouter, Header, HTTPException
-from supabase import create_client
+from __future__ import annotations
+
 import os
 import requests
+
+from fastapi import APIRouter, Header, HTTPException
+from supabase import create_client
 
 router = APIRouter(prefix="/api/session", tags=["session"])
 
@@ -14,12 +17,44 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
+def check_session(user_id: str, session_key: str | None):
+    user_id = str(user_id or "").strip()
+    session_key = str(session_key or "").strip()
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id_missing")
+
+    if not session_key:
+        raise HTTPException(status_code=401, detail="SESSION_MISSING")
+
+    res = (
+        supabase.table("profiles")
+        .select("active_session_key")
+        .eq("id", user_id)
+        .maybe_single()
+        .execute()
+    )
+
+    profile = res.data or {}
+    live_key = str(profile.get("active_session_key") or "").strip()
+
+    if not live_key:
+        raise HTTPException(status_code=403, detail="SESSION_EXPIRED")
+
+    if live_key != session_key:
+        raise HTTPException(status_code=403, detail="SESSION_EXPIRED")
+
+    return True
+
+
 def _get_bearer(auth_header: str | None) -> str:
     if not auth_header:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
+
     parts = auth_header.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
         raise HTTPException(status_code=401, detail="Invalid Authorization header")
+
     return parts[1].strip()
 
 
@@ -41,8 +76,10 @@ def get_current_user_id(auth_header: str | None) -> str:
 
     data = resp.json() or {}
     uid = data.get("id")
+
     if not uid:
         raise HTTPException(status_code=401, detail="Kullanıcı bulunamadı")
+
     return uid
 
 
