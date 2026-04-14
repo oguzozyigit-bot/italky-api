@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -18,73 +18,34 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# Jeton ürünleri
+# Sadece tek üyelik ürünü
+PLAY_SUBSCRIPTION_PRODUCT_ID = "italky_pro"
+
+# Tek seferlik jeton ürünleri
 PRODUCT_TOKENS = {
     "jeton_10": 10,
-    "jeton_20": 25,
+    "jeton_20": 20,
     "jeton_50": 50,
     "jeton_100": 100,
     "jeton_250": 250,
     "jeton_500": 500,
 }
 
-# Paket fiyatları ve varsayılan bilgiler
-# Not:
-# - Upgrade sırasında yeni paket bonus jetonu VERİLMEZ
-# - Kalan gün değeri jetona çevrilir
-PLAYSTORE_PACKAGES: Dict[str, Dict[str, Any]] = {
-    "edu_699": {
-        "code": "edu_699",
-        "name": "Online Dil Eğitim Asistanı",
-        "price_tl": 699.0,
-        "duration_days": 365,
-        "language_limit": 0,
-        "jeton_amount": 100,
-        "can_use_text_to_text": True,
-        "can_use_face_to_face": False,
-        "can_use_side_to_side": False,
-        "can_use_offline": False,
-        "can_use_clone_voice": False,
-        "source_type": "playstore",
-    },
-    "translate_699": {
-        "code": "translate_699",
-        "name": "Cebinizdeki Tercüman",
-        "price_tl": 699.0,
-        "duration_days": 365,
-        "language_limit": 0,
-        "jeton_amount": 100,
-        "can_use_text_to_text": True,
-        "can_use_face_to_face": True,
-        "can_use_side_to_side": True,
-        "can_use_offline": True,
-        "can_use_clone_voice": False,
-        "source_type": "playstore",
-    },
-    "premium_999": {
-        "code": "premium_999",
-        "name": "Premium Üyelik",
-        "price_tl": 999.0,
-        "duration_days": 365,
-        "language_limit": 0,
-        "jeton_amount": 100,
-        "can_use_text_to_text": True,
-        "can_use_face_to_face": True,
-        "can_use_side_to_side": True,
-        "can_use_offline": True,
-        "can_use_clone_voice": True,
-        "source_type": "playstore",
-    },
-}
-
-# 1 jeton kaç TL
-TOKEN_UNIT_TL = 2.9
-
 
 class GoogleBillingConfirmReq(BaseModel):
     user_id: str
     product_id: str
     purchase_token: str
+
+
+class GoogleSubscriptionConfirmReq(BaseModel):
+    user_id: str
+    product_id: str
+    purchase_token: str
+    subscription_starts_at: str | None = None
+    subscription_ends_at: str | None = None
+    is_active: bool = True
+    source: str = "google_play"
 
 
 def _now() -> datetime:
@@ -110,20 +71,26 @@ def _purchase_exists(purchase_token: str) -> bool:
     return bool(_safe_data(existing))
 
 
-def _insert_purchase_log(user_id: str, product_id: str, amount: int, purchase_token: str):
+def _insert_purchase_log(
+    user_id: str,
+    product_id: str,
+    amount: int,
+    purchase_token: str,
+    provider: str = "google_play",
+):
     supabase.table("billing_purchases").insert(
         {
             "user_id": user_id,
             "product_id": product_id,
             "amount": amount,
             "purchase_token": purchase_token,
-            "provider": "google_play",
+            "provider": provider,
         }
     ).execute()
 
 
 def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, balance_after: int, note: str):
-    res = supabase.table("wallet_tx").insert(
+    supabase.table("wallet_tx").insert(
         {
             "user_id": user_id,
             "type": tx_type,
@@ -135,15 +102,15 @@ def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, balance_after: in
         }
     ).execute()
 
-    print("WALLET_TX INSERT RESULT:", res)
 
-
-def _profile_or_404(user_id: str) -> Dict[str, Any]:
+def _profile_or_404(user_id: str) -> dict[str, Any]:
     prof = (
         supabase.table("profiles")
         .select(
-            "id,tokens,package_active,package_started_at,package_ends_at,"
-            "selected_package_code"
+            "id,tokens,"
+            "trial_started_at,trial_ends_at,trial_used,"
+            "membership_status,membership_source,membership_product_id,"
+            "membership_started_at,membership_ends_at,membership_last_checked_at"
         )
         .eq("id", user_id)
         .limit(1)
@@ -164,151 +131,22 @@ def _parse_dt(raw: str | None) -> datetime | None:
         return None
 
 
-def _has_active_package(profile_row: Dict[str, Any]) -> bool:
-    if not bool(profile_row.get("package_active")):
-        return False
-
-    end_dt = _parse_dt(profile_row.get("package_ends_at"))
+def _active_membership(profile_row: dict[str, Any]) -> bool:
+    status = str(profile_row.get("membership_status") or "").strip().lower()
+    end_dt = _parse_dt(profile_row.get("membership_ends_at"))
+    if status != "active":
+      return False
     if not end_dt:
-        return True
-
+      return False
     return end_dt > _now()
-
-
-def _get_remaining_days(profile_row: Dict[str, Any]) -> int:
-    end_dt = _parse_dt(profile_row.get("package_ends_at"))
-    if not end_dt:
-      return 0
-
-    diff = end_dt - _now()
-    days = diff.days
-    return max(0, days)
-
-
-def _load_package_from_db_or_defaults(product_id: str) -> Dict[str, Any]:
-    db_res = (
-        supabase.table("nfc_packages")
-        .select("*")
-        .eq("code", product_id)
-        .limit(1)
-        .execute()
-    )
-    db_rows = _safe_data(db_res) or []
-    if db_rows:
-        row = db_rows[0] or {}
-        if not bool(row.get("is_active", True)):
-            raise HTTPException(status_code=400, detail="package not active")
-
-        # DB'de price_tl yoksa fallback'ten al
-        fallback = PLAYSTORE_PACKAGES.get(product_id, {})
-        row["price_tl"] = float(row.get("price_tl") or fallback.get("price_tl") or 0)
-        row["source_type"] = "playstore"
-        return row
-
-    fallback = PLAYSTORE_PACKAGES.get(product_id)
-    if not fallback:
-        raise HTTPException(status_code=400, detail="invalid package product_id")
-    return fallback
-
-
-def _expire_old_playstore_entitlements(user_id: str):
-    try:
-        supabase.table("nfc_entitlements").update(
-            {
-                "status": "expired",
-                "updated_at": _iso(_now()),
-            }
-        ).eq("user_id", user_id).eq("source_type", "playstore").eq("status", "active").execute()
-    except Exception:
-        pass
-
-
-def _expire_all_active_entitlements(user_id: str):
-    try:
-        supabase.table("nfc_entitlements").update(
-            {
-                "status": "expired",
-                "updated_at": _iso(_now()),
-            }
-        ).eq("user_id", user_id).eq("status", "active").execute()
-    except Exception:
-        pass
-
-
-def _create_playstore_entitlement(
-    user_id: str,
-    package_row: Dict[str, Any],
-    purchase_token: str,
-    remaining_jeton_for_new_entitlement: int
-):
-    start_dt = _now()
-    duration_days = int(package_row.get("duration_days") or 365)
-    end_dt = start_dt + timedelta(days=duration_days)
-
-    entitlement = {
-        "user_id": user_id,
-        "card_uid": None,
-        "package_code": str(package_row.get("code")),
-        "started_at": _iso(start_dt),
-        "expires_at": _iso(end_dt),
-        "remaining_languages": int(package_row.get("language_limit") or 0),
-        "remaining_jeton": int(remaining_jeton_for_new_entitlement),
-        "can_use_text_to_text": bool(package_row.get("can_use_text_to_text", True)),
-        "can_use_face_to_face": bool(package_row.get("can_use_face_to_face", False)),
-        "can_use_side_to_side": bool(package_row.get("can_use_side_to_side", False)),
-        "can_use_offline": bool(package_row.get("can_use_offline", False)),
-        "can_use_clone_voice": bool(package_row.get("can_use_clone_voice", False)),
-        "status": "active",
-        "source_type": "playstore",
-        "purchase_token": purchase_token,
-        "granted_by": "system_playstore",
-        "note": f"playstore:{package_row.get('code')}",
-    }
-
-    ins = supabase.table("nfc_entitlements").insert(entitlement).execute()
-    return entitlement, _safe_data(ins)
-
-
-def _apply_package_to_profile(
-    user_id: str,
-    package_row: Dict[str, Any],
-    final_tokens: int
-):
-    start_dt = _now()
-    end_dt = start_dt + timedelta(days=int(package_row.get("duration_days") or 365))
-
-    update_payload = {
-        "selected_package_code": str(package_row.get("code")),
-        "package_active": True,
-        "package_started_at": _iso(start_dt),
-        "package_ends_at": _iso(end_dt),
-        "tokens": final_tokens,
-    }
-
-    supabase.table("profiles").update(update_payload).eq("id", user_id).execute()
-    return _iso(start_dt), _iso(end_dt)
-
-
-def _calculate_upgrade_credit_tokens(
-    old_package_code: str,
-    remaining_days: int,
-) -> int:
-    old_pkg = _load_package_from_db_or_defaults(old_package_code)
-
-    old_price = float(old_pkg.get("price_tl") or 0)
-    old_duration = int(old_pkg.get("duration_days") or 365)
-
-    if old_price <= 0 or old_duration <= 0 or remaining_days <= 0:
-        return 0
-
-    daily_value = old_price / old_duration
-    remaining_value = daily_value * remaining_days
-    credit_tokens = int(-(-remaining_value // TOKEN_UNIT_TL))  # ceil için
-    return max(0, credit_tokens)
 
 
 @router.post("/api/billing/google/confirm")
 async def billing_google_confirm(req: GoogleBillingConfirmReq):
+    """
+    Tek seferlik jeton ürünleri için.
+    Üyelik ürünü burada işlenmez.
+    """
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
     purchase_token = (req.purchase_token or "").strip()
@@ -320,9 +158,15 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     if not purchase_token:
         raise HTTPException(status_code=422, detail="purchase_token required")
 
+    if product_id == PLAY_SUBSCRIPTION_PRODUCT_ID:
+        raise HTTPException(
+            status_code=400,
+            detail="subscription product must use /api/billing/google/subscription/confirm"
+        )
+
     amount = PRODUCT_TOKENS.get(product_id)
     if not amount:
-        raise HTTPException(status_code=400, detail="invalid product_id")
+        raise HTTPException(status_code=400, detail="invalid token product_id")
 
     if _purchase_exists(purchase_token):
         prof = _profile_or_404(user_id)
@@ -337,13 +181,23 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
         }
 
     prof = _profile_or_404(user_id)
-
     current_tokens = int(prof.get("tokens") or 0)
     next_tokens = current_tokens + amount
 
-    supabase.table("profiles").update({"tokens": next_tokens}).eq("id", user_id).execute()
-    _insert_purchase_log(user_id, product_id, amount, purchase_token)
-    _insert_wallet_tx(user_id, "purchase", amount, next_tokens, f"Jeton satın alma: {product_id}")
+    supabase.table("profiles").update(
+        {
+            "tokens": next_tokens
+        }
+    ).eq("id", user_id).execute()
+
+    _insert_purchase_log(user_id, product_id, amount, purchase_token, "google_play")
+    _insert_wallet_tx(
+        user_id=user_id,
+        tx_type="purchase",
+        amount=amount,
+        balance_after=next_tokens,
+        note=f"Jeton satın alma: {product_id}",
+    )
 
     return {
         "ok": True,
@@ -355,11 +209,17 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     }
 
 
-@router.post("/api/billing/google/package")
-async def billing_google_package(req: GoogleBillingConfirmReq):
+@router.post("/api/billing/google/subscription/confirm")
+async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq):
+    """
+    italky_pro üyeliği için.
+    Play doğrulaması Android/backend tarafında yapıldıktan sonra
+    doğrulanmış subscription sonucu buraya yazılır.
+    """
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
     purchase_token = (req.purchase_token or "").strip()
+    source = (req.source or "google_play").strip()
 
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
@@ -368,108 +228,100 @@ async def billing_google_package(req: GoogleBillingConfirmReq):
     if not purchase_token:
         raise HTTPException(status_code=422, detail="purchase_token required")
 
+    if product_id != PLAY_SUBSCRIPTION_PRODUCT_ID:
+        raise HTTPException(status_code=400, detail="invalid subscription product_id")
+
     if _purchase_exists(purchase_token):
         prof = _profile_or_404(user_id)
         return {
             "ok": True,
             "already_processed": True,
-            "package_code": prof.get("selected_package_code"),
+            "membership_status": prof.get("membership_status"),
+            "membership_product_id": prof.get("membership_product_id"),
+            "membership_started_at": prof.get("membership_started_at"),
+            "membership_ends_at": prof.get("membership_ends_at"),
             "tokens": int(prof.get("tokens") or 0),
-            "package_active": bool(prof.get("package_active")),
         }
 
-    package_row = _load_package_from_db_or_defaults(product_id)
     profile = _profile_or_404(user_id)
 
-    current_tokens = int(profile.get("tokens") or 0)
-    final_tokens = current_tokens
-    upgrade_credit_tokens = 0
-    is_upgrade = False
+    now_dt = _now()
+    now_iso = _iso(now_dt)
 
-    old_package_code = str(profile.get("selected_package_code") or "").strip()
+    start_dt = _parse_dt(req.subscription_starts_at) or now_dt
+    end_dt = _parse_dt(req.subscription_ends_at)
 
-    # Kullanıcının aktif paketi varsa upgrade say
-    if _has_active_package(profile) and old_package_code and old_package_code != product_id:
-        remaining_days = _get_remaining_days(profile)
-        upgrade_credit_tokens = _calculate_upgrade_credit_tokens(
-            old_package_code=old_package_code,
-            remaining_days=remaining_days,
-        )
-        final_tokens = current_tokens + upgrade_credit_tokens
-        is_upgrade = True
+    if not end_dt:
+        raise HTTPException(status_code=422, detail="subscription_ends_at required")
 
-        if upgrade_credit_tokens > 0:
-            _insert_wallet_tx(
-                user_id=user_id,
-                tx_type="upgrade_credit",
-                amount=upgrade_credit_tokens,
-                balance_after=final_tokens,
-                note=f"Upgrade kredisi: {old_package_code} -> {product_id}",
-            )
+    membership_status = "active" if req.is_active and end_dt > now_dt else "expired"
 
-    # Aynı paketi yeniden alıyorsa renewal gibi davranıp bonus ekleme
-    elif _has_active_package(profile) and old_package_code == product_id:
-        is_upgrade = True
-        # renewal gibi ama senin kurala göre yine bonus yok
-        final_tokens = current_tokens
+    update_payload = {
+        "membership_status": membership_status,
+        "membership_source": source,
+        "membership_product_id": product_id,
+        "membership_started_at": _iso(start_dt),
+        "membership_ends_at": _iso(end_dt),
+        "membership_last_checked_at": now_iso,
+    }
 
-    else:
-        # İlk kez paket alıyorsa bonus ver
-        package_bonus = int(package_row.get("jeton_amount") or 0)
-        final_tokens = current_tokens + package_bonus
+    supabase.table("profiles").update(update_payload).eq("id", user_id).execute()
 
-        if package_bonus > 0:
-            _insert_wallet_tx(
-                user_id=user_id,
-                tx_type="package_bonus",
-                amount=package_bonus,
-                balance_after=final_tokens,
-                note=f"Paket bonusu: {product_id}",
-            )
-
-    # Eski entitlement kapat
-    _expire_all_active_entitlements(user_id)
-
-    # Profili güncelle
-    started_at, expires_at = _apply_package_to_profile(
-        user_id=user_id,
-        package_row=package_row,
-        final_tokens=final_tokens
-    )
-
-    # Yeni entitlement aç
-    entitlement_payload, _ = _create_playstore_entitlement(
-        user_id=user_id,
-        package_row=package_row,
-        purchase_token=purchase_token,
-        remaining_jeton_for_new_entitlement=final_tokens
-    )
-
-    # Satın alma log
     _insert_purchase_log(
         user_id=user_id,
         product_id=product_id,
-        amount=0 if is_upgrade else int(package_row.get("jeton_amount") or 0),
-        purchase_token=purchase_token
+        amount=0,
+        purchase_token=purchase_token,
+        provider="google_play_subscription",
     )
+
+    fresh = _profile_or_404(user_id)
 
     return {
         "ok": True,
-        "package_code": package_row.get("code"),
-        "tokens": final_tokens,
-        "package_active": True,
-        "started_at": started_at,
-        "expires_at": expires_at,
-        "upgrade_credit_tokens": upgrade_credit_tokens,
-        "is_upgrade": is_upgrade,
-        "entitlement": entitlement_payload,
+        "already_processed": False,
+        "membership_status": fresh.get("membership_status"),
+        "membership_product_id": fresh.get("membership_product_id"),
+        "membership_started_at": fresh.get("membership_started_at"),
+        "membership_ends_at": fresh.get("membership_ends_at"),
+        "membership_last_checked_at": fresh.get("membership_last_checked_at"),
+        "tokens": int(fresh.get("tokens") or 0),
     }
 
 
-@router.post("/api/billing/google/premium")
-async def billing_google_premium(req: GoogleBillingConfirmReq):
+@router.post("/api/billing/google/subscription/cancel")
+async def billing_google_subscription_cancel(req: GoogleSubscriptionConfirmReq):
+    """
+    İptal geldiğinde hemen erişim kapatmayız.
+    membership_ends_at tarihine kadar aktif kalır.
+    İstersen status'u cancelled yapabilirsin ama access kontrolü tarihten çalışmalı.
+    """
+    user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
-    if product_id not in PLAYSTORE_PACKAGES:
-        req.product_id = "premium_999"
 
-    return await billing_google_package(req)
+    if not user_id:
+        raise HTTPException(status_code=422, detail="user_id required")
+    if product_id != PLAY_SUBSCRIPTION_PRODUCT_ID:
+        raise HTTPException(status_code=400, detail="invalid subscription product_id")
+
+    prof = _profile_or_404(user_id)
+    end_dt = _parse_dt(prof.get("membership_ends_at"))
+
+    status_value = "cancelled"
+    if end_dt and end_dt > _now():
+        status_value = "active"
+
+    supabase.table("profiles").update(
+        {
+            "membership_status": status_value,
+            "membership_last_checked_at": _iso(_now())
+        }
+    ).eq("id", user_id).execute()
+
+    fresh = _profile_or_404(user_id)
+
+    return {
+        "ok": True,
+        "membership_status": fresh.get("membership_status"),
+        "membership_ends_at": fresh.get("membership_ends_at"),
+    }
