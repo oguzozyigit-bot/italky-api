@@ -11,7 +11,6 @@ from google.oauth2 import id_token as google_id_token
 from google.auth.transport import requests as google_requests
 
 from jose import jwt
-
 from supabase import create_client, Client
 
 router = APIRouter()
@@ -34,17 +33,22 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+TRIAL_DAYS = 15
+
 # ---------- Models ----------
 class GoogleNativeAuthIn(BaseModel):
     id_token: str
+
 
 class GoogleNativeAuthOut(BaseModel):
     token: str
     user: Dict[str, Any]
 
+
 # ---------- Helpers ----------
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def _create_jwt(payload: dict) -> str:
     exp = _now_utc() + timedelta(days=JWT_EXPIRE_DAYS)
@@ -53,12 +57,13 @@ def _create_jwt(payload: dict) -> str:
     to_encode["iat"] = int(_now_utc().timestamp())
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALG)
 
+
 def _safe_str(x: Optional[str]) -> str:
     return (x or "").strip()
 
+
 @router.post("/auth/google-native", response_model=GoogleNativeAuthOut)
 async def auth_google_native(body: GoogleNativeAuthIn):
-    # 1) verify google id_token
     token = _safe_str(body.id_token)
     if not token:
         raise HTTPException(status_code=400, detail="Missing id_token")
@@ -70,7 +75,10 @@ async def auth_google_native(body: GoogleNativeAuthIn):
             GOOGLE_WEB_CLIENT_ID,
         )
     except Exception:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Google token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google token",
+        )
 
     sub = _safe_str(info.get("sub"))
     email = _safe_str(info.get("email"))
@@ -80,9 +88,6 @@ async def auth_google_native(body: GoogleNativeAuthIn):
     if not sub or not email:
         raise HTTPException(status_code=400, detail="Google token missing sub/email")
 
-    # 2) find or create profile by user_key
-    # Senin profiles kolonları: id(uuid), user_key(text), full_name(text), email(text), avatar_url(text),
-    # site_lang(text), created_at(timestamptz), tokens(bigint), member_no(text), offline_langs(jsonb), last_login_at(timestamptz)
     try:
         q = sb.table("profiles").select("*").eq("user_key", sub).limit(1).execute()
         existing = q.data[0] if q.data else None
@@ -90,35 +95,58 @@ async def auth_google_native(body: GoogleNativeAuthIn):
         raise HTTPException(status_code=500, detail=f"Supabase read failed: {str(e)}")
 
     try:
+        now_dt = _now_utc()
+        now_iso = now_dt.isoformat()
+        trial_end_iso = (now_dt + timedelta(days=TRIAL_DAYS)).isoformat()
+
         if not existing:
-            # yeni kullanıcı => 400 token hediye
             ins = {
                 "user_key": sub,
                 "email": email,
                 "full_name": full_name,
                 "avatar_url": picture,
-                "tokens": 400,
-                "last_login_at": _now_utc().isoformat(),
+                "tokens": 0,
+                "last_login_at": now_iso,
+
+                "trial_started_at": now_iso,
+                "trial_ends_at": trial_end_iso,
+                "trial_used": True,
+                "membership_status": "trial",
             }
+
             created = sb.table("profiles").insert(ins).select("*").single().execute()
             profile = created.data
+
         else:
-            # mevcut kullanıcı => last_login ve profil bilgilerini güncelle (email/name/pic değişmiş olabilir)
             upd = {
                 "email": email,
                 "full_name": full_name or existing.get("full_name"),
                 "avatar_url": picture or existing.get("avatar_url"),
-                "last_login_at": _now_utc().isoformat(),
+                "last_login_at": now_iso,
             }
-            updated = sb.table("profiles").update(upd).eq("user_key", sub).select("*").single().execute()
+
+            # Eski kullanıcıda trial kolonları boşsa bir kez doldur
+            if not existing.get("trial_used"):
+                upd["trial_started_at"] = now_iso
+                upd["trial_ends_at"] = trial_end_iso
+                upd["trial_used"] = True
+                upd["membership_status"] = "trial"
+
+            updated = (
+                sb.table("profiles")
+                .update(upd)
+                .eq("user_key", sub)
+                .select("*")
+                .single()
+                .execute()
+            )
             profile = updated.data
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Supabase write failed: {str(e)}")
 
-    # 3) issue our JWT (your app token)
     app_token = _create_jwt({"sub": sub, "email": email})
 
-    # 4) return
     return {
         "token": app_token,
         "user": {
@@ -131,5 +159,10 @@ async def auth_google_native(body: GoogleNativeAuthIn):
             "member_no": profile.get("member_no"),
             "created_at": profile.get("created_at"),
             "last_login_at": profile.get("last_login_at"),
-        }
+            "trial_started_at": profile.get("trial_started_at"),
+            "trial_ends_at": profile.get("trial_ends_at"),
+            "trial_used": bool(profile.get("trial_used") or False),
+            "membership_status": profile.get("membership_status"),
+            "membership_ends_at": profile.get("membership_ends_at"),
+        },
     }
