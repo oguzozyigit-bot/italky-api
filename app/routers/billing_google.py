@@ -101,15 +101,15 @@ def _insert_wallet_credit_tx(
     supabase.table("wallet_tx").insert(
         {
             "user_id": user_id,
-            "tx_type": "credit",
-            "source": source,
-            "usage_kind": None,
-            "chars_used": 0,
-            "jetons": amount,
-            "balance_before": balance_before,
-            "balance_after": balance_after,
-            "description": description,
-            "meta": meta or {},
+            "type": "purchase",
+            "amount": amount,
+            "reason": description,
+            "meta": {
+                "source": source,
+                "balance_before": balance_before,
+                "balance_after": balance_after,
+                **(meta or {}),
+            },
         }
     ).execute()
 
@@ -205,7 +205,6 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
             "product_id": product_id,
             "purchase_token": purchase_token,
             "loaded_tokens": amount,
-            "balance_after": next_tokens,
         },
     )
 
@@ -263,12 +262,10 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
         "membership_last_checked_at": now_iso,
     }
 
-    # Her doğrulamada membership alanlarını güncelle
     supabase.table("profiles").update(update_payload).eq("id", user_id).execute()
 
     already_processed = _purchase_exists(purchase_token)
 
-    # Satın alma logunu sadece ilk kez yaz
     if not already_processed:
         _insert_purchase_log(
             user_id=user_id,
