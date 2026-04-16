@@ -13,25 +13,19 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # Yeni sabit kural
-CHARS_PER_JETON = 3000
+CHARS_PER_JETON = 1000
 
 MODULE_COUNTER_MAP = {
-    "text": "char_text_remaining",
-    "face_clone": "char_face_clone_remaining",
-    "interpreter": "char_interpreter_remaining",
-    "interpreter_clone": "char_interpreter_clone_remaining",
-    "meeting": "char_meeting_remaining",
+    "usage_text": "char_text_used",
+    "usage_voice": "char_voice_used",
 }
 
 VOICE_MODULE_KEYS = {
-    "face_clone",
-    "interpreter_clone",
+    "usage_voice",
 }
 
 TEXT_MODULE_KEYS = {
-    "text",
-    "interpreter",
-    "meeting",
+    "usage_text",
 }
 
 
@@ -40,11 +34,8 @@ def _get_profile_or_404(user_id: str):
         supabase.table("profiles")
         .select(
             "id,tokens,"
-            "char_text_remaining,"
-            "char_face_clone_remaining,"
-            "char_interpreter_remaining,"
-            "char_interpreter_clone_remaining,"
-            "char_meeting_remaining"
+            "char_text_used,"
+            "char_voice_used"
         )
         .eq("id", user_id)
         .limit(1)
@@ -61,20 +52,13 @@ def _get_profile_or_404(user_id: str):
 def _wallet_type_for(module_key: str) -> str:
     if module_key in VOICE_MODULE_KEYS:
         return "usage_voice"
-
-    mapping = {
-        "text": "usage_text",
-        "interpreter": "usage_side_to_side",
-        "meeting": "usage_meeting",
-    }
-    return mapping.get(module_key, "usage_text")
+    return "usage_text"
 
 
-def _reason_for(module_key: str, startup: bool) -> str:
+def _reason_for(module_key: str) -> str:
     if module_key in VOICE_MODULE_KEYS:
-        return "Ses kullanımı başlangıç kesintisi" if startup else "Ses kullanımı 3000 karakter kesintisi"
-
-    return "Ücretli çeviri başlangıç kesintisi" if startup else "Ücretli çeviri 3000 karakter kesintisi"
+        return f"Ses kullanımı {CHARS_PER_JETON} karakter kesintisi"
+    return f"Metin kullanımı {CHARS_PER_JETON} karakter kesintisi"
 
 
 def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, reason: str, meta: dict):
@@ -100,29 +84,25 @@ def spend_chars(user_id: str, module_key: str, used_chars: int):
         return {
             "ok": True,
             "charged_tokens": 0,
-            "remaining_chars": 0,
+            "used_chars_total": 0,
             "module": module_key,
+            "chars_per_jeton": CHARS_PER_JETON,
         }
 
     field_name = MODULE_COUNTER_MAP[module_key]
     row = _get_profile_or_404(user_id)
 
     tokens_before = int(row.get("tokens") or 0)
-    consumed_chars = int(row.get(field_name) or 0)
-    charged_tokens = 0
+    used_before = int(row.get(field_name) or 0)
+    used_now = int(used_chars)
+    used_total = used_before + used_now
 
-    # İlk kullanımda 1 jeton peşin
-    if consumed_chars == 0:
-        charged_tokens += 1
+    old_step = used_before // CHARS_PER_JETON
+    new_step = used_total // CHARS_PER_JETON
 
-    old_step = consumed_chars // CHARS_PER_JETON
-    new_total = consumed_chars + int(used_chars)
-    new_step = new_total // CHARS_PER_JETON
-
-    if new_step > old_step:
-        charged_tokens += (new_step - old_step)
-
+    charged_tokens = max(0, new_step - old_step)
     tokens_after = tokens_before - charged_tokens
+
     if tokens_after < 0:
         raise HTTPException(status_code=402, detail="insufficient_tokens")
 
@@ -130,53 +110,39 @@ def spend_chars(user_id: str, module_key: str, used_chars: int):
         supabase.table("profiles")
         .update({
             "tokens": tokens_after,
-            field_name: new_total
+            field_name: used_total
         })
         .eq("id", user_id)
         .execute()
     )
 
-    # Hareket yaz
     if charged_tokens > 0:
         tx_type = _wallet_type_for(module_key)
         temp_balance = tokens_before
 
-        if consumed_chars == 0:
+        for idx in range(charged_tokens):
             temp_balance -= 1
             _insert_wallet_tx(
                 user_id=user_id,
                 tx_type=tx_type,
                 amount=-1,
-                reason=_reason_for(module_key, True),
+                reason=_reason_for(module_key),
                 meta={
                     "module": module_key,
-                    "used_chars": used_chars,
-                    "charge_type": "startup",
+                    "used_chars": used_now,
+                    "used_before": used_before,
+                    "used_total": used_total,
+                    "charge_type": "step_1000",
+                    "step_index": idx + 1,
+                    "chars_per_jeton": CHARS_PER_JETON,
                     "balance_after": temp_balance,
                 },
             )
 
-        if new_step > old_step:
-            for idx in range(new_step - old_step):
-                temp_balance -= 1
-                _insert_wallet_tx(
-                    user_id=user_id,
-                    tx_type=tx_type,
-                    amount=-1,
-                    reason=_reason_for(module_key, False),
-                    meta={
-                        "module": module_key,
-                        "used_chars": used_chars,
-                        "charge_type": "3000_step",
-                        "step_index": idx + 1,
-                        "balance_after": temp_balance,
-                    },
-                )
-
     return {
         "ok": True,
         "charged_tokens": charged_tokens,
-        "remaining_chars": new_total,
+        "used_chars_total": used_total,
         "module": module_key,
         "tokens_before": tokens_before,
         "tokens_after": tokens_after,
