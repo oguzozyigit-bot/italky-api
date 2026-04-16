@@ -16,8 +16,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 CHARS_PER_JETON = 1000
 
 MODULE_COUNTER_MAP = {
-    "usage_text": "char_text_remaining",
-    "usage_voice": "char_voice_remaining",
+    "usage_text": "char_text_used",
+    "usage_voice": "char_voice_used",
 }
 
 VOICE_MODULE_KEYS = {
@@ -34,8 +34,8 @@ def _get_profile_or_404(user_id: str):
         supabase.table("profiles")
         .select(
             "id,tokens,"
-            "char_text_remaining,"
-            "char_voice_remaining"
+            "char_text_used,"
+            "char_voice_used"
         )
         .eq("id", user_id)
         .limit(1)
@@ -73,7 +73,7 @@ def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, reason: str, meta
     ).execute()
 
 
-def spend_chars(user_id: str, module_key: str, used_chars: int, extra_meta: dict | None = None):
+def spend_chars(user_id: str, module_key: str, used_chars: int):
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
 
@@ -104,15 +104,7 @@ def spend_chars(user_id: str, module_key: str, used_chars: int, extra_meta: dict
     tokens_after = tokens_before - charged_tokens
 
     if tokens_after < 0:
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "code": "INSUFFICIENT_TOKENS",
-                "tokens_before": tokens_before,
-                "tokens_needed": charged_tokens,
-                "tokens_after": tokens_after,
-            },
-        )
+        raise HTTPException(status_code=402, detail="insufficient_tokens")
 
     (
         supabase.table("profiles")
@@ -144,7 +136,6 @@ def spend_chars(user_id: str, module_key: str, used_chars: int, extra_meta: dict
                     "step_index": idx + 1,
                     "chars_per_jeton": CHARS_PER_JETON,
                     "balance_after": temp_balance,
-                    **(extra_meta or {}),
                 },
             )
 
