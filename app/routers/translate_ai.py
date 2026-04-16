@@ -33,6 +33,11 @@ class TranslateBody(BaseModel):
     tone: Optional[str] = "neutral"     # neutral | happy | angry | sad | excited
     style: Optional[str] = "balanced"   # balanced | warm | clear | social
 
+    # Ataların Dili desteği
+    atalar_mode: Optional[bool] = False
+    atalar_source: Optional[str] = None
+    atalar_target: Optional[str] = None
+
 
 def canonical(code: str) -> str:
     return str(code or "").strip().lower().split("-")[0]
@@ -85,7 +90,7 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
     low = s.lower()
 
     if not s:
-        return False
+      return False
 
     words = re.findall(r"\S+", s)
     word_count = len(words)
@@ -145,6 +150,125 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
 
     return False
 
+
+# =========================================================
+# ATALARIN DİLİ - GÖKTÜRK DÖNÜŞÜM
+# =========================================================
+
+MULTI_CHAR_MAP = [
+    ("ng", "𐰭"),
+    ("ny", "𐰪"),
+]
+
+CHAR_MAP_TR_TO_GOKTURK = {
+    "a": "𐰀",
+    "b": "𐰉",
+    "c": "𐰲",
+    "ç": "𐰲",
+    "d": "𐰑",
+    "e": "𐰀",
+    "f": "𐰯",
+    "g": "𐰏",
+    "ğ": "𐰍",
+    "h": "𐰴",
+    "ı": "𐰃",
+    "i": "𐰃",
+    "j": "𐰖",
+    "k": "𐰚",
+    "l": "𐰞",
+    "m": "𐰢",
+    "n": "𐰤",
+    "o": "𐰆",
+    "ö": "𐰇",
+    "p": "𐰯",
+    "q": "𐰚",
+    "r": "𐰺",
+    "s": "𐰽",
+    "ş": "𐱁",
+    "t": "𐱅",
+    "u": "𐰆",
+    "ü": "𐰇",
+    "v": "𐰉",
+    "w": "𐰉",
+    "x": "𐰴𐰽",
+    "y": "𐰖",
+    "z": "𐰔",
+}
+
+CHAR_MAP_GOKTURK_TO_TR = {
+    "𐰀": "a",
+    "𐰉": "b",
+    "𐰲": "ç",
+    "𐰑": "d",
+    "𐰏": "g",
+    "𐰍": "ğ",
+    "𐰴": "h",
+    "𐰃": "i",
+    "𐰚": "k",
+    "𐰞": "l",
+    "𐰢": "m",
+    "𐰤": "n",
+    "𐰆": "u",
+    "𐰇": "ü",
+    "𐰯": "p",
+    "𐰺": "r",
+    "𐰽": "s",
+    "𐱁": "ş",
+    "𐱅": "t",
+    "𐰖": "y",
+    "𐰔": "z",
+    "𐰭": "ng",
+    "𐰪": "ny",
+}
+
+def turkish_to_gokturk(text: str) -> str:
+    s = normalize_text(text)
+    if not s:
+        return ""
+
+    s = s.lower()
+    out = []
+    i = 0
+
+    while i < len(s):
+        matched = False
+
+        for src, dst in MULTI_CHAR_MAP:
+            if s.startswith(src, i):
+                out.append(dst)
+                i += len(src)
+                matched = True
+                break
+
+        if matched:
+            continue
+
+        ch = s[i]
+
+        if ch in CHAR_MAP_TR_TO_GOKTURK:
+            out.append(CHAR_MAP_TR_TO_GOKTURK[ch])
+        else:
+            out.append(ch)
+
+        i += 1
+
+    return "".join(out).strip()
+
+
+def gokturk_to_turkish(text: str) -> str:
+    s = normalize_text(text)
+    if not s:
+        return ""
+
+    out = []
+    for ch in s:
+        out.append(CHAR_MAP_GOKTURK_TO_TR.get(ch, ch))
+    return "".join(out).strip()
+
+
+# =========================================================
+# NORMAL TRANSLATE
+# =========================================================
 
 def google_translate_free(text: str, source: str, target: str) -> str:
     url = "https://translate.googleapis.com/translate_a/single"
@@ -556,6 +680,10 @@ def translate_ai(
     tone = canonical_tone(body.tone or "neutral")
     style = canonical_style(body.style or "balanced")
 
+    atalar_mode = bool(body.atalar_mode)
+    atalar_source = canonical(body.atalar_source or source)
+    atalar_target = canonical(body.atalar_target or target)
+
     print("[translate_ai] request:", {
         "text": text,
         "source": source,
@@ -563,6 +691,9 @@ def translate_ai(
         "mode": mode,
         "tone": tone,
         "style": style,
+        "atalar_mode": atalar_mode,
+        "atalar_source": atalar_source,
+        "atalar_target": atalar_target,
     })
 
     if not text:
@@ -570,6 +701,33 @@ def translate_ai(
 
     if not source or not target:
         return {"ok": False, "error": "missing_lang"}
+
+    # =====================================================
+    # ATALARIN DİLİ ÖZEL AKIŞI
+    # =====================================================
+    if atalar_mode:
+        if atalar_source == "tr" and atalar_target == "gokturk":
+            gokturk_text = turkish_to_gokturk(text)
+            return {
+                "ok": True,
+                "translated": gokturk_text,
+                "gokturk_text": gokturk_text,
+                "provider": "atalar_local",
+                "ai_used": False,
+                "charged": False,
+                "chars_used": len(text),
+            }
+
+        if atalar_source == "gokturk" and atalar_target == "tr":
+            translated = gokturk_to_turkish(text)
+            return {
+                "ok": True,
+                "translated": translated,
+                "provider": "atalar_local",
+                "ai_used": False,
+                "charged": False,
+                "chars_used": len(text),
+            }
 
     if source == target:
         return {
