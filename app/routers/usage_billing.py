@@ -1,159 +1,132 @@
 from __future__ import annotations
 
-import os
-from fastapi import HTTPException
-from supabase import create_client, Client
+from typing import Any, Dict, Optional
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
+from app.routers.token_engine import spend_chars, CHARS_PER_JETON
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+router = APIRouter(tags=["usage-billing"])
 
-# Yeni sabit kural
-CHARS_PER_JETON = 1000
-
-MODULE_COUNTER_MAP = {
-    "usage_text": "char_text_remaining",
-    "usage_voice": "char_voice_remaining",
+PAID_TEXT_MODULES = {
+    "text_ai",
+    "facetoface_ai",
+    "eartoear_ai",
+    "practice_ai",
+    "text_translate_paid",
+    "culture_translate",
 }
 
-VOICE_MODULE_KEYS = {
-    "usage_voice",
+PAID_VOICE_MODULES = {
+    "voice_clone",
+    "voice_clone_preview",
+    "voice_ai",
+    "voice_preset_use",
+    "voice_live",
+    "practice_ai",
 }
 
-TEXT_MODULE_KEYS = {
-    "usage_text",
+FREE_VOICE_MODULES = {
+    "voice_preset_preview",
 }
 
 
-def _get_profile_or_404(user_id: str):
-    prof = (
-        supabase.table("profiles")
-        .select(
-            "id,tokens,"
-            "char_text_remaining,"
-            "char_voice_remaining"
-        )
-        .eq("id", user_id)
-        .limit(1)
-        .execute()
-    )
-
-    rows = getattr(prof, "data", None) or []
-    if not rows:
-        raise HTTPException(status_code=404, detail="profile not found")
-
-    return rows[0] or {}
+class UsageBillingReq(BaseModel):
+    user_id: str = Field(min_length=1)
+    module: str = Field(min_length=1)
+    char_count: int = Field(gt=0, le=500_000)
+    usage_kind: str = Field(min_length=1)  # text | voice | text_in | text_out | voice_out
+    note: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
+    chars_per_jeton: Optional[int] = None
 
 
-def _wallet_type_for(module_key: str) -> str:
-    if module_key in VOICE_MODULE_KEYS:
+def _normalize_module(module: str) -> str:
+    value = str(module or "").strip().lower()
+    if value == "practic_ai":
+        return "practice_ai"
+    if value in {"practice", "practiceai"}:
+        return "practice_ai"
+    return value
+
+
+def _normalize_kind(kind: str) -> str:
+    value = str(kind or "").strip().lower()
+    if value not in {"text", "voice", "text_in", "text_out", "voice_out"}:
+        raise HTTPException(status_code=400, detail="invalid usage_kind")
+    return value
+
+
+def _requires_billing(module: str, kind: str) -> bool:
+    if module in FREE_VOICE_MODULES:
+        return False
+
+    if kind in {"text", "text_in", "text_out"}:
+        return module in PAID_TEXT_MODULES
+
+    if kind in {"voice", "voice_out"}:
+        return module in PAID_VOICE_MODULES
+
+    return False
+
+
+def _engine_module_key(kind: str) -> str:
+    if kind in {"voice", "voice_out"}:
         return "usage_voice"
     return "usage_text"
 
 
-def _reason_for(module_key: str) -> str:
-    if module_key in VOICE_MODULE_KEYS:
-        return f"Ses kullanımı {CHARS_PER_JETON} karakter kesintisi"
-    return f"Metin kullanımı {CHARS_PER_JETON} karakter kesintisi"
-
-
-def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, reason: str, meta: dict):
-    return supabase.table("wallet_tx").insert(
-        {
-            "user_id": user_id,
-            "type": tx_type,
-            "amount": amount,
-            "reason": reason,
-            "meta": meta,
-        }
-    ).execute()
-
-
-def spend_chars(user_id: str, module_key: str, used_chars: int, extra_meta: dict | None = None):
+@router.post("/api/usage/commit")
+async def usage_commit(req: UsageBillingReq):
+    user_id = str(req.user_id or "").strip()
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
 
-    if module_key not in MODULE_COUNTER_MAP:
-        raise HTTPException(status_code=400, detail="invalid module_key")
+    module = _normalize_module(req.module)
+    usage_kind = _normalize_kind(req.usage_kind)
+    char_count = int(req.char_count or 0)
 
-    if used_chars <= 0:
+    if char_count <= 0:
+        raise HTTPException(status_code=422, detail="char_count required")
+
+    if not _requires_billing(module, usage_kind):
         return {
             "ok": True,
-            "charged_tokens": 0,
-            "used_chars_total": 0,
-            "module": module_key,
+            "module": module,
+            "usage_kind": usage_kind,
+            "char_count": char_count,
+            "tokens_before": None,
+            "tokens_after": None,
+            "tokens_charged": 0,
+            "free_only": True,
             "chars_per_jeton": CHARS_PER_JETON,
         }
 
-    field_name = MODULE_COUNTER_MAP[module_key]
-    row = _get_profile_or_404(user_id)
+    engine_key = _engine_module_key(usage_kind)
 
-    tokens_before = int(row.get("tokens") or 0)
-    used_before = int(row.get(field_name) or 0)
-    used_now = int(used_chars)
-    used_total = used_before + used_now
-
-    old_step = used_before // CHARS_PER_JETON
-    new_step = used_total // CHARS_PER_JETON
-
-    charged_tokens = max(0, new_step - old_step)
-    tokens_after = tokens_before - charged_tokens
-
-    if tokens_after < 0:
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "code": "INSUFFICIENT_TOKENS",
-                "tokens_before": tokens_before,
-                "tokens_needed": charged_tokens,
-                "tokens_after": tokens_after,
-            },
-        )
-
-    (
-        supabase.table("profiles")
-        .update({
-            "tokens": tokens_after,
-            field_name: used_total
-        })
-        .eq("id", user_id)
-        .execute()
+    result = spend_chars(
+        user_id=user_id,
+        module_key=engine_key,
+        used_chars=char_count,
+        extra_meta={
+            "original_module": module,
+            "usage_kind": usage_kind,
+            "note": req.note or "",
+            **(req.meta or {}),
+        },
     )
-
-    if charged_tokens > 0:
-        tx_type = _wallet_type_for(module_key)
-        temp_balance = tokens_before
-
-        for idx in range(charged_tokens):
-            temp_balance -= 1
-            _insert_wallet_tx(
-                user_id=user_id,
-                tx_type=tx_type,
-                amount=-1,
-                reason=_reason_for(module_key),
-                meta={
-                    "module": module_key,
-                    "used_chars": used_now,
-                    "used_before": used_before,
-                    "used_total": used_total,
-                    "charge_type": "step_1000",
-                    "step_index": idx + 1,
-                    "chars_per_jeton": CHARS_PER_JETON,
-                    "balance_after": temp_balance,
-                    **(extra_meta or {}),
-                },
-            )
 
     return {
         "ok": True,
-        "charged_tokens": charged_tokens,
-        "used_chars_total": used_total,
-        "module": module_key,
-        "tokens_before": tokens_before,
-        "tokens_after": tokens_after,
-        "chars_per_jeton": CHARS_PER_JETON,
+        "module": module,
+        "engine_module": engine_key,
+        "usage_kind": usage_kind,
+        "char_count": char_count,
+        "tokens_before": result.get("tokens_before"),
+        "tokens_after": result.get("tokens_after"),
+        "tokens_charged": result.get("charged_tokens", 0),
+        "counter_after": result.get("used_chars_total"),
+        "chars_per_jeton": result.get("chars_per_jeton", CHARS_PER_JETON),
+        "free_only": False,
     }
