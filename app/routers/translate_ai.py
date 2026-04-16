@@ -61,6 +61,33 @@ def canonical_style(style: str) -> str:
     return "balanced"
 
 
+UNSUPPORTED_LOCAL_LANGS = {
+    "lzz": "Lazca",
+    "ady": "Çerkesce",
+    "ab": "Abhazca",
+    "kmr": "Kürtçe (Kurmancî)",
+    "ckb": "Kürtçe (Soranî)",
+    "zza": "Zazaca",
+}
+
+LANG_DISPLAY_NAMES = {
+    "tr": "Türkçe",
+    "en": "İngilizce",
+    "de": "Almanca",
+    "fr": "Fransızca",
+    "it": "İtalyanca",
+    "es": "İspanyolca",
+    "ku": "Kürtçe",
+    "kmr": "Kürtçe (Kurmancî)",
+    "ckb": "Kürtçe (Soranî)",
+    "zza": "Zazaca",
+    "lzz": "Lazca",
+    "ab": "Abhazca",
+    "ady": "Çerkesce",
+    "gokturk": "Göktürkçe",
+}
+
+
 def detect_register_hint(text: str) -> str:
     s = normalize_text(text).lower()
 
@@ -90,7 +117,7 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
     low = s.lower()
 
     if not s:
-      return False
+        return False
 
     words = re.findall(r"\S+", s)
     word_count = len(words)
@@ -221,38 +248,73 @@ CHAR_MAP_GOKTURK_TO_TR = {
     "𐰪": "ny",
 }
 
+WORD_OVERRIDES_TR_TO_GOKTURK = {
+    "turk": "𐱅𐰇𐰼𐰚",
+    "türk": "𐱅𐰇𐰼𐰚",
+    "tanri": "𐱅𐰭𐰼𐰃",
+    "tanrı": "𐱅𐰭𐰼𐰃",
+    "gok": "𐰚𐰇𐰚",
+    "gök": "𐰚𐰇𐰚",
+    "gokturk": "𐰚𐰇𐰚𐱅𐰇𐰼𐰚",
+    "göktürk": "𐰚𐰇𐰚𐱅𐰇𐰼𐰚",
+    "bilge": "𐰋𐰃𐰠𐰏𐰀",
+    "kagan": "𐰴𐰍𐰣",
+    "kağan": "𐰴𐰍𐰣",
+    "kut": "𐰴𐰆𐱃",
+    "ulu": "𐰆𐰠𐰆",
+    "ordu": "𐰆𐰺𐰑𐰆",
+    "yurt": "𐰖𐰆𐰺𐱃",
+    "il": "𐰃𐰠",
+    "bodun": "𐰉𐰆𐰑𐰆𐰣",
+    "tegin": "𐱅𐰏𐰃𐰣",
+}
+
+
 def turkish_to_gokturk(text: str) -> str:
     s = normalize_text(text)
     if not s:
         return ""
 
     s = s.lower()
-    out = []
-    i = 0
+    parts = re.split(r"(\s+)", s)
+    converted_parts = []
 
-    while i < len(s):
-        matched = False
-
-        for src, dst in MULTI_CHAR_MAP:
-            if s.startswith(src, i):
-                out.append(dst)
-                i += len(src)
-                matched = True
-                break
-
-        if matched:
+    for part in parts:
+        if not part:
             continue
 
-        ch = s[i]
+        if part.isspace():
+            converted_parts.append(part)
+            continue
 
-        if ch in CHAR_MAP_TR_TO_GOKTURK:
-            out.append(CHAR_MAP_TR_TO_GOKTURK[ch])
-        else:
-            out.append(ch)
+        pure = re.sub(r"[^\wçğıöşü]", "", part, flags=re.UNICODE)
 
-        i += 1
+        if pure in WORD_OVERRIDES_TR_TO_GOKTURK:
+            converted_parts.append(WORD_OVERRIDES_TR_TO_GOKTURK[pure])
+            continue
 
-    return "".join(out).strip()
+        out = []
+        i = 0
+        while i < len(part):
+            matched = False
+
+            for src, dst in MULTI_CHAR_MAP:
+                if part.startswith(src, i):
+                    out.append(dst)
+                    i += len(src)
+                    matched = True
+                    break
+
+            if matched:
+                continue
+
+            ch = part[i]
+            out.append(CHAR_MAP_TR_TO_GOKTURK.get(ch, ch))
+            i += 1
+
+        converted_parts.append("".join(out))
+
+    return "".join(converted_parts).strip()
 
 
 def gokturk_to_turkish(text: str) -> str:
@@ -263,12 +325,125 @@ def gokturk_to_turkish(text: str) -> str:
     out = []
     for ch in s:
         out.append(CHAR_MAP_GOKTURK_TO_TR.get(ch, ch))
-    return "".join(out).strip()
+
+    joined = "".join(out).strip()
+    joined = joined.replace("ng", "ng")
+    joined = joined.replace("ny", "ny")
+    return joined
 
 
 # =========================================================
 # NORMAL TRANSLATE
 # =========================================================
+
+def lang_display(code: str) -> str:
+    c = canonical(code)
+    return LANG_DISPLAY_NAMES.get(c, c.upper())
+
+
+def should_force_ai_for_language_pair(source: str, target: str) -> bool:
+    s = canonical(source)
+    t = canonical(target)
+    return s in UNSUPPORTED_LOCAL_LANGS or t in UNSUPPORTED_LOCAL_LANGS
+
+
+def ai_direct_translate_by_language_name(
+    text: str,
+    source: str,
+    target: str,
+    tone: str = "neutral",
+    style: str = "balanced"
+) -> Tuple[str, str]:
+    source_name = lang_display(source)
+    target_name = lang_display(target)
+
+    prompt = f"""
+You are a precise translator.
+
+Translate the following text from {source_name} to {target_name}.
+
+Rules:
+- Preserve the exact meaning.
+- Sound natural and human.
+- Do not explain.
+- Do not mention AI, translation engines, or model names.
+- Return only the translated text.
+
+Text:
+{text}
+""".strip()
+
+    if GEMINI_API_KEY:
+        try:
+            url = (
+                "https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+            )
+
+            payload = {
+                "contents": [
+                    {"parts": [{"text": prompt}]}
+                ],
+                "generationConfig": {
+                    "temperature": 0.25,
+                    "topP": 0.9,
+                    "maxOutputTokens": 512
+                }
+            }
+
+            r = requests.post(url, json=payload, timeout=18)
+            r.raise_for_status()
+            data = r.json()
+
+            candidates = data.get("candidates") or []
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                out = "".join(str(p.get("text", "")) for p in parts).strip()
+                if out:
+                    return out, "gemini_local_lang"
+        except Exception as e:
+            print("[translate_ai] gemini local-lang failed:", e)
+
+    if OPENAI_API_KEY:
+        try:
+            headers = {
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            }
+
+            payload = {
+                "model": OPENAI_MODEL,
+                "input": prompt,
+            }
+
+            r = requests.post(
+                "https://api.openai.com/v1/responses",
+                headers=headers,
+                json=payload,
+                timeout=18,
+            )
+            r.raise_for_status()
+            data = r.json()
+
+            chunks = []
+            for item in data.get("output", []) or []:
+                for content in item.get("content", []) or []:
+                    if content.get("type") in {"output_text", "text"}:
+                        txt = str(content.get("text") or "").strip()
+                        if txt:
+                            chunks.append(txt)
+
+            out = "".join(chunks).strip()
+            if not out:
+                out = str(data.get("output_text") or data.get("text") or "").strip()
+
+            if out:
+                return out, "openai_local_lang"
+        except Exception as e:
+            print("[translate_ai] openai local-lang failed:", e)
+
+    raise RuntimeError("local_lang_ai_translate_failed")
+
 
 def google_translate_free(text: str, source: str, target: str) -> str:
     url = "https://translate.googleapis.com/translate_a/single"
@@ -740,6 +915,25 @@ def translate_ai(
 
     if mode == "normal":
         try:
+            if should_force_ai_for_language_pair(source, target):
+                print("[translate_ai] normal local-lang path -> ai")
+                translated, provider = ai_direct_translate_by_language_name(
+                    text=text,
+                    source=source,
+                    target=target,
+                    tone=tone,
+                    style=style,
+                )
+                if translated:
+                    return {
+                        "ok": True,
+                        "translated": translated,
+                        "provider": provider,
+                        "ai_used": True,
+                        "charged": False,
+                        "chars_used": len(text),
+                    }
+
             translated = fast_translate_fallback(text, source, target)
             if translated:
                 return {
