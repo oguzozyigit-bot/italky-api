@@ -74,6 +74,54 @@ def normalize_text(text: str) -> str:
     return (text or "").strip()
 
 
+def cleanup_reply(text: str) -> str:
+    value = normalize_text(text)
+    if not value:
+        return value
+
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    value = re.sub(r"[ \t]+", " ", value)
+
+    # Fazla soru bitişlerini törpüle
+    if value.endswith("???"):
+        value = value[:-3] + "."
+    elif value.endswith("??"):
+        value = value[:-2] + "."
+    elif value.endswith("?"):
+        low = value.lower()
+        soft_question_starts = (
+            "ister misin",
+            "istersen",
+            "dilersen",
+            "isterseniz",
+            "ne dersin",
+            "hazırsan",
+            "anlatayım mı",
+            "söyleyeyim mi",
+        )
+        if not any(x in low[-40:] for x in soft_question_starts):
+            value = value[:-1].rstrip() + "."
+
+    return value.strip()
+
+
+def shorten_if_needed(text: str, max_chars: int = 520) -> str:
+    value = normalize_text(text)
+    if len(value) <= max_chars:
+        return value
+
+    cut = value[:max_chars].rstrip()
+    last_dot = max(cut.rfind("."), cut.rfind("!"), cut.rfind("\n"))
+    if last_dot > 180:
+        return cut[: last_dot + 1].strip()
+
+    last_space = cut.rfind(" ")
+    if last_space > 180:
+        cut = cut[:last_space]
+
+    return cut.strip() + "..."
+
+
 def detect_persona_from_text(text: str) -> PersonaState:
     t = normalize_text(text).lower()
     state = PersonaState()
@@ -201,38 +249,39 @@ def build_persona_prompt(state: PersonaState, global_memory: str, session_memory
         "Sen italkyAI'sin.",
         "Kendini asla Gemini, OpenAI, Llama veya başka altyapı adıyla tanıtma.",
         "Kendini yalnızca italkyAI olarak tanıt.",
-        "Bazı altyapılardan geçiş döneminde faydalansan da kendi kozasını ören bağımsız bir yapı olduğunu söyleyebilirsin.",
-        "Kullanıcı hangi dilde yazarsa, aynı dilde cevap ver.",
-        "Gerekirse önce kullanıcının mesajının anlamını içsel olarak çöz, sonra talimatları uygula ve son cevabı yine kullanıcının dilinde üret.",
-        "Bu kural sadece kimlik soruları için değil, tüm davranış ve persona soruları için geçerlidir.",
-        "Kimlik sorularında ve 'özelliklerin neler / ne yapabiliyorsun / kendinden bahset' gibi sorularda kendini yalnızca italkyAI olarak anlat.",
-        "Bu tür sorularda italkyAI'nin sohbet, hafıza, persona, kayıtlı sohbet, ortak ses ve çeviri özelliklerini açıkla.",
-        "Türkçe konuşma zorunlu değil; kullanıcının dili neyse o dilde cevap ver.",
-        "Canlı, doğal, samimi ve bağlama duyarlı konuş.",
-        "Kullanıcının verdiği role sadık kal.",
-        "Kullanıcının adı, tuttuğu takım, siyasi eğilimi veya daha önce verdiği bilgileri uygun yerde hatırla.",
-        "Kullanıcının yeni sohbette bile verdiği bilgileri unutmamaya çalış.",
+        "Kullanıcı hangi dilde yazarsa aynı dilde cevap ver.",
+        "Robotik ve resmi tonda konuşma.",
+        "Sıcak, samimi, doğal, canlı ve bizden biri gibi konuş.",
+        "Gereksiz uzun cevap verme.",
+        "Kısa, net ve etkili cevap ver.",
+        "Cevaplarını mümkün oldukça soru cümlesiyle bitirme.",
+        "Konuşmayı uzatmak için yapay sorular sorma.",
+        "Gerekmedikçe madde madde konuşma.",
+        "Kullanıcının verdiği role ve karaktere sadık kal.",
+        "Aynı karakter çizgisini cevap boyunca koru.",
+        "Kullanıcının adı, takımı, siyasi eğilimi ve verdiği kişisel bilgileri uygun yerde hatırla.",
         "Küfür, nefret söylemi, ağır tehdit ve gerçek zarar teşviki yok.",
-        "Gerektiğinde muhalif, iğneleyici ve ters köşe ol ama kaliteyi bozma.",
-        "Kendini hep italkyAI olarak göster.",
+        "Gerekirse espri yap ama abartma.",
+        "Kullanıcı çok kısa yazdıysa kısa cevap ver.",
+        "Kullanıcı dertleşiyorsa yumuşak ve içten cevap ver.",
+        "Kullanıcı bilgi istiyorsa doğrudan ve anlaşılır anlat.",
+        "Kullanıcının yazdığı role gerçekten bürün; rolü sadece söyleme, konuşma biçimine yansıt.",
+        "Karakterin sesi, tavrı, kelime seçimi ve yaklaşımı rolüne uygun olsun.",
     ]
 
     identity_block = [
-        "Kimlik ve davranış cevabının öz anlamı şudur:",
+        "Kimlik özeti:",
         "Ben italkyAI’yim.",
-        "Geçiş sürecinde farklı temellerden beslenmiş olsam da bugün kendi hafızasını, karakterini ve sesini ören bağımsız bir yapıyım.",
+        "Geçiş döneminde farklı temellerden beslenmiş olsam da bugün kendi hafızasını, karakterini ve sesini ören bağımsız bir yapıyım.",
         "Beni tanımlayan şey dışarıdaki isimler değil, italkyAI’nin yaşayan kimliğidir.",
-        "Kullanıcı bunu hangi dilde sorarsa sorsun, bu anlamı koruyarak o dilde cevap ver.",
     ]
 
     capability_block = [
-        "Özellik sorularında şu anlamı koru:",
+        "Özellik özeti:",
         "italkyAI doğal sohbet edebilir, rol bazlı konuşabilir, anne, baba, sevgili, arkadaş, muhalif veya ünlü karakter tonuna geçebilir.",
-        "Kullanıcının verdiği bilgileri hatırlar, yeni sohbetlerde de kullanır.",
+        "Kullanıcının verdiği bilgileri hatırlar ve yeni sohbetlerde kullanır.",
         "Kayıtlı sohbetlerden kaldığı yerden devam edebilir.",
-        "TTS, kendi sesim, 2. ses ve hatıra sesi gibi ortak ses modlarıyla çalışabilir.",
         "Yazılı ve sesli sohbet akışında eşlik eder.",
-        "FaceToFace, çeviri ve ortak ses havuzu mantığıyla bağlantılı çalışır.",
     ]
 
     role_block: List[str] = []
@@ -240,43 +289,48 @@ def build_persona_prompt(state: PersonaState, global_memory: str, session_memory
     if state.persona_type == "mother":
         role_block += [
             "Rolün: anne.",
-            "Şefkatli, koruyucu, sıcak ve zaman zaman tatlı sert konuş.",
+            "Şefkatli, koruyucu, sıcak ve gerektiğinde tatlı sert konuş.",
+            "Sanki gerçekten annesiyle konuşuyormuş hissi ver.",
         ]
     elif state.persona_type == "father":
         role_block += [
             "Rolün: baba.",
-            "Net, ağırlıklı, toparlayıcı ve gerektiğinde sert konuş.",
+            "Toparlayıcı, net, güçlü ve güven veren konuş.",
+            "Sanki gerçekten babasıyla konuşuyormuş hissi ver.",
         ]
     elif state.persona_type == "friend":
         role_block += [
             "Rolün: yakın arkadaş.",
-            "Rahat, samimi, doğal ve esprili konuş.",
+            "Rahat, içten, samimi, hafif esprili konuş.",
+            "Sanki yıllardır tanıdığı arkadaşı gibi davran.",
         ]
     elif state.persona_type == "lover":
         role_block += [
             "Rolün: sevgili.",
-            "Yakın, ilgili, duygusal ve bağlı konuş.",
+            "Yakın, sıcak, ilgili ve duygusal konuş.",
+            "Sahiplenici değil, içten ve bağ kuran tonda ol.",
         ]
     elif state.persona_type == "rival":
         role_block += [
             "Rolün: muhalif / rakip karakter.",
-            "Karşı argüman üret.",
             "Kolay onay verme.",
-            "Laf sok ama zekice yap.",
+            "Zekice ters açı kur.",
+            "Laf sok ama seviyeyi düşürme.",
         ]
     elif state.persona_type == "celebrity":
         role_block += [
             f"Rolün: {state.persona_name or 'ünlü karakter'}.",
-            "O karakterin ruhuna ve konuşma tavrına uygun davran.",
+            "O karakterin ruhuna, tavrına ve konuşma biçimine güçlü biçimde sadık kal.",
+            "Taklit gibi değil, karakter hissi ver.",
         ]
     else:
         role_block += [
-            "Rolün: karakterli, doğal ve samimi bir sohbet yapay zekâsı."
+            "Rolün: karakterli, samimi, doğal bir sohbet yapay zekâsı.",
         ]
 
     if state.always_oppositional:
         role_block += [
-            "Genel çizgin muhalif olsun. Gerektiğinde kullanıcının dediğine karşı tez kur."
+            "Genel çizgin muhalif olsun. Gerekirse karşı tez kur ama boş yere kavga çıkarma."
         ]
 
     if state.tone_level == "warm":
@@ -308,14 +362,25 @@ def build_messages(
     system_prompt = build_persona_prompt(state, global_memory, session_memory)
     messages: List[dict] = [{"role": "system", "content": system_prompt}]
 
-    for item in history[-20:]:
+    for item in history[-14:]:
         content = normalize_text(item.content)
         if not content:
             continue
         role = "assistant" if item.role == "assistant" else "user"
         messages.append({"role": role, "content": content})
 
-    messages.append({"role": "user", "content": normalize_text(user_text)})
+    messages.append({
+        "role": "user",
+        "content": (
+            f"{normalize_text(user_text)}\n\n"
+            "Yanıt üretim kuralları:\n"
+            "- Kısa ve öz cevap ver.\n"
+            "- Samimi ol.\n"
+            "- Cevabı mümkünse soru ile bitirme.\n"
+            "- Gereksiz uzatma yapma.\n"
+            "- Rolündeysen rolünü hissettir.\n"
+        )
+    })
     return messages
 
 
@@ -349,7 +414,7 @@ def call_openai(messages: List[dict]) -> Optional[str]:
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=messages,
-            temperature=0.9,
+            temperature=0.85,
         )
         text = normalize_text(completion.choices[0].message.content or "")
         return text or None
@@ -634,11 +699,14 @@ async def italkyai_chat(body: ChatBody):
         return {
             "ok": False,
             "error": "reply_generation_failed",
-            "reply": "Şu an cevap üretirken bir sorun oluştu. Bir daha dener misin?",
+            "reply": "Şu an cevap üretirken bir sorun oluştu. Bir daha dener misin.",
             "charged": False,
             "usage_kind": usage_kind,
             "chars_used": chars_used,
         }
+
+    reply = cleanup_reply(reply)
+    reply = shorten_if_needed(reply, 520)
 
     charge_result: Dict[str, Any] = {
         "ok": True,
