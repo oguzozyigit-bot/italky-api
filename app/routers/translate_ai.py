@@ -65,9 +65,19 @@ UNSUPPORTED_LOCAL_LANGS = {
     "lzz": "Lazca",
     "ady": "Çerkesce",
     "ab": "Abhazca",
+    "kbd": "Kabardeyce",
+    "ce": "Çeçence",
+    "os": "Osetçe",
+    "lez": "Lezgice",
+    "av": "Avarca",
     "kmr": "Kürtçe (Kurmancî)",
     "ckb": "Kürtçe (Soranî)",
     "zza": "Zazaca",
+    "syc": "Süryanice",
+    "gag": "Gagavuzca",
+    "crh": "Kırım Tatarcası",
+    "nog": "Nogayca",
+    "ba": "Başkurtça",
 }
 
 LANG_DISPLAY_NAMES = {
@@ -77,13 +87,40 @@ LANG_DISPLAY_NAMES = {
     "fr": "Fransızca",
     "it": "İtalyanca",
     "es": "İspanyolca",
+    "sq": "Arnavutça",
+    "bs": "Boşnakça",
+    "sr": "Sırpça",
+    "hr": "Hırvatça",
+    "mk": "Makedonca",
+    "bg": "Bulgarca",
+    "ro": "Romence",
+    "el": "Yunanca",
     "ku": "Kürtçe",
     "kmr": "Kürtçe (Kurmancî)",
     "ckb": "Kürtçe (Soranî)",
     "zza": "Zazaca",
+    "syc": "Süryanice",
+    "he": "İbranice",
     "lzz": "Lazca",
     "ab": "Abhazca",
     "ady": "Çerkesce",
+    "kbd": "Kabardeyce",
+    "ce": "Çeçence",
+    "ka": "Gürcüce",
+    "os": "Osetçe",
+    "lez": "Lezgice",
+    "av": "Avarca",
+    "az": "Azerbaycan Türkçesi",
+    "kk": "Kazakça",
+    "ky": "Kırgızca",
+    "uz": "Özbekçe",
+    "tk": "Türkmence",
+    "ug": "Uygurca",
+    "tt": "Tatarca",
+    "ba": "Başkurtça",
+    "gag": "Gagavuzca",
+    "crh": "Kırım Tatarcası",
+    "nog": "Nogayca",
     "gokturk": "Göktürkçe",
 }
 
@@ -950,7 +987,9 @@ def translate_ai(
         return {"ok": False, "error": "normal_translate_failed"}
 
     if mode == "cultural":
-        if not should_use_ai_for_cultural(text, tone, style):
+        force_local_ai = should_force_ai_for_language_pair(source, target)
+
+        if not force_local_ai and not should_use_ai_for_cultural(text, tone, style):
             try:
                 print("[translate_ai] cultural fast path -> google")
                 translated = fast_translate_fallback(text, source, target)
@@ -986,7 +1025,16 @@ def translate_ai(
             }
 
         try:
-            translated, provider = _try_gemini_then_openai(text, source, target, tone, style)
+            if force_local_ai:
+                translated, provider = ai_direct_translate_by_language_name(
+                    text=text,
+                    source=source,
+                    target=target,
+                    tone=tone,
+                    style=style,
+                )
+            else:
+                translated, provider = _try_gemini_then_openai(text, source, target, tone, style)
         except Exception:
             try:
                 print("[translate_ai] trying google official fallback")
