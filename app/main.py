@@ -23,6 +23,7 @@ from app.routers.onetoall_ws import router as onetoall_ws_router
 from app.routers.arkadasla import router as arkadasla_router
 from app.routers.push import router as push_router
 from app.routers.wallet import router as wallet_router
+from app.routers.promo import router as promo_router
 
 # CORE ROUTERS
 from app.routers.chat_ai import router as chat_ai_router
@@ -126,6 +127,7 @@ app.include_router(italkyai_voice_router)
 app.include_router(arkadasla_router)
 app.include_router(push_router)
 app.include_router(wallet_router)
+app.include_router(promo_router)
 
 app.include_router(nfc_router)
 app.include_router(session_router)
