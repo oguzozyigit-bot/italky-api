@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any, Dict, Optional, Tuple
@@ -37,6 +38,10 @@ class TranslateBody(BaseModel):
     atalar_mode: Optional[bool] = False
     atalar_source: Optional[str] = None
     atalar_target: Optional[str] = None
+
+    # Ataların Dili ek alanları
+    historical_mode: Optional[bool] = False
+    reading_mode: Optional[bool] = False
 
 
 def canonical(code: str) -> str:
@@ -286,35 +291,42 @@ CHAR_MAP_GOKTURK_TO_TR = {
 }
 
 WORD_OVERRIDES_TR_TO_GOKTURK = {
-    "turk": "𐱅𐰇𐰼𐰚",
-    "türk": "𐱅𐰇𐰼𐰚",
-    "tanri": "𐱅𐰭𐰼𐰃",
-    "tanrı": "𐱅𐰭𐰼𐰃",
-    "gok": "𐰚𐰇𐰚",
-    "gök": "𐰚𐰇𐰚",
-    "gokturk": "𐰚𐰇𐰚𐱅𐰇𐰼𐰚",
-    "göktürk": "𐰚𐰇𐰚𐱅𐰇𐰼𐰚",
-    "bilge": "𐰋𐰃𐰠𐰏𐰀",
-    "kagan": "𐰴𐰍𐰣",
-    "kağan": "𐰴𐰍𐰣",
-    "kut": "𐰴𐰆𐱃",
-    "ulu": "𐰆𐰠𐰆",
-    "ordu": "𐰆𐰺𐰑𐰆",
-    "yurt": "𐰖𐰆𐰺𐱃",
-    "il": "𐰃𐰠",
-    "bodun": "𐰉𐰆𐰑𐰆𐰣",
-    "tegin": "𐱅𐰏𐰃𐰣",
+    "turk": {"rune": "𐱅𐰇𐰼𐰚", "read": "türk"},
+    "türk": {"rune": "𐱅𐰇𐰼𐰚", "read": "türk"},
+    "tanri": {"rune": "𐱅𐰭𐰼𐰃", "read": "tanrı"},
+    "tanrı": {"rune": "𐱅𐰭𐰼𐰃", "read": "tanrı"},
+    "gok": {"rune": "𐰚𐰇𐰚", "read": "gök"},
+    "gök": {"rune": "𐰚𐰇𐰚", "read": "gök"},
+    "gokturk": {"rune": "𐰚𐰇𐰚𐱅𐰇𐰼𐰚", "read": "göktürk"},
+    "göktürk": {"rune": "𐰚𐰇𐰚𐱅𐰇𐰼𐰚", "read": "göktürk"},
+    "bilge": {"rune": "𐰋𐰃𐰠𐰏𐰀", "read": "bilge"},
+    "kagan": {"rune": "𐰴𐰍𐰣", "read": "kağan"},
+    "kağan": {"rune": "𐰴𐰍𐰣", "read": "kağan"},
+    "kut": {"rune": "𐰴𐰆𐱃", "read": "kut"},
+    "ulu": {"rune": "𐰆𐰠𐰆", "read": "ulu"},
+    "ordu": {"rune": "𐰆𐰺𐰑𐰆", "read": "ordu"},
+    "yurt": {"rune": "𐰖𐰆𐰺𐱃", "read": "yurt"},
+    "il": {"rune": "𐰃𐰠", "read": "il"},
+    "bodun": {"rune": "𐰉𐰆𐰑𐰆𐰣", "read": "bodun"},
+    "tegin": {"rune": "𐱅𐰏𐰃𐰣", "read": "tegin"},
+    "ata": {"rune": "𐰀𐱃𐰀", "read": "ata"},
+    "ana": {"rune": "𐰀𐰣𐰀", "read": "ana"},
+    "su": {"rune": "𐰽𐰆", "read": "su"},
+    "taş": {"rune": "𐱃𐰀𐱁", "read": "taş"},
+    "selam": {"rune": "𐰽𐰞𐰀𐰢", "read": "selam"},
+    "merhaba": {"rune": "𐰢𐰼𐰴𐰉𐰀", "read": "merhaba"},
 }
 
 
-def turkish_to_gokturk(text: str) -> str:
+def turkish_to_gokturk_with_reading(text: str) -> Dict[str, str]:
     s = normalize_text(text)
     if not s:
-        return ""
+        return {"gokturk_text": "", "gokturk_reading": ""}
 
     s = s.lower()
     parts = re.split(r"(\s+)", s)
     converted_parts = []
+    reading_parts = []
 
     for part in parts:
         if not part:
@@ -322,15 +334,18 @@ def turkish_to_gokturk(text: str) -> str:
 
         if part.isspace():
             converted_parts.append(part)
+            reading_parts.append(part)
             continue
 
         pure = re.sub(r"[^\wçğıöşü]", "", part, flags=re.UNICODE)
 
         if pure in WORD_OVERRIDES_TR_TO_GOKTURK:
-            converted_parts.append(WORD_OVERRIDES_TR_TO_GOKTURK[pure])
+            converted_parts.append(WORD_OVERRIDES_TR_TO_GOKTURK[pure]["rune"])
+            reading_parts.append(WORD_OVERRIDES_TR_TO_GOKTURK[pure]["read"])
             continue
 
         out = []
+        read = []
         i = 0
         while i < len(part):
             matched = False
@@ -338,6 +353,7 @@ def turkish_to_gokturk(text: str) -> str:
             for src, dst in MULTI_CHAR_MAP:
                 if part.startswith(src, i):
                     out.append(dst)
+                    read.append(src)
                     i += len(src)
                     matched = True
                     break
@@ -347,11 +363,16 @@ def turkish_to_gokturk(text: str) -> str:
 
             ch = part[i]
             out.append(CHAR_MAP_TR_TO_GOKTURK.get(ch, ch))
+            read.append(ch)
             i += 1
 
         converted_parts.append("".join(out))
+        reading_parts.append("".join(read))
 
-    return "".join(converted_parts).strip()
+    return {
+        "gokturk_text": "".join(converted_parts).strip(),
+        "gokturk_reading": "".join(reading_parts).strip(),
+    }
 
 
 def gokturk_to_turkish(text: str) -> str:
@@ -367,6 +388,173 @@ def gokturk_to_turkish(text: str) -> str:
     joined = joined.replace("ng", "ng")
     joined = joined.replace("ny", "ny")
     return joined
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    raw = normalize_text(text)
+    if not raw:
+        return {}
+
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return {}
+
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return {}
+
+
+def _historical_prompt(text: str, literal_runes: str, literal_reading: str) -> str:
+    return f"""
+You are an expert in Old Turkic / Göktürk writing and historical Turkish linguistics.
+
+Task:
+The user wrote a modern Turkish word or sentence.
+We already have a literal Göktürk-script rendering.
+
+Your job:
+1. Decide whether there is a meaningful historical / etymological / period-appropriate Göktürk-style counterpart worth showing.
+2. If yes, provide:
+   - historical_text: a concise historical / semantic Göktürk-style equivalent
+   - historical_reading: its Latin reading
+   - historical_meaning: short Turkish explanation in modern Turkish
+3. If no reliable historical counterpart exists, return empty strings.
+
+Rules:
+- Be conservative.
+- Do not invent fake scholarly certainty.
+- If uncertain, return empty strings.
+- Return valid JSON only.
+- Do not include markdown.
+- Keep historical_meaning short and clear.
+
+Input:
+modern_text = {text}
+literal_runes = {literal_runes}
+literal_reading = {literal_reading}
+
+JSON schema:
+{{
+  "historical_text": "",
+  "historical_reading": "",
+  "historical_meaning": ""
+}}
+""".strip()
+
+
+def _historical_from_gemini(text: str, literal_runes: str, literal_reading: str) -> Dict[str, str]:
+    if not GEMINI_API_KEY:
+        return {}
+
+    try:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+        )
+
+        payload = {
+            "contents": [{"parts": [{"text": _historical_prompt(text, literal_runes, literal_reading)}]}],
+            "generationConfig": {
+                "temperature": 0.15,
+                "topP": 0.8,
+                "maxOutputTokens": 300
+            }
+        }
+
+        r = requests.post(url, json=payload, timeout=18)
+        r.raise_for_status()
+        data = r.json()
+
+        candidates = data.get("candidates") or []
+        if not candidates:
+            return {}
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        raw = "".join(str(p.get("text", "")) for p in parts).strip()
+        parsed = _extract_json_object(raw)
+        if not parsed:
+            return {}
+
+        return {
+            "historical_text": normalize_text(parsed.get("historical_text", "")),
+            "historical_reading": normalize_text(parsed.get("historical_reading", "")),
+            "historical_meaning": normalize_text(parsed.get("historical_meaning", "")),
+        }
+    except Exception as e:
+        print("[translate_ai] historical gemini failed:", e)
+        return {}
+
+
+def _historical_from_openai(text: str, literal_runes: str, literal_reading: str) -> Dict[str, str]:
+    if not OPENAI_API_KEY:
+        return {}
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "model": OPENAI_MODEL,
+            "input": _historical_prompt(text, literal_runes, literal_reading),
+        }
+
+        r = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers=headers,
+            json=payload,
+            timeout=18,
+        )
+        r.raise_for_status()
+        data = r.json()
+
+        chunks = []
+        for item in data.get("output", []) or []:
+            for content in item.get("content", []) or []:
+                if content.get("type") in {"output_text", "text"}:
+                    txt = str(content.get("text") or "").strip()
+                    if txt:
+                        chunks.append(txt)
+
+        raw = "".join(chunks).strip()
+        if not raw:
+            raw = str(data.get("output_text") or data.get("text") or "").strip()
+
+        parsed = _extract_json_object(raw)
+        if not parsed:
+            return {}
+
+        return {
+            "historical_text": normalize_text(parsed.get("historical_text", "")),
+            "historical_reading": normalize_text(parsed.get("historical_reading", "")),
+            "historical_meaning": normalize_text(parsed.get("historical_meaning", "")),
+        }
+    except Exception as e:
+        print("[translate_ai] historical openai failed:", e)
+        return {}
+
+
+def historical_gokturk_enrichment(text: str, literal_runes: str, literal_reading: str) -> Dict[str, str]:
+    data = _historical_from_gemini(text, literal_runes, literal_reading)
+    if data.get("historical_text"):
+        return data
+
+    data = _historical_from_openai(text, literal_runes, literal_reading)
+    if data.get("historical_text"):
+        return data
+
+    return {
+        "historical_text": "",
+        "historical_reading": "",
+        "historical_meaning": "",
+    }
 
 
 # =========================================================
@@ -895,6 +1083,8 @@ def translate_ai(
     atalar_mode = bool(body.atalar_mode)
     atalar_source = canonical(body.atalar_source or source)
     atalar_target = canonical(body.atalar_target or target)
+    historical_mode = bool(body.historical_mode)
+    reading_mode = bool(body.reading_mode)
 
     print("[translate_ai] request:", {
         "text": text,
@@ -906,6 +1096,8 @@ def translate_ai(
         "atalar_mode": atalar_mode,
         "atalar_source": atalar_source,
         "atalar_target": atalar_target,
+        "historical_mode": historical_mode,
+        "reading_mode": reading_mode,
     })
 
     if not text:
@@ -919,13 +1111,29 @@ def translate_ai(
     # =====================================================
     if atalar_mode:
         if atalar_source == "tr" and atalar_target == "gokturk":
-            gokturk_text = turkish_to_gokturk(text)
+            local = turkish_to_gokturk_with_reading(text)
+            gokturk_text = local["gokturk_text"]
+            gokturk_reading = local["gokturk_reading"] if reading_mode else ""
+
+            historical = {
+                "historical_text": "",
+                "historical_reading": "",
+                "historical_meaning": "",
+            }
+            if historical_mode:
+                historical = historical_gokturk_enrichment(text, gokturk_text, gokturk_reading)
+
             return {
                 "ok": True,
                 "translated": gokturk_text,
                 "gokturk_text": gokturk_text,
+                "gokturk_reading": gokturk_reading,
+                "literal_reading": gokturk_reading,
+                "historical_text": historical.get("historical_text", ""),
+                "historical_reading": historical.get("historical_reading", ""),
+                "historical_meaning": historical.get("historical_meaning", ""),
                 "provider": "atalar_local",
-                "ai_used": False,
+                "ai_used": bool(historical.get("historical_text")),
                 "charged": False,
                 "chars_used": len(text),
             }
