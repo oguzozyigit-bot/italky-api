@@ -13,6 +13,8 @@ router = APIRouter(tags=["italkyai-chat"])
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -82,7 +84,6 @@ def cleanup_reply(text: str) -> str:
     value = re.sub(r"\n{3,}", "\n\n", value)
     value = re.sub(r"[ \t]+", " ", value)
 
-    # Fazla soru bitişlerini törpüle
     if value.endswith("???"):
         value = value[:-3] + "."
     elif value.endswith("??"):
@@ -392,7 +393,7 @@ def call_gemini(messages: List[dict]) -> Optional[str]:
         import google.generativeai as genai
 
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel(GEMINI_MODEL)
         prompt = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
 
         result = model.generate_content(prompt)
@@ -412,7 +413,7 @@ def call_openai(messages: List[dict]) -> Optional[str]:
 
         client = OpenAI(api_key=OPENAI_API_KEY)
         completion = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=OPENAI_MODEL,
             messages=messages,
             temperature=0.85,
         )
@@ -442,7 +443,7 @@ def _wallet_summary(user_id: Optional[str]) -> Dict[str, Any]:
     sb = _require_supabase()
     try:
         rpc = sb.rpc("get_wallet_summary", {"p_user_id": user_id}).execute()
-        data = rpc.data
+        data = getattr(rpc, "data", None)
         if data is None:
             raise HTTPException(status_code=500, detail="wallet_summary_empty")
         return data
@@ -498,7 +499,7 @@ def _apply_usage_charge(
             },
         ).execute()
 
-        data = rpc.data
+        data = getattr(rpc, "data", None)
         if data is None:
             raise HTTPException(status_code=500, detail="usage_charge_empty")
         return data
@@ -521,11 +522,11 @@ def get_global_memory(user_id: Optional[str]) -> str:
             .execute()
         )
 
-        data = res.data or {}
+        data = getattr(res, "data", None) or {}
         parts = []
 
         if data.get("known_name"):
-            parts.append(f"Kullanıcının adı: {data['known_name']}")
+          parts.append(f"Kullanıcının adı: {data['known_name']}")
 
         facts = data.get("known_facts") or {}
         if facts.get("team"):
@@ -555,7 +556,7 @@ def get_session_memory(session_id: Optional[str]) -> str:
             .execute()
         )
 
-        data = res.data or {}
+        data = getattr(res, "data", None) or {}
         return str(data.get("memory_summary") or "").strip()
     except Exception as e:
         print("get_session_memory error:", e)
@@ -621,7 +622,7 @@ def update_global_memory(user_id: Optional[str], text: str) -> None:
             .execute()
         )
 
-        existing = existing_res.data or {}
+        existing = getattr(existing_res, "data", None) or {}
         known_name = existing.get("known_name")
         known_facts = existing.get("known_facts") or {}
         memory_summary = str(existing.get("memory_summary") or "").strip()
