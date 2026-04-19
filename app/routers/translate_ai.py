@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, Optional, Tuple
+import html
+from typing import Any, Dict, Optional, Tuple, List
 
 import requests
 from fastapi import APIRouter, Header, HTTPException
@@ -44,12 +45,21 @@ class TranslateBody(BaseModel):
     reading_mode: Optional[bool] = False
 
 
+# =========================================================
+# BASIC HELPERS
+# =========================================================
+
 def canonical(code: str) -> str:
     return str(code or "").strip().lower().split("-")[0]
 
 
 def normalize_text(text: str) -> str:
-    return str(text or "").strip()
+    s = str(text or "")
+    s = s.replace("\u200b", "")
+    s = s.replace("\ufeff", "")
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = re.sub(r"[ \t]+", " ", s)
+    return s.strip()
 
 
 def canonical_tone(tone: str) -> str:
@@ -65,6 +75,186 @@ def canonical_style(style: str) -> str:
         return v
     return "balanced"
 
+
+def lang_display(code: str) -> str:
+    c = canonical(code)
+    return LANG_DISPLAY_NAMES.get(c, c.upper())
+
+
+def safe_json_loads(raw: str) -> Dict[str, Any]:
+    s = normalize_text(raw)
+    if not s:
+        return {}
+
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+
+    fenced = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.IGNORECASE | re.DOTALL).strip()
+    if fenced != s:
+        try:
+            return json.loads(fenced)
+        except Exception:
+            pass
+
+    m = re.search(r"\{.*\}", s, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            return {}
+
+    return {}
+
+
+def strip_outer_quotes(s: str) -> str:
+    t = normalize_text(s)
+    if len(t) >= 2 and (
+        (t.startswith('"') and t.endswith('"')) or
+        (t.startswith("'") and t.endswith("''))
+    ):
+        return t[1:-1].strip()
+    return t
+
+
+def cleanup_translation_text(s: str) -> str:
+    t = normalize_text(s)
+    t = strip_outer_quotes(t)
+    t = html.unescape(t)
+    t = re.sub(r"\s+\n", "\n", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
+def word_count(text: str) -> int:
+    return len(re.findall(r"\S+", normalize_text(text)))
+
+
+def char_count(text: str) -> int:
+    return len(normalize_text(text))
+
+
+def normalize_compare_key(s: str) -> str:
+    t = normalize_text(s).lower()
+    t = t.replace("’", "'").replace("`", "'")
+    t = re.sub(r"[^\wçğıöşüâîû'-]+", "", t, flags=re.UNICODE)
+    return t
+
+
+def is_single_token_like(text: str) -> bool:
+    s = normalize_text(text)
+    if not s:
+        return False
+    tokens = re.findall(r"\S+", s)
+    return len(tokens) <= 2 and len(s) <= 24
+
+
+SHORT_UTTERANCE_SET = {
+    "evet", "hayır", "hayir", "tamam", "olur", "peki", "tabii", "tabi", "yok",
+    "var", "tamamdır", "tamamdir", "aynen", "doğru", "dogru", "yanlış", "yanlis",
+    "teşekkürler", "tesekkurler", "teşekkür ederim", "tesekkur ederim",
+    "merhaba", "selam", "günaydın", "gunaydin", "iyi geceler", "iyi akşamlar",
+    "nasılsın", "nasilsin", "iyiyim", "üzgünüm", "uzgunum", "özür dilerim",
+    "ozur dilerim", "olmaz", "istemiyorum", "istiyorum", "bekle", "dur"
+}
+
+
+def is_short_utterance(text: str) -> bool:
+    s = normalize_text(text).lower()
+    if not s:
+        return False
+
+    if s in SHORT_UTTERANCE_SET:
+        return True
+
+    wc = word_count(s)
+    cc = char_count(s)
+    if wc <= 2 and cc <= 18:
+        return True
+
+    return False
+
+
+def contains_forbidden_meta_output(text: str) -> bool:
+    s = normalize_text(text).lower()
+    forbidden_markers = [
+        "translation:",
+        "translated text:",
+        "here is the translation",
+        "çeviri:",
+        "işte çeviri",
+        "the translation is",
+        "ai",
+        "model",
+        "gemini",
+        "openai",
+        "google translate",
+    ]
+    return any(x in s for x in forbidden_markers)
+
+
+def probably_expanded_too_much(src: str, out: str) -> bool:
+    src_wc = word_count(src)
+    out_wc = word_count(out)
+
+    if not src_wc or not out_wc:
+        return False
+
+    # Tek/çok kısa girişlerde modelin uzatmasını sert kes
+    if src_wc <= 2 and out_wc >= src_wc + 2:
+        return True
+
+    if is_short_utterance(src) and out_wc >= 4:
+        return True
+
+    # Çok kısa girişte çok uzun çıkış
+    if char_count(src) <= 10 and char_count(out) >= 20:
+        return True
+
+    return False
+
+
+def validate_translation_output(
+    src_text: str,
+    out_text: str,
+    source: str,
+    target: str,
+    strict_short: bool = False,
+) -> Tuple[bool, str]:
+    out = cleanup_translation_text(out_text)
+
+    if not out:
+        return False, "empty_output"
+
+    if contains_forbidden_meta_output(out):
+        return False, "meta_output"
+
+    if strict_short or is_short_utterance(src_text):
+        if probably_expanded_too_much(src_text, out):
+            return False, "expanded_short_text"
+
+    # Aynı dilde değilsek ve çıktı birebir girişle aynıysa, çoğu durumda şüpheli
+    if canonical(source) != canonical(target):
+        if normalize_compare_key(src_text) == normalize_compare_key(out):
+            # özel isim / evrensel kelime olabilir ama kısa cevapta şüpheli
+            if is_short_utterance(src_text) or word_count(src_text) <= 3:
+                return False, "same_as_input"
+
+    return True, "ok"
+
+
+def should_force_literal_mode(text: str, tone: str, style: str) -> bool:
+    if is_short_utterance(text):
+        return True
+    if word_count(text) <= 3 and tone == "neutral" and style in {"balanced", "clear"}:
+        return True
+    return False
+
+
+# =========================================================
+# LANGUAGE MAPS
+# =========================================================
 
 UNSUPPORTED_LOCAL_LANGS = {
     "lzz": "Lazca",
@@ -130,6 +320,10 @@ LANG_DISPLAY_NAMES = {
 }
 
 
+# =========================================================
+# REGISTER / MODE DECISION
+# =========================================================
+
 def detect_register_hint(text: str) -> str:
     s = normalize_text(text).lower()
 
@@ -161,11 +355,14 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
     if not s:
         return False
 
-    words = re.findall(r"\S+", s)
-    word_count = len(words)
-    char_count = len(s)
+    if should_force_literal_mode(s, tone, style):
+        return True
 
-    if char_count <= 60 and word_count <= 8:
+    words = re.findall(r"\S+", s)
+    word_count_local = len(words)
+    char_count_local = len(s)
+
+    if char_count_local <= 60 and word_count_local <= 8:
         simple_hits = [
             "selam", "merhaba", "günaydın", "iyi geceler", "iyi akşamlar",
             "nasılsın", "nasilsin", "iyiyim", "teşekkürler", "tesekkurler",
@@ -195,7 +392,7 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
     if tone != "neutral":
         return True
 
-    if style in {"warm", "social"} and char_count >= 50:
+    if style in {"warm", "social"} and char_count_local >= 50:
         return True
 
     if any(x in low for x in emotional_hits):
@@ -207,14 +404,14 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
     if any(x in low for x in formal_hits):
         return True
 
-    if char_count >= 180:
+    if char_count_local >= 180:
         return True
 
-    if word_count >= 20:
+    if word_count_local >= 20:
         return True
 
     if "!" in s or "?" in s:
-        if char_count >= 70:
+        if char_count_local >= 70:
             return True
 
     return False
@@ -318,13 +515,21 @@ WORD_OVERRIDES_TR_TO_GOKTURK = {
 }
 
 
+def _split_keep_spaces(text: str) -> List[str]:
+    return re.split(r"(\s+)", text)
+
+
+def _clean_word_for_override(word: str) -> str:
+    return re.sub(r"[^\wçğıöşü]", "", word, flags=re.UNICODE).lower()
+
+
 def turkish_to_gokturk_with_reading(text: str) -> Dict[str, str]:
     s = normalize_text(text)
     if not s:
         return {"gokturk_text": "", "gokturk_reading": ""}
 
     s = s.lower()
-    parts = re.split(r"(\s+)", s)
+    parts = _split_keep_spaces(s)
     converted_parts = []
     reading_parts = []
 
@@ -337,7 +542,7 @@ def turkish_to_gokturk_with_reading(text: str) -> Dict[str, str]:
             reading_parts.append(part)
             continue
 
-        pure = re.sub(r"[^\wçğıöşü]", "", part, flags=re.UNICODE)
+        pure = _clean_word_for_override(part)
 
         if pure in WORD_OVERRIDES_TR_TO_GOKTURK:
             converted_parts.append(WORD_OVERRIDES_TR_TO_GOKTURK[pure]["rune"])
@@ -345,7 +550,6 @@ def turkish_to_gokturk_with_reading(text: str) -> Dict[str, str]:
             continue
 
         out = []
-        read = []
         i = 0
         while i < len(part):
             matched = False
@@ -353,7 +557,6 @@ def turkish_to_gokturk_with_reading(text: str) -> Dict[str, str]:
             for src, dst in MULTI_CHAR_MAP:
                 if part.startswith(src, i):
                     out.append(dst)
-                    read.append(src)
                     i += len(src)
                     matched = True
                     break
@@ -363,11 +566,12 @@ def turkish_to_gokturk_with_reading(text: str) -> Dict[str, str]:
 
             ch = part[i]
             out.append(CHAR_MAP_TR_TO_GOKTURK.get(ch, ch))
-            read.append(ch)
             i += 1
 
         converted_parts.append("".join(out))
-        reading_parts.append("".join(read))
+        # reading kısmında kullanıcının verdiği modern kelimeyi koruyoruz.
+        # Böylece "sela" gibi UI tarafında oluşan sapmalar backend kaynaklı olmaz.
+        reading_parts.append(part)
 
     return {
         "gokturk_text": "".join(converted_parts).strip(),
@@ -385,29 +589,11 @@ def gokturk_to_turkish(text: str) -> str:
         out.append(CHAR_MAP_GOKTURK_TO_TR.get(ch, ch))
 
     joined = "".join(out).strip()
-    joined = joined.replace("ng", "ng")
-    joined = joined.replace("ny", "ny")
     return joined
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
-    raw = normalize_text(text)
-    if not raw:
-        return {}
-
-    try:
-        return json.loads(raw)
-    except Exception:
-        pass
-
-    m = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not m:
-        return {}
-
-    try:
-        return json.loads(m.group(0))
-    except Exception:
-        return {}
+    return safe_json_loads(text)
 
 
 def _historical_prompt(text: str, literal_runes: str, literal_reading: str) -> str:
@@ -443,6 +629,7 @@ JSON:
 }}
 """.strip()
 
+
 def _historical_from_gemini(text: str, literal_runes: str, literal_reading: str) -> Dict[str, str]:
     if not GEMINI_API_KEY:
         return {}
@@ -456,9 +643,9 @@ def _historical_from_gemini(text: str, literal_runes: str, literal_reading: str)
         payload = {
             "contents": [{"parts": [{"text": _historical_prompt(text, literal_runes, literal_reading)}]}],
             "generationConfig": {
-                "temperature": 0.15,
-                "topP": 0.8,
-                "maxOutputTokens": 300
+                "temperature": 0.05,
+                "topP": 0.4,
+                "maxOutputTokens": 220
             }
         }
 
@@ -553,18 +740,220 @@ def historical_gokturk_enrichment(text: str, literal_runes: str, literal_reading
 
 
 # =========================================================
-# NORMAL TRANSLATE
+# PROVIDER DECISION
 # =========================================================
-
-def lang_display(code: str) -> str:
-    c = canonical(code)
-    return LANG_DISPLAY_NAMES.get(c, c.upper())
-
 
 def should_force_ai_for_language_pair(source: str, target: str) -> bool:
     s = canonical(source)
     t = canonical(target)
     return s in UNSUPPORTED_LOCAL_LANGS or t in UNSUPPORTED_LOCAL_LANGS
+
+
+# =========================================================
+# PROMPTS
+# =========================================================
+
+def build_strict_translation_prompt(
+    text: str,
+    source: str,
+    target: str,
+    tone: str = "neutral",
+    style: str = "balanced",
+    literal_mode: bool = False,
+) -> str:
+    source_name = lang_display(source)
+    target_name = lang_display(target)
+    register_hint = detect_register_hint(text)
+
+    tone_map = {
+        "neutral": "Keep the tone neutral and natural.",
+        "happy": "Keep the tone warm, positive and natural.",
+        "angry": "Keep the emotional force, but do not exaggerate.",
+        "sad": "Keep the tone soft, sincere and gentle.",
+        "excited": "Keep the tone energetic and natural."
+    }
+
+    style_map = {
+        "balanced": "Use balanced, everyday phrasing.",
+        "warm": "Use warm and human phrasing, but do not add content.",
+        "clear": "Use clear and easy-to-understand phrasing.",
+        "social": "Use lightly conversational spoken phrasing, but do not add content."
+    }
+
+    register_map = {
+        "formal": "If the source is formal, keep it respectful and natural.",
+        "casual": "If the source is casual, keep it casual and natural.",
+        "neutral": "Do not make it overly formal or overly slangy."
+    }
+
+    literal_block = ""
+    if literal_mode:
+        literal_block = """
+SPECIAL STRICT MODE:
+- The input is a very short utterance or a minimal response.
+- DO NOT expand it.
+- DO NOT clarify it.
+- DO NOT make it more expressive.
+- DO NOT turn one word into a sentence.
+- Keep it as short and as exact as the target language allows.
+"""
+
+    return f"""
+You are a highly precise translator.
+
+Translate from {source_name} to {target_name}.
+
+Return STRICT JSON only:
+{{
+  "translation": ""
+}}
+
+Rules:
+- Preserve the exact meaning.
+- Do not explain.
+- Do not add context.
+- Do not add politeness unless it is already in the source.
+- Do not add emotional amplification.
+- Do not add quotation marks.
+- Do not mention AI, translation engines, tools, models, or brands.
+- Output must be only valid JSON.
+
+{literal_block}
+
+Tone:
+{tone_map.get(tone, tone_map["neutral"])}
+
+Style:
+{style_map.get(style, style_map["balanced"])}
+
+Register:
+{register_map.get(register_hint, register_map["neutral"])}
+
+Source text:
+{text}
+""".strip()
+
+
+# =========================================================
+# PROVIDER CALLS
+# =========================================================
+
+def _extract_translation_field(raw: str) -> str:
+    parsed = safe_json_loads(raw)
+    if isinstance(parsed, dict):
+        val = parsed.get("translation", "")
+        return cleanup_translation_text(str(val or ""))
+    return ""
+
+
+def _gemini_translate_structured(
+    text: str,
+    source: str,
+    target: str,
+    tone: str,
+    style: str,
+    literal_mode: bool = False,
+) -> str:
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY missing")
+
+    prompt = build_strict_translation_prompt(
+        text=text,
+        source=source,
+        target=target,
+        tone=tone,
+        style=style,
+        literal_mode=literal_mode,
+    )
+
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.05 if literal_mode else 0.18,
+            "topP": 0.35 if literal_mode else 0.7,
+            "maxOutputTokens": 320,
+        }
+    }
+
+    r = requests.post(url, json=payload, timeout=18)
+    r.raise_for_status()
+    data = r.json()
+
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError("Gemini empty candidates")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    raw = "".join(str(p.get("text", "")) for p in parts).strip()
+    out = _extract_translation_field(raw)
+
+    if not out:
+        raise RuntimeError("Gemini invalid structured output")
+
+    return out
+
+
+def _openai_translate_structured(
+    text: str,
+    source: str,
+    target: str,
+    tone: str,
+    style: str,
+    literal_mode: bool = False,
+) -> str:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY missing")
+
+    prompt = build_strict_translation_prompt(
+        text=text,
+        source=source,
+        target=target,
+        tone=tone,
+        style=style,
+        literal_mode=literal_mode,
+    )
+
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": OPENAI_MODEL,
+        "input": prompt,
+    }
+
+    r = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers=headers,
+        json=payload,
+        timeout=18,
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    chunks = []
+    for item in data.get("output", []) or []:
+        for content in item.get("content", []) or []:
+            if content.get("type") in {"output_text", "text"}:
+                txt = str(content.get("text") or "").strip()
+                if txt:
+                    chunks.append(txt)
+
+    raw = "".join(chunks).strip()
+    if not raw:
+        raw = str(data.get("output_text") or data.get("text") or "").strip()
+
+    out = _extract_translation_field(raw)
+    if not out:
+        raise RuntimeError("OpenAI invalid structured output")
+
+    return out
 
 
 def ai_direct_translate_by_language_name(
@@ -574,93 +963,27 @@ def ai_direct_translate_by_language_name(
     tone: str = "neutral",
     style: str = "balanced"
 ) -> Tuple[str, str]:
-    source_name = lang_display(source)
-    target_name = lang_display(target)
+    literal_mode = should_force_literal_mode(text, tone, style)
 
-    prompt = f"""
-You are a precise translator.
+    # 1) Gemini
+    try:
+        out = _gemini_translate_structured(text, source, target, tone, style, literal_mode=literal_mode)
+        ok, reason = validate_translation_output(text, out, source, target, strict_short=literal_mode)
+        if ok:
+            return out, "gemini_local_lang"
+        print("[translate_ai] gemini_local_lang invalid:", reason)
+    except Exception as e:
+        print("[translate_ai] gemini local-lang failed:", e)
 
-Translate the following text from {source_name} to {target_name}.
-
-Rules:
-- Preserve the exact meaning.
-- Sound natural and human.
-- Do not explain.
-- Do not mention AI, translation engines, or model names.
-- Return only the translated text.
-
-Text:
-{text}
-""".strip()
-
-    if GEMINI_API_KEY:
-        try:
-            url = (
-                "https://generativelanguage.googleapis.com/v1beta/models/"
-                f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-            )
-
-            payload = {
-                "contents": [
-                    {"parts": [{"text": prompt}]}
-                ],
-                "generationConfig": {
-                    "temperature": 0.25,
-                    "topP": 0.9,
-                    "maxOutputTokens": 512
-                }
-            }
-
-            r = requests.post(url, json=payload, timeout=18)
-            r.raise_for_status()
-            data = r.json()
-
-            candidates = data.get("candidates") or []
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                out = "".join(str(p.get("text", "")) for p in parts).strip()
-                if out:
-                    return out, "gemini_local_lang"
-        except Exception as e:
-            print("[translate_ai] gemini local-lang failed:", e)
-
-    if OPENAI_API_KEY:
-        try:
-            headers = {
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            }
-
-            payload = {
-                "model": OPENAI_MODEL,
-                "input": prompt,
-            }
-
-            r = requests.post(
-                "https://api.openai.com/v1/responses",
-                headers=headers,
-                json=payload,
-                timeout=18,
-            )
-            r.raise_for_status()
-            data = r.json()
-
-            chunks = []
-            for item in data.get("output", []) or []:
-                for content in item.get("content", []) or []:
-                    if content.get("type") in {"output_text", "text"}:
-                        txt = str(content.get("text") or "").strip()
-                        if txt:
-                            chunks.append(txt)
-
-            out = "".join(chunks).strip()
-            if not out:
-                out = str(data.get("output_text") or data.get("text") or "").strip()
-
-            if out:
-                return out, "openai_local_lang"
-        except Exception as e:
-            print("[translate_ai] openai local-lang failed:", e)
+    # 2) OpenAI
+    try:
+        out = _openai_translate_structured(text, source, target, tone, style, literal_mode=literal_mode)
+        ok, reason = validate_translation_output(text, out, source, target, strict_short=literal_mode)
+        if ok:
+            return out, "openai_local_lang"
+        print("[translate_ai] openai_local_lang invalid:", reason)
+    except Exception as e:
+        print("[translate_ai] openai local-lang failed:", e)
 
     raise RuntimeError("local_lang_ai_translate_failed")
 
@@ -684,7 +1007,7 @@ def google_translate_free(text: str, source: str, target: str) -> str:
         for item in data[0]:
             if isinstance(item, list) and item:
                 translated += str(item[0] or "")
-    return translated.strip()
+    return cleanup_translation_text(translated)
 
 
 def google_translate_official(text: str, source: str, target: str) -> str:
@@ -708,238 +1031,62 @@ def google_translate_official(text: str, source: str, target: str) -> str:
         .get("translations", [{}])[0]
         .get("translatedText", "")
     )
-    return str(translated).strip()
-
-
-def openai_cultural_translate(
-    text: str,
-    source: str,
-    target: str,
-    tone: str = "neutral",
-    style: str = "balanced"
-) -> str:
-    if not OPENAI_API_KEY:
-        raise RuntimeError("OPENAI_API_KEY missing")
-
-    tone = canonical_tone(tone)
-    style = canonical_style(style)
-    register_hint = detect_register_hint(text)
-
-    tone_map = {
-        "neutral": "Keep the tone natural, clear, smooth and human.",
-        "happy": "Keep the tone warm, friendly, positive and lively.",
-        "angry": "Keep the emotional intensity, but make it sound natural, socially appropriate and human.",
-        "sad": "Keep the tone soft, sincere, empathetic and emotionally gentle.",
-        "excited": "Keep the tone energetic, vivid, enthusiastic and natural."
-    }
-
-    style_map = {
-        "balanced": "Use balanced, natural, everyday phrasing.",
-        "warm": "Prefer warmer, softer, more human phrasing when possible.",
-        "clear": "Prefer simpler, clearer, easier-to-understand phrasing.",
-        "social": "Prefer slightly more conversational spoken-language phrasing."
-    }
-
-    register_map = {
-        "formal": "If the source sounds formal, keep it respectful but do not make it stiff or robotic.",
-        "casual": "If the source sounds casual, keep it relaxed, natural and conversational.",
-        "neutral": "Prefer natural daily phrasing over overly formal or rigid wording."
-    }
-
-    tone_rule = tone_map.get(tone, tone_map["neutral"])
-    style_rule = style_map.get(style, style_map["balanced"])
-    register_rule = register_map.get(register_hint, register_map["neutral"])
-
-    prompt = f"""
-You are a highly natural conversational translator.
-
-Translate the following text from "{source}" to "{target}".
-
-Core rules:
-- Preserve the exact meaning.
-- Do not sound robotic, stiff, or overly literal.
-- Make the result feel like something a real person would naturally say.
-- Keep the speaker's emotional tone.
-- Keep the social intent and politeness level.
-- Prefer fluent, human, culturally appropriate phrasing.
-- If a sentence sounds too formal in the target language, soften it slightly into natural spoken language without losing meaning.
-- If the source is already casual, keep it casual and natural.
-- Do not add extra explanation.
-- Do not add quotation marks.
-- Do not mention translation systems, AI tools, model names, brands, or technology.
-- Return only the translated text.
-
-Tone guidance:
-{tone_rule}
-
-Style guidance:
-{style_rule}
-
-Register guidance:
-{register_rule}
-
-Text:
-{text}
-""".strip()
-
-    payload = {
-        "model": OPENAI_MODEL,
-        "input": prompt,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    r = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers=headers,
-        json=payload,
-        timeout=18,
-    )
-    r.raise_for_status()
-    data = r.json()
-
-    chunks = []
-    for item in data.get("output", []) or []:
-        for content in item.get("content", []) or []:
-            if content.get("type") in {"output_text", "text"}:
-                txt = str(content.get("text") or "").strip()
-                if txt:
-                    chunks.append(txt)
-
-    out = "".join(chunks).strip()
-    if not out:
-        out = str(data.get("output_text") or data.get("text") or "").strip()
-
-    if not out:
-        raise RuntimeError("OpenAI empty text")
-
-    return out
-
-
-def gemini_cultural_translate(
-    text: str,
-    source: str,
-    target: str,
-    tone: str = "neutral",
-    style: str = "balanced"
-) -> str:
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY missing")
-
-    tone = canonical_tone(tone)
-    style = canonical_style(style)
-    register_hint = detect_register_hint(text)
-
-    tone_map = {
-        "neutral": "Keep the tone natural, clear, smooth and human.",
-        "happy": "Keep the tone warm, friendly, positive and lively.",
-        "angry": "Keep the emotional intensity, but make it sound natural, socially appropriate and human.",
-        "sad": "Keep the tone soft, sincere, empathetic and emotionally gentle.",
-        "excited": "Keep the tone energetic, vivid, enthusiastic and natural."
-    }
-
-    style_map = {
-        "balanced": "Use balanced, natural, everyday phrasing.",
-        "warm": "Prefer warmer, softer, more human phrasing when possible.",
-        "clear": "Prefer simpler, clearer, easier-to-understand phrasing.",
-        "social": "Prefer slightly more conversational spoken-language phrasing."
-    }
-
-    register_map = {
-        "formal": "If the source sounds formal, keep it respectful but do not make it stiff or robotic.",
-        "casual": "If the source sounds casual, keep it relaxed, natural and conversational.",
-        "neutral": "Prefer natural daily phrasing over overly formal or rigid wording."
-    }
-
-    tone_rule = tone_map.get(tone, tone_map["neutral"])
-    style_rule = style_map.get(style, style_map["balanced"])
-    register_rule = register_map.get(register_hint, register_map["neutral"])
-
-    prompt = f"""
-You are a highly natural conversational translator.
-
-Translate the following text from "{source}" to "{target}".
-
-Core rules:
-- Preserve the exact meaning.
-- Do not sound robotic, stiff, or overly literal.
-- Make the result feel like something a real person would naturally say.
-- Keep the speaker's emotional tone.
-- Keep the social intent and politeness level.
-- Prefer fluent, human, culturally appropriate phrasing.
-- If a sentence sounds too formal in the target language, soften it slightly into natural spoken language without losing meaning.
-- If the source is already casual, keep it casual and natural.
-- Do not add extra explanation.
-- Do not add quotation marks.
-- Do not mention translation systems, AI tools, model names, brands, or technology.
-- Return only the translated text.
-
-Tone guidance:
-{tone_rule}
-
-Style guidance:
-{style_rule}
-
-Register guidance:
-{register_rule}
-
-Text:
-{text}
-""".strip()
-
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-    )
-
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt}
-                ]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.42,
-            "topP": 0.9,
-            "maxOutputTokens": 512
-        }
-    }
-
-    r = requests.post(url, json=payload, timeout=16)
-    r.raise_for_status()
-    data = r.json()
-
-    candidates = data.get("candidates") or []
-    if not candidates:
-        raise RuntimeError("Gemini empty candidates")
-
-    parts = candidates[0].get("content", {}).get("parts", [])
-    out = "".join(str(p.get("text", "")) for p in parts).strip()
-
-    if not out:
-        raise RuntimeError("Gemini empty text")
-
-    return out
+    return cleanup_translation_text(str(translated))
 
 
 def fast_translate_fallback(text: str, source: str, target: str) -> str:
     try:
         print("[translate_ai] trying google free")
         translated = google_translate_free(text, source, target)
-        if translated:
+        ok, _ = validate_translation_output(text, translated, source, target, strict_short=is_short_utterance(text))
+        if translated and ok:
             return translated
     except Exception as e1:
         print("[translate_ai] google_free failed:", e1)
 
     print("[translate_ai] trying google official fallback")
     translated = google_translate_official(text, source, target)
+    ok, reason = validate_translation_output(text, translated, source, target, strict_short=is_short_utterance(text))
+    if not ok:
+        raise RuntimeError(f"google_output_invalid:{reason}")
     return translated
 
+
+def _try_gemini_then_openai(
+    text: str,
+    source: str,
+    target: str,
+    tone: str,
+    style: str
+) -> Tuple[str, str]:
+    literal_mode = should_force_literal_mode(text, tone, style)
+
+    try:
+        print("[translate_ai] trying gemini cultural")
+        translated = _gemini_translate_structured(text, source, target, tone, style, literal_mode=literal_mode)
+        ok, reason = validate_translation_output(text, translated, source, target, strict_short=literal_mode)
+        if ok:
+            return translated, "gemini"
+        print("[translate_ai] gemini invalid:", reason)
+    except Exception as e1:
+        print("[translate_ai] gemini failed:", e1)
+
+    try:
+        print("[translate_ai] trying openai cultural fallback")
+        translated = _openai_translate_structured(text, source, target, tone, style, literal_mode=literal_mode)
+        ok, reason = validate_translation_output(text, translated, source, target, strict_short=literal_mode)
+        if ok:
+            return translated, "openai"
+        print("[translate_ai] openai invalid:", reason)
+    except Exception as e2:
+        print("[translate_ai] openai failed:", e2)
+
+    raise RuntimeError("ai_translate_failed")
+
+
+# =========================================================
+# SUPABASE / BILLING
+# =========================================================
 
 def _require_supabase() -> Client:
     if supabase is None:
@@ -989,13 +1136,13 @@ def _get_wallet_summary(user_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"wallet_summary_failed: {e}")
 
 
-def _precheck_text_charge(user_id: str, char_count: int) -> Dict[str, Any]:
+def _precheck_text_charge(user_id: str, char_count_local: int) -> Dict[str, Any]:
     summary = _get_wallet_summary(user_id)
 
     tokens = int(summary.get("tokens") or 0)
     text_bucket = int(summary.get("text_bucket") or 0)
 
-    total = text_bucket + max(0, int(char_count))
+    total = text_bucket + max(0, int(char_count_local))
     jetons_needed = total // 1000
 
     return {
@@ -1032,31 +1179,9 @@ def _charge_text_usage(user_id: str, chars_used: int, source: str, description: 
         raise HTTPException(status_code=500, detail=f"usage_charge_failed: {e}")
 
 
-def _try_gemini_then_openai(
-    text: str,
-    source: str,
-    target: str,
-    tone: str,
-    style: str
-) -> Tuple[str, str]:
-    try:
-        print("[translate_ai] trying gemini cultural")
-        translated = gemini_cultural_translate(text, source, target, tone, style)
-        if translated:
-            return translated, "gemini"
-    except Exception as e1:
-        print("[translate_ai] gemini failed:", e1)
-
-    try:
-        print("[translate_ai] trying openai cultural fallback")
-        translated = openai_cultural_translate(text, source, target, tone, style)
-        if translated:
-            return translated, "openai"
-    except Exception as e2:
-        print("[translate_ai] openai failed:", e2)
-
-    raise RuntimeError("ai_translate_failed")
-
+# =========================================================
+# ROUTES
+# =========================================================
 
 @router.get("/translate_ai/health")
 def translate_ai_health():
@@ -1153,6 +1278,9 @@ def translate_ai(
             "charged": False,
         }
 
+    # =====================================================
+    # NORMAL MODE
+    # =====================================================
     if mode == "normal":
         try:
             if should_force_ai_for_language_pair(source, target):
@@ -1189,9 +1317,13 @@ def translate_ai(
 
         return {"ok": False, "error": "normal_translate_failed"}
 
+    # =====================================================
+    # CULTURAL MODE
+    # =====================================================
     if mode == "cultural":
         force_local_ai = should_force_ai_for_language_pair(source, target)
 
+        # Kısa ve basit şeylerde önce hızlı literal fallback dene
         if not force_local_ai and not should_use_ai_for_cultural(text, tone, style):
             try:
                 print("[translate_ai] cultural fast path -> google")
@@ -1212,8 +1344,8 @@ def translate_ai(
         user = _get_user_from_jwt(jwt_token)
         user_id = user["id"]
 
-        char_count = len(text)
-        precheck = _precheck_text_charge(user_id, char_count)
+        cc = len(text)
+        precheck = _precheck_text_charge(user_id, cc)
 
         if not precheck["can_afford"]:
             return {
@@ -1221,7 +1353,7 @@ def translate_ai(
                 "error": "insufficient_tokens",
                 "mode": "cultural",
                 "usage_kind": "text",
-                "chars_used": char_count,
+                "chars_used": cc,
                 "jetons_needed": precheck["jetons_needed"],
                 "tokens_before": precheck["tokens"],
                 "text_bucket_before": precheck["text_bucket"],
@@ -1242,30 +1374,34 @@ def translate_ai(
             try:
                 print("[translate_ai] trying google official fallback")
                 translated = google_translate_official(text, source, target)
-                if translated:
+                ok, reason = validate_translation_output(text, translated, source, target, strict_short=is_short_utterance(text))
+                if ok:
                     return {
                         "ok": True,
                         "translated": translated,
                         "provider": "google_official",
                         "ai_used": False,
                         "charged": False,
-                        "chars_used": char_count,
+                        "chars_used": cc,
                     }
+                print("[translate_ai] google_official invalid:", reason)
             except Exception as e3:
                 print("[translate_ai] google_official fallback failed:", e3)
 
             try:
                 print("[translate_ai] trying google free fallback")
                 translated = google_translate_free(text, source, target)
-                if translated:
+                ok, reason = validate_translation_output(text, translated, source, target, strict_short=is_short_utterance(text))
+                if ok:
                     return {
                         "ok": True,
                         "translated": translated,
                         "provider": "google_free",
                         "ai_used": False,
                         "charged": False,
-                        "chars_used": char_count,
+                        "chars_used": cc,
                     }
+                print("[translate_ai] google_free invalid:", reason)
             except Exception as e4:
                 print("[translate_ai] google_free fallback failed:", e4)
 
@@ -1273,7 +1409,7 @@ def translate_ai(
 
         charge = _charge_text_usage(
             user_id=user_id,
-            chars_used=char_count,
+            chars_used=cc,
             source=f"translate_ai_{provider}",
             description="Kültürel çeviri kullanımı",
             meta={
@@ -1284,6 +1420,7 @@ def translate_ai(
                 "to_lang": target,
                 "tone": tone,
                 "style": style,
+                "short_guard": is_short_utterance(text),
             },
         )
 
@@ -1300,7 +1437,7 @@ def translate_ai(
                 "error": "insufficient_tokens",
                 "mode": "cultural",
                 "usage_kind": "text",
-                "chars_used": char_count,
+                "chars_used": cc,
                 "jetons_needed": charge.get("jetons_needed", 0),
                 "tokens_before": charge.get("tokens_before", 0),
                 "text_bucket_before": precheck["text_bucket"],
@@ -1313,7 +1450,7 @@ def translate_ai(
             "ai_used": True,
             "charged": bool(charge.get("charged", False)),
             "usage_kind": "text",
-            "chars_used": char_count,
+            "chars_used": cc,
             "jetons_spent": int(charge.get("jetons_spent") or 0),
             "tokens_before": int(charge.get("tokens_before") or precheck["tokens"]),
             "tokens_after": int(charge.get("tokens_after") or precheck["tokens"]),
