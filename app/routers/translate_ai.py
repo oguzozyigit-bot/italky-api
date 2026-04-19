@@ -159,6 +159,28 @@ SHORT_UTTERANCE_SET = {
     "ozur dilerim", "olmaz", "istemiyorum", "istiyorum", "bekle", "dur"
 }
 
+COMMON_GREETING_TRANSLATIONS = {
+    "tr": {
+        "selam",
+        "merhaba",
+        "nasılsın",
+        "nasilsin",
+        "iyi geceler",
+        "iyi akşamlar",
+        "gunaydin",
+        "günaydın",
+        "teşekkürler",
+        "tesekkurler",
+        "teşekkür ederim",
+        "tesekkur ederim",
+        "evet",
+        "hayır",
+        "hayir",
+        "tamam",
+        "olur",
+    }
+}
+
 
 def is_short_utterance(text: str) -> bool:
     s = normalize_text(text).lower()
@@ -174,6 +196,14 @@ def is_short_utterance(text: str) -> bool:
         return True
 
     return False
+
+
+def is_common_greeting_like(text: str, source: str) -> bool:
+    s = normalize_text(text).lower()
+    src = canonical(source)
+    if not s:
+        return False
+    return s in COMMON_GREETING_TRANSLATIONS.get(src, set())
 
 
 def contains_forbidden_meta_output(text: str) -> bool:
@@ -194,22 +224,36 @@ def contains_forbidden_meta_output(text: str) -> bool:
     return any(x in s for x in forbidden_markers)
 
 
-def probably_expanded_too_much(src: str, out: str) -> bool:
+def probably_expanded_too_much(src: str, out: str, source: str = "", target: str = "") -> bool:
     src_wc = word_count(src)
     out_wc = word_count(out)
 
     if not src_wc or not out_wc:
         return False
 
-    # Tek/çok kısa girişlerde modelin uzatmasını sert kes
-    if src_wc <= 2 and out_wc >= src_wc + 2:
-        return True
+    # Selamlaşma / kısa gündelik kalıplarda biraz esnek ol
+    if is_common_greeting_like(src, source):
+        if out_wc <= 6 and char_count(out) <= 36:
+            return False
 
-    if is_short_utterance(src) and out_wc >= 4:
-        return True
+    # Tek kelimelik çok kısa cevaplarda sert ol
+    if src_wc == 1:
+        if out_wc >= src_wc + 3:
+            return True
+        if char_count(src) <= 8 and char_count(out) >= 24:
+            return True
+        return False
 
-    # Çok kısa girişte çok uzun çıkış
-    if char_count(src) <= 10 and char_count(out) >= 20:
+    # 2-3 kelimelik kısa cümlelerde daha yumuşak ol
+    if src_wc <= 3:
+        if out_wc >= src_wc + 5:
+            return True
+        if char_count(src) <= 14 and char_count(out) >= 42:
+            return True
+        return False
+
+    # genel koruma
+    if out_wc >= max(src_wc * 3, src_wc + 8):
         return True
 
     return False
@@ -231,14 +275,16 @@ def validate_translation_output(
         return False, "meta_output"
 
     if strict_short or is_short_utterance(src_text):
-        if probably_expanded_too_much(src_text, out):
+        if probably_expanded_too_much(src_text, out, source, target):
             return False, "expanded_short_text"
 
     # Aynı dilde değilsek ve çıktı birebir girişle aynıysa, çoğu durumda şüpheli
     if canonical(source) != canonical(target):
         if normalize_compare_key(src_text) == normalize_compare_key(out):
-            # özel isim / evrensel kelime olabilir ama kısa cevapta şüpheli
-            if is_short_utterance(src_text) or word_count(src_text) <= 3:
+            # Tek kelime özel isim olabilir, onu direkt öldürme
+            if word_count(src_text) == 1 and char_count(src_text) >= 3:
+                pass
+            elif is_short_utterance(src_text) or word_count(src_text) <= 3:
                 return False, "same_as_input"
 
     return True, "ok"
@@ -569,8 +615,6 @@ def turkish_to_gokturk_with_reading(text: str) -> Dict[str, str]:
             i += 1
 
         converted_parts.append("".join(out))
-        # reading kısmında kullanıcının verdiği modern kelimeyi koruyoruz.
-        # Böylece "sela" gibi UI tarafında oluşan sapmalar backend kaynaklı olmaz.
         reading_parts.append(part)
 
     return {
@@ -971,7 +1015,7 @@ def ai_direct_translate_by_language_name(
         ok, reason = validate_translation_output(text, out, source, target, strict_short=literal_mode)
         if ok:
             return out, "gemini_local_lang"
-        print("[translate_ai] gemini_local_lang invalid:", reason)
+        print("[translate_ai] gemini_local_lang invalid:", reason, "raw=", repr(out))
     except Exception as e:
         print("[translate_ai] gemini local-lang failed:", e)
 
@@ -981,7 +1025,7 @@ def ai_direct_translate_by_language_name(
         ok, reason = validate_translation_output(text, out, source, target, strict_short=literal_mode)
         if ok:
             return out, "openai_local_lang"
-        print("[translate_ai] openai_local_lang invalid:", reason)
+        print("[translate_ai] openai_local_lang invalid:", reason, "raw=", repr(out))
     except Exception as e:
         print("[translate_ai] openai local-lang failed:", e)
 
@@ -1038,7 +1082,15 @@ def fast_translate_fallback(text: str, source: str, target: str) -> str:
     try:
         print("[translate_ai] trying google free")
         translated = google_translate_free(text, source, target)
-        ok, _ = validate_translation_output(text, translated, source, target, strict_short=is_short_utterance(text))
+        print("[translate_ai] google free raw:", repr(translated))
+        ok, reason = validate_translation_output(
+            text,
+            translated,
+            source,
+            target,
+            strict_short=is_short_utterance(text),
+        )
+        print("[translate_ai] google free validation:", {"ok": ok, "reason": reason})
         if translated and ok:
             return translated
     except Exception as e1:
@@ -1046,7 +1098,15 @@ def fast_translate_fallback(text: str, source: str, target: str) -> str:
 
     print("[translate_ai] trying google official fallback")
     translated = google_translate_official(text, source, target)
-    ok, reason = validate_translation_output(text, translated, source, target, strict_short=is_short_utterance(text))
+    print("[translate_ai] google official raw:", repr(translated))
+    ok, reason = validate_translation_output(
+        text,
+        translated,
+        source,
+        target,
+        strict_short=is_short_utterance(text),
+    )
+    print("[translate_ai] google official validation:", {"ok": ok, "reason": reason})
     if not ok:
         raise RuntimeError(f"google_output_invalid:{reason}")
     return translated
@@ -1067,7 +1127,7 @@ def _try_gemini_then_openai(
         ok, reason = validate_translation_output(text, translated, source, target, strict_short=literal_mode)
         if ok:
             return translated, "gemini"
-        print("[translate_ai] gemini invalid:", reason)
+        print("[translate_ai] gemini invalid:", reason, "raw=", repr(translated))
     except Exception as e1:
         print("[translate_ai] gemini failed:", e1)
 
@@ -1077,7 +1137,7 @@ def _try_gemini_then_openai(
         ok, reason = validate_translation_output(text, translated, source, target, strict_short=literal_mode)
         if ok:
             return translated, "openai"
-        print("[translate_ai] openai invalid:", reason)
+        print("[translate_ai] openai invalid:", reason, "raw=", repr(translated))
     except Exception as e2:
         print("[translate_ai] openai failed:", e2)
 
@@ -1184,11 +1244,15 @@ def _charge_text_usage(user_id: str, chars_used: int, source: str, description: 
 # =========================================================
 
 @router.get("/translate_ai/health")
+@router.get("/translate-ai/health")
+@router.get("/translate/health")
 def translate_ai_health():
     return {"ok": True, "service": "translate_ai"}
 
 
 @router.post("/translate_ai")
+@router.post("/translate-ai")
+@router.post("/translate")
 def translate_ai(
     body: TranslateBody,
     authorization: Optional[str] = Header(default=None),
@@ -1384,7 +1448,7 @@ def translate_ai(
                         "charged": False,
                         "chars_used": cc,
                     }
-                print("[translate_ai] google_official invalid:", reason)
+                print("[translate_ai] google_official invalid:", reason, "raw=", repr(translated))
             except Exception as e3:
                 print("[translate_ai] google_official fallback failed:", e3)
 
@@ -1401,7 +1465,7 @@ def translate_ai(
                         "charged": False,
                         "chars_used": cc,
                     }
-                print("[translate_ai] google_free invalid:", reason)
+                print("[translate_ai] google_free invalid:", reason, "raw=", repr(translated))
             except Exception as e4:
                 print("[translate_ai] google_free fallback failed:", e4)
 
