@@ -21,6 +21,9 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # Sadece tek üyelik ürünü
 PLAY_SUBSCRIPTION_PRODUCT_ID = "italky_pro"
 
+# İlk üyelikte verilecek hoş geldin bonusu
+SUBSCRIPTION_WELCOME_BONUS = 5
+
 # Tek seferlik jeton ürünleri
 PRODUCT_TOKENS = {
     "jeton_10": 10,
@@ -71,6 +74,18 @@ def _purchase_exists(purchase_token: str) -> bool:
     return bool(_safe_data(existing))
 
 
+def _get_purchase_owner(purchase_token: str) -> dict[str, Any] | None:
+    existing = (
+        supabase.table("billing_purchases")
+        .select("id,user_id,product_id,provider,purchase_token")
+        .eq("purchase_token", purchase_token)
+        .limit(1)
+        .execute()
+    )
+    rows = _safe_data(existing) or []
+    return rows[0] if rows else None
+
+
 def _insert_purchase_log(
     user_id: str,
     product_id: str,
@@ -118,7 +133,7 @@ def _profile_or_404(user_id: str) -> dict[str, Any]:
     prof = (
         supabase.table("profiles")
         .select(
-            "id,tokens,"
+            "id,tokens,welcome_bonus_claimed,welcome_bonus_claimed_at,"
             "trial_started_at,trial_ends_at,trial_used,"
             "membership_status,membership_source,membership_product_id,"
             "membership_started_at,membership_ends_at,membership_last_checked_at"
@@ -140,6 +155,48 @@ def _parse_dt(raw: str | None) -> datetime | None:
         return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _grant_subscription_welcome_bonus_if_needed(user_id: str, purchase_token: str) -> tuple[bool, int]:
+    """
+    İlk üyelikte bir kez 5 jeton verir.
+    Restore akışında veya bonus zaten verildiyse tekrar vermez.
+    Dönen: (bonus_verildi_mi, tokens_after)
+    """
+    prof = _profile_or_404(user_id)
+
+    already_claimed = bool(prof.get("welcome_bonus_claimed"))
+    current_tokens = int(prof.get("tokens") or 0)
+
+    if already_claimed:
+        return False, current_tokens
+
+    next_tokens = current_tokens + SUBSCRIPTION_WELCOME_BONUS
+    now_iso = _iso(_now())
+
+    supabase.table("profiles").update(
+        {
+            "tokens": next_tokens,
+            "welcome_bonus_claimed": True,
+            "welcome_bonus_claimed_at": now_iso,
+        }
+    ).eq("id", user_id).execute()
+
+    _insert_wallet_credit_tx(
+        user_id=user_id,
+        amount=SUBSCRIPTION_WELCOME_BONUS,
+        balance_before=current_tokens,
+        balance_after=next_tokens,
+        source="google_play_subscription_welcome_bonus",
+        description="Google Play üyelik hoş geldin bonusu",
+        meta={
+            "provider": "google_play",
+            "purchase_token": purchase_token,
+            "bonus_tokens": SUBSCRIPTION_WELCOME_BONUS,
+        },
+    )
+
+    return True, next_tokens
 
 
 @router.post("/api/billing/google/confirm")
@@ -223,9 +280,11 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
     """
     italky_pro üyeliği için.
 
-    purchase_token daha önce işlenmiş olsa bile membership alanları
-    yeniden güncellenir. Böylece restore / yeniden doğrulama /
-    zaten var olan aktif aboneliği tekrar eşleme akışları düzgün çalışır.
+    Kurallar:
+    - Aynı purchase_token sadece aynı kullanıcıya restore edilebilir.
+    - Başka kullanıcıya taşınamaz.
+    - İlk kez işleniyorsa isteğe bağlı 5 jeton bonus verir.
+    - Restore akışında bonus tekrar verilmez.
     """
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
@@ -253,6 +312,22 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
 
     membership_status = "active" if req.is_active and end_dt > now_dt else "expired"
 
+    # Önce purchase_token sahipliği kontrol edilir
+    existing_owner = _get_purchase_owner(purchase_token)
+
+    if existing_owner:
+        existing_user_id = str(existing_owner.get("user_id") or "").strip()
+
+        # Token başka kullanıcıya aitse üyelik taşınamaz
+        if existing_user_id and existing_user_id != user_id:
+            raise HTTPException(
+                status_code=409,
+                detail="purchase_token_already_bound_to_other_user"
+            )
+
+    already_processed = bool(existing_owner)
+    restored = already_processed
+
     update_payload = {
         "membership_status": membership_status,
         "membership_source": source,
@@ -262,9 +337,8 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
         "membership_last_checked_at": now_iso,
     }
 
+    # Ancak sahiplik kontrolünden sonra üyelik yazılır
     supabase.table("profiles").update(update_payload).eq("id", user_id).execute()
-
-    already_processed = _purchase_exists(purchase_token)
 
     if not already_processed:
         _insert_purchase_log(
@@ -275,17 +349,35 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
             provider="google_play_subscription",
         )
 
+    bonus_given = False
+    tokens_after_bonus = int((_profile_or_404(user_id)).get("tokens") or 0)
+
+    # Sadece ilk işleme alma anında ve aktif üyelikte bonus ver
+    if not already_processed and membership_status == "active":
+        bonus_given, tokens_after_bonus = _grant_subscription_welcome_bonus_if_needed(
+            user_id=user_id,
+            purchase_token=purchase_token,
+        )
+
     fresh = _profile_or_404(user_id)
 
     return {
         "ok": True,
         "already_processed": already_processed,
+        "restored": restored,
+        "bonus_given": bonus_given,
+        "bonus_tokens": SUBSCRIPTION_WELCOME_BONUS if bonus_given else 0,
         "membership_status": fresh.get("membership_status"),
+        "membership_source": fresh.get("membership_source"),
         "membership_product_id": fresh.get("membership_product_id"),
         "membership_started_at": fresh.get("membership_started_at"),
         "membership_ends_at": fresh.get("membership_ends_at"),
         "membership_last_checked_at": fresh.get("membership_last_checked_at"),
+        "welcome_bonus_claimed": bool(fresh.get("welcome_bonus_claimed")),
+        "welcome_bonus_claimed_at": fresh.get("welcome_bonus_claimed_at"),
         "tokens": int(fresh.get("tokens") or 0),
+        "tokens_after": int(fresh.get("tokens") or 0),
+        "tokens_after_bonus": tokens_after_bonus,
     }
 
 
