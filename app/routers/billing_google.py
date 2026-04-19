@@ -18,13 +18,9 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# Sadece tek üyelik ürünü
 PLAY_SUBSCRIPTION_PRODUCT_ID = "italky_pro"
-
-# İlk üyelikte verilecek hoş geldin bonusu
 SUBSCRIPTION_WELCOME_BONUS = 5
 
-# Tek seferlik jeton ürünleri
 PRODUCT_TOKENS = {
     "jeton_10": 10,
     "jeton_20": 25,
@@ -63,21 +59,37 @@ def _safe_data(res: Any):
     return getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None)
 
 
-def _purchase_exists(purchase_token: str) -> bool:
-    existing = (
-        supabase.table("billing_purchases")
-        .select("id")
-        .eq("purchase_token", purchase_token)
+def _parse_dt(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _profile_or_404(user_id: str) -> dict[str, Any]:
+    prof = (
+        supabase.table("profiles")
+        .select(
+            "id,email,tokens,welcome_bonus_claimed,welcome_bonus_claimed_at,"
+            "membership_status,membership_source,membership_product_id,"
+            "membership_started_at,membership_ends_at,membership_last_checked_at"
+        )
+        .eq("id", user_id)
         .limit(1)
         .execute()
     )
-    return bool(_safe_data(existing))
+    rows = _safe_data(prof) or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="profile_not_found")
+    return rows[0] or {}
 
 
 def _get_purchase_owner(purchase_token: str) -> dict[str, Any] | None:
     existing = (
         supabase.table("billing_purchases")
-        .select("id,user_id,product_id,provider,purchase_token")
+        .select("id,user_id,user_email,product_id,provider,purchase_token")
         .eq("purchase_token", purchase_token)
         .limit(1)
         .execute()
@@ -88,6 +100,7 @@ def _get_purchase_owner(purchase_token: str) -> dict[str, Any] | None:
 
 def _insert_purchase_log(
     user_id: str,
+    user_email: str,
     product_id: str,
     amount: int,
     purchase_token: str,
@@ -96,12 +109,22 @@ def _insert_purchase_log(
     supabase.table("billing_purchases").insert(
         {
             "user_id": user_id,
+            "user_email": user_email,
             "product_id": product_id,
             "amount": amount,
             "purchase_token": purchase_token,
             "provider": provider,
         }
     ).execute()
+
+
+def _update_purchase_owner_email(purchase_token: str, user_id: str, user_email: str):
+    supabase.table("billing_purchases").update(
+        {
+            "user_id": user_id,
+            "user_email": user_email,
+        }
+    ).eq("purchase_token", purchase_token).execute()
 
 
 def _insert_wallet_credit_tx(
@@ -129,40 +152,7 @@ def _insert_wallet_credit_tx(
     ).execute()
 
 
-def _profile_or_404(user_id: str) -> dict[str, Any]:
-    prof = (
-        supabase.table("profiles")
-        .select(
-            "id,tokens,welcome_bonus_claimed,welcome_bonus_claimed_at,"
-            "trial_started_at,trial_ends_at,trial_used,"
-            "membership_status,membership_source,membership_product_id,"
-            "membership_started_at,membership_ends_at,membership_last_checked_at"
-        )
-        .eq("id", user_id)
-        .limit(1)
-        .execute()
-    )
-    rows = _safe_data(prof) or []
-    if not rows:
-        raise HTTPException(status_code=404, detail="profile not found")
-    return rows[0] or {}
-
-
-def _parse_dt(raw: str | None) -> datetime | None:
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
 def _grant_subscription_welcome_bonus_if_needed(user_id: str, purchase_token: str) -> tuple[bool, int]:
-    """
-    İlk üyelikte bir kez 5 jeton verir.
-    Restore akışında veya bonus zaten verildiyse tekrar vermez.
-    Dönen: (bonus_verildi_mi, tokens_after)
-    """
     prof = _profile_or_404(user_id)
 
     already_claimed = bool(prof.get("welcome_bonus_claimed"))
@@ -201,34 +191,38 @@ def _grant_subscription_welcome_bonus_if_needed(user_id: str, purchase_token: st
 
 @router.post("/api/billing/google/confirm")
 async def billing_google_confirm(req: GoogleBillingConfirmReq):
-    """
-    Tek seferlik jeton ürünleri için.
-    Üyelik ürünü burada işlenmez.
-    """
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
     purchase_token = (req.purchase_token or "").strip()
 
     if not user_id:
-        raise HTTPException(status_code=422, detail="user_id required")
+        raise HTTPException(status_code=422, detail="user_id_required")
     if not product_id:
-        raise HTTPException(status_code=422, detail="product_id required")
+        raise HTTPException(status_code=422, detail="product_id_required")
     if not purchase_token:
-        raise HTTPException(status_code=422, detail="purchase_token required")
+        raise HTTPException(status_code=422, detail="purchase_token_required")
 
     if product_id == PLAY_SUBSCRIPTION_PRODUCT_ID:
         raise HTTPException(
             status_code=400,
-            detail="subscription product must use /api/billing/google/subscription/confirm"
+            detail="subscription_product_must_use_subscription_confirm"
         )
 
     amount = PRODUCT_TOKENS.get(product_id)
     if not amount:
-        raise HTTPException(status_code=400, detail="invalid token product_id")
+        raise HTTPException(status_code=400, detail="invalid_token_product_id")
 
-    if _purchase_exists(purchase_token):
-        prof = _profile_or_404(user_id)
+    prof = _profile_or_404(user_id)
+    user_email = str(prof.get("email") or "").strip().lower()
+
+    existing_owner = _get_purchase_owner(purchase_token)
+    if existing_owner:
+        existing_user_id = str(existing_owner.get("user_id") or "").strip()
         current_tokens = int(prof.get("tokens") or 0)
+
+        if existing_user_id and existing_user_id != user_id:
+            raise HTTPException(status_code=409, detail="purchase_token_already_bound_to_other_user")
+
         return {
             "ok": True,
             "already_processed": True,
@@ -238,7 +232,6 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
             "tokens_after": current_tokens,
         }
 
-    prof = _profile_or_404(user_id)
     current_tokens = int(prof.get("tokens") or 0)
     next_tokens = current_tokens + amount
 
@@ -248,7 +241,14 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
         }
     ).eq("id", user_id).execute()
 
-    _insert_purchase_log(user_id, product_id, amount, purchase_token, "google_play")
+    _insert_purchase_log(
+        user_id=user_id,
+        user_email=user_email,
+        product_id=product_id,
+        amount=amount,
+        purchase_token=purchase_token,
+        provider="google_play",
+    )
 
     _insert_wallet_credit_tx(
         user_id=user_id,
@@ -277,56 +277,62 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
 
 @router.post("/api/billing/google/subscription/confirm")
 async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq):
-    """
-    italky_pro üyeliği için.
-
-    Kurallar:
-    - Aynı purchase_token sadece aynı kullanıcıya restore edilebilir.
-    - Başka kullanıcıya taşınamaz.
-    - İlk kez işleniyorsa isteğe bağlı 5 jeton bonus verir.
-    - Restore akışında bonus tekrar verilmez.
-    """
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
     purchase_token = (req.purchase_token or "").strip()
     source = (req.source or "google_play").strip()
 
     if not user_id:
-        raise HTTPException(status_code=422, detail="user_id required")
+        raise HTTPException(status_code=422, detail="user_id_required")
     if not product_id:
-        raise HTTPException(status_code=422, detail="product_id required")
+        raise HTTPException(status_code=422, detail="product_id_required")
     if not purchase_token:
-        raise HTTPException(status_code=422, detail="purchase_token required")
-
+        raise HTTPException(status_code=422, detail="purchase_token_required")
     if product_id != PLAY_SUBSCRIPTION_PRODUCT_ID:
-        raise HTTPException(status_code=400, detail="invalid subscription product_id")
+        raise HTTPException(status_code=400, detail="invalid_subscription_product_id")
+
+    prof = _profile_or_404(user_id)
+    user_email = str(prof.get("email") or "").strip().lower()
+    if not user_email:
+        raise HTTPException(status_code=422, detail="profile_email_missing")
 
     now_dt = _now()
     now_iso = _iso(now_dt)
 
     start_dt = _parse_dt(req.subscription_starts_at) or now_dt
     end_dt = _parse_dt(req.subscription_ends_at)
-
     if not end_dt:
-        raise HTTPException(status_code=422, detail="subscription_ends_at required")
+        raise HTTPException(status_code=422, detail="subscription_ends_at_required")
 
     membership_status = "active" if req.is_active and end_dt > now_dt else "expired"
 
-    # Önce purchase_token sahipliği kontrol edilir
     existing_owner = _get_purchase_owner(purchase_token)
+    already_processed = bool(existing_owner)
+    restored = False
 
     if existing_owner:
         existing_user_id = str(existing_owner.get("user_id") or "").strip()
+        existing_user_email = str(existing_owner.get("user_email") or "").strip().lower()
 
-        # Token başka kullanıcıya aitse üyelik taşınamaz
-        if existing_user_id and existing_user_id != user_id:
+        # Aynı kullanıcı -> normal restore
+        if existing_user_id == user_id:
+            restored = True
+
+        # Hesap silinmiş / yeni user_id oluşmuş ama email aynı -> güvenli restore
+        elif existing_user_email and existing_user_email == user_email:
+            restored = True
+            _update_purchase_owner_email(
+                purchase_token=purchase_token,
+                user_id=user_id,
+                user_email=user_email,
+            )
+
+        # Başka kullanıcı -> taşıma yasak
+        else:
             raise HTTPException(
                 status_code=409,
                 detail="purchase_token_already_bound_to_other_user"
             )
-
-    already_processed = bool(existing_owner)
-    restored = already_processed
 
     update_payload = {
         "membership_status": membership_status,
@@ -337,12 +343,12 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
         "membership_last_checked_at": now_iso,
     }
 
-    # Ancak sahiplik kontrolünden sonra üyelik yazılır
     supabase.table("profiles").update(update_payload).eq("id", user_id).execute()
 
     if not already_processed:
         _insert_purchase_log(
             user_id=user_id,
+            user_email=user_email,
             product_id=product_id,
             amount=0,
             purchase_token=purchase_token,
@@ -352,7 +358,7 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
     bonus_given = False
     tokens_after_bonus = int((_profile_or_404(user_id)).get("tokens") or 0)
 
-    # Sadece ilk işleme alma anında ve aktif üyelikte bonus ver
+    # Sadece ilk işleme almada bonus
     if not already_processed and membership_status == "active":
         bonus_given, tokens_after_bonus = _grant_subscription_welcome_bonus_if_needed(
             user_id=user_id,
@@ -376,24 +382,19 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
         "welcome_bonus_claimed": bool(fresh.get("welcome_bonus_claimed")),
         "welcome_bonus_claimed_at": fresh.get("welcome_bonus_claimed_at"),
         "tokens": int(fresh.get("tokens") or 0),
-        "tokens_after": int(fresh.get("tokens") or 0),
         "tokens_after_bonus": tokens_after_bonus,
     }
 
 
 @router.post("/api/billing/google/subscription/cancel")
 async def billing_google_subscription_cancel(req: GoogleSubscriptionConfirmReq):
-    """
-    İptal geldiğinde hemen erişim kapatmayız.
-    membership_ends_at tarihine kadar aktif kalır.
-    """
     user_id = (req.user_id or "").strip()
     product_id = (req.product_id or "").strip()
 
     if not user_id:
-        raise HTTPException(status_code=422, detail="user_id required")
+        raise HTTPException(status_code=422, detail="user_id_required")
     if product_id != PLAY_SUBSCRIPTION_PRODUCT_ID:
-        raise HTTPException(status_code=400, detail="invalid subscription product_id")
+        raise HTTPException(status_code=400, detail="invalid_subscription_product_id")
 
     prof = _profile_or_404(user_id)
     end_dt = _parse_dt(prof.get("membership_ends_at"))
