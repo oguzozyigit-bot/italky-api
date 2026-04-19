@@ -112,7 +112,7 @@ def strip_outer_quotes(s: str) -> str:
     t = normalize_text(s)
     if len(t) >= 2 and (
         (t.startswith('"') and t.endswith('"')) or
-        (t.startswith("'") and t.endswith("''))
+        (t.startswith("'") and t.endswith("'"))
     ):
         return t[1:-1].strip()
     return t
