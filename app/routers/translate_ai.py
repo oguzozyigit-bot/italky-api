@@ -414,39 +414,34 @@ def _historical_prompt(text: str, literal_runes: str, literal_reading: str) -> s
     return f"""
 You are an expert in Old Turkic / Göktürk writing and historical Turkish linguistics.
 
-Task:
-The user wrote a modern Turkish word or sentence.
-We already have a literal Göktürk-script rendering.
+We already have a literal Göktürk-script rendering of a modern Turkish input.
 
-Your job:
-1. Decide whether there is a meaningful historical / etymological / period-appropriate Göktürk-style counterpart worth showing.
-2. If yes, provide:
-   - historical_text: a concise historical / semantic Göktürk-style equivalent
-   - historical_reading: its Latin reading
-   - historical_meaning: short Turkish explanation in modern Turkish
-3. If no reliable historical counterpart exists, return empty strings.
+You must be EXTREMELY conservative.
+
+Return STRICT JSON only.
 
 Rules:
-- Be conservative.
-- Do not invent fake scholarly certainty.
-- If uncertain, return empty strings.
-- Return valid JSON only.
-- Do not include markdown.
-- Keep historical_meaning short and clear.
+- If there is NO strong, historically defensible Old Turkic counterpart, return empty strings.
+- Do NOT invent a poetic substitute.
+- Do NOT guess.
+- Do NOT paraphrase loosely.
+- historical_text must only be filled if you are highly confident.
+- historical_reading must match historical_text exactly.
+- historical_meaning must be short modern Turkish explanation.
+- If uncertain, all three fields must be empty.
 
 Input:
 modern_text = {text}
 literal_runes = {literal_runes}
 literal_reading = {literal_reading}
 
-JSON schema:
+JSON:
 {{
   "historical_text": "",
   "historical_reading": "",
   "historical_meaning": ""
 }}
 """.strip()
-
 
 def _historical_from_gemini(text: str, literal_runes: str, literal_reading: str) -> Dict[str, str]:
     if not GEMINI_API_KEY:
