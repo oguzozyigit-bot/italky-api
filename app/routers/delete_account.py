@@ -1,11 +1,15 @@
+from __future__ import annotations
+
+import os
+from typing import Optional
+
 from fastapi import APIRouter, Header, HTTPException
 from supabase import create_client
-import os
 
 router = APIRouter(prefix="/api/account", tags=["account"])
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_URL veya SUPABASE_SERVICE_ROLE_KEY eksik")
@@ -13,7 +17,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def get_user_from_token(auth_header: str | None):
+def get_user_from_token(auth_header: Optional[str]):
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Yetkisiz erişim")
 
@@ -33,8 +37,28 @@ def get_user_from_token(auth_header: str | None):
         raise HTTPException(status_code=401, detail=f"Oturum doğrulanamadı: {e}")
 
 
+def safe_delete(table_name: str, column_name: str, user_id: str):
+    try:
+        supabase.table(table_name).delete().eq(column_name, user_id).execute()
+    except Exception:
+        pass
+
+
+def safe_update_bound_nfc_cards(user_id: str):
+    try:
+        supabase.table("nfc_cards").update({
+            "bound_user_id": None,
+            "is_bound": False,
+            "status": "new",
+            "first_bound_at": None,
+            "last_seen_at": None,
+        }).eq("bound_user_id", user_id).execute()
+    except Exception:
+        pass
+
+
 @router.post("/delete")
-def delete_my_account(authorization: str | None = Header(default=None)):
+def delete_my_account(authorization: Optional[str] = Header(default=None)):
     user = get_user_from_token(authorization)
     user_id = str(user.id).strip()
 
@@ -42,6 +66,12 @@ def delete_my_account(authorization: str | None = Header(default=None)):
         raise HTTPException(status_code=400, detail="Geçersiz kullanıcı")
 
     try:
+        # -------------------------------------------------
+        # 1) Kullanıcıya bağlı alt kayıtları sil
+        # Not:
+        # user_access_state muhtemelen view olduğu için burada yok
+        # trial_audit / promo geçmişi de tutulmayacak
+        # -------------------------------------------------
         table_ops = [
             ("billing_purchases", "user_id"),
             ("course_sessions", "user_id"),
@@ -57,57 +87,46 @@ def delete_my_account(authorization: str | None = Header(default=None)):
             ("offline_downloads", "user_id"),
             ("offline_files", "user_id"),
             ("practice_ai_memory", "user_id"),
-            ("user_access_state", "user_id"),
             ("user_devices", "user_id"),
             ("user_weak_topics", "user_id"),
             ("usage_logs", "user_id"),
             ("wallet_tx", "user_id"),
             ("wallets", "user_id"),
+            ("promo_redemptions", "user_id"),
+            ("trial_audit", "user_id"),
         ]
 
         for table_name, column_name in table_ops:
-            try:
-                supabase.table(table_name).delete().eq(column_name, user_id).execute()
-            except Exception:
-                pass
+            safe_delete(table_name, column_name, user_id)
 
-        try:
-            supabase.table("profiles").update({
-                "nfc_card_uid": None,
-                "nfc_package_code": None,
-                "nfc_expires_at": None,
-                "selected_package_code": None,
-                "package_active": False,
-                "package_started_at": None,
-                "package_ends_at": None,
-                "trial_started_at": None,
-                "trial_ends_at": None,
-                "app_access_mode": "basic"
-            }).eq("id", user_id).execute()
-        except Exception:
-            pass
+        # -------------------------------------------------
+        # 2) Bu kullanıcıya bağlı NFC kart varsa boşa çıkar
+        # NFC artık iptal olsa da eski kart kayıtları kalmış olabilir
+        # -------------------------------------------------
+        safe_update_bound_nfc_cards(user_id)
 
-        try:
-            supabase.table("nfc_cards").update({
-                "bound_user_id": None,
-                "status": "new"
-            }).eq("bound_user_id", user_id).execute()
-        except Exception:
-            pass
-
+        # -------------------------------------------------
+        # 3) Profile kaydını tamamen sil
+        # Resetlemek yerine komple silmek daha doğru
+        # Çünkü kullanıcı sıfırdan başlamalı
+        # -------------------------------------------------
         try:
             supabase.table("profiles").delete().eq("id", user_id).execute()
         except Exception:
             pass
 
+        # -------------------------------------------------
+        # 4) Eğer public.users gibi özel bir tablo varsa onu da sil
+        # auth.users ayrı yönetilir, bu satır public users tablosu içindir
+        # -------------------------------------------------
         try:
             supabase.table("users").delete().eq("id", user_id).execute()
         except Exception:
             pass
 
-        # trial_audit silinmiyor
-        # kullanıcı tekrar hesap açsa bile ücretsiz denemeyi yeniden alamaz
-
+        # -------------------------------------------------
+        # 5) En son auth kullanıcısını sil
+        # -------------------------------------------------
         try:
             supabase.auth.admin.delete_user(user_id)
         except Exception as e:
