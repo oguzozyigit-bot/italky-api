@@ -15,11 +15,11 @@ from app.routers.license import router as license_router
 from app.routers.delete_account import router as delete_account_router
 from app.routers.italkyai_chat import router as italkyai_chat_router
 from app.routers.italkyai_voice import router as italkyai_voice_router
+
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers.onetoall_ws import router as onetoall_ws_router
 from app.routers.arkadasla import router as arkadasla_router
-from app.routers.push_admin import router as push_admin_router
 from app.routers.wallet import router as wallet_router
 from app.routers.promo import router as promo_router
 
@@ -68,6 +68,13 @@ try:
 except Exception:
     offline_router = None
     has_offline = False
+
+try:
+    from app.routers.push_admin import router as push_admin_router
+    has_push_admin = True
+except Exception:
+    push_admin_router = None
+    has_push_admin = False
 
 APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.3").strip()
 
@@ -122,9 +129,11 @@ app.include_router(ui_translate_router, prefix="/api")
 app.include_router(italkyai_chat_router)
 app.include_router(italkyai_voice_router)
 app.include_router(arkadasla_router)
-app.include_router(push_admin_router)
 app.include_router(wallet_router)
 app.include_router(promo_router)
+
+if has_push_admin and push_admin_router:
+    app.include_router(push_admin_router)
 
 app.include_router(session_router)
 app.include_router(practice_ai_router)
