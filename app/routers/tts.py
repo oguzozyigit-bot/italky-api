@@ -160,17 +160,17 @@ def resolve_profile_voice(profile: Optional[dict], requested_voice: str) -> Tupl
 
     if requested_voice == "mine":
         voice_id = str(profile.get("tts_voice_id") or "").strip()
-        ready = bool(profile.get("tts_voice_ready")) or bool(profile.get("voice_sample_path"))
+        ready = bool(profile.get("tts_voice_ready")) and bool(voice_id) and is_uuid(voice_id)
         return voice_id, ready
 
     if requested_voice == "second":
         voice_id = str(profile.get("second_tts_voice_id") or "").strip()
-        ready = bool(profile.get("second_tts_voice_ready")) or bool(profile.get("second_voice_sample_path"))
+        ready = bool(profile.get("second_tts_voice_ready")) and bool(voice_id) and is_uuid(voice_id)
         return voice_id, ready
 
     if requested_voice == "memory":
         voice_id = str(profile.get("memory_tts_voice_id") or "").strip()
-        ready = bool(profile.get("memory_tts_voice_ready")) or bool(profile.get("memory_voice_sample_path"))
+        ready = bool(profile.get("memory_tts_voice_ready")) and bool(voice_id) and is_uuid(voice_id)
         return voice_id, ready
 
     return "", False
@@ -377,7 +377,6 @@ async def tts(
         req.user_id,
     )
 
-    # auto -> ücretsiz / backend ses üretmesin
     if requested_voice == "auto":
         return TTSResponse(
             ok=False,
@@ -403,6 +402,22 @@ async def tts(
 
     profile = await get_user_profile(effective_user_id)
     voice_id, voice_ready = resolve_profile_voice(profile, requested_voice)
+
+    logger.info(
+        "[tts-debug] selected_voice=%s voice=%s preset_voice=%s voice_mode=%s requested=%s user_id=%s",
+        req.selected_voice,
+        req.voice,
+        req.preset_voice,
+        req.voice_mode,
+        requested_voice,
+        effective_user_id,
+    )
+    logger.info(
+        "[tts-debug] resolved voice_id=%s ready=%s profile=%s",
+        voice_id,
+        voice_ready,
+        profile,
+    )
 
     if not voice_ready:
         return TTSResponse(
@@ -438,7 +453,6 @@ async def tts(
             voice_bucket=int(precheck["voice_bucket"]),
         )
 
-    # Önce tone ile dene
     audio = await cartesia_tts(
         text=text,
         lang=req.lang,
@@ -451,7 +465,6 @@ async def tts(
     if audio:
         provider_used = f"cartesia-{requested_voice}-tone"
     else:
-        # Sonra tonesuz fallback
         audio = await cartesia_tts(
             text=text,
             lang=req.lang,
