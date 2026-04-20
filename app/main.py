@@ -10,7 +10,6 @@ from fastapi.staticfiles import StaticFiles
 
 from app.routers.auth import router as auth_router
 from app.routers.session import router as session_router
-from app.routers.practice_ai import router as practice_ai_router
 from app.routers.license import router as license_router
 from app.routers.delete_account import router as delete_account_router
 from app.routers.italkyai_chat import router as italkyai_chat_router
@@ -18,7 +17,6 @@ from app.routers.italkyai_voice import router as italkyai_voice_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
-from app.routers.onetoall_ws import router as onetoall_ws_router
 from app.routers.wallet import router as wallet_router
 from app.routers.promo import router as promo_router
 
@@ -29,15 +27,11 @@ from app.routers.command_parse import router as command_parse_router
 from app.routers.admin import router as admin_router
 from app.routers.f2f_ws import router as f2f_ws_router
 from app.routers.tts import router as tts_router
-from app.routers.interpreter import router as interpreter_router
 from app.routers.voice_enroll import router as voice_enroll_router
 
 # BILLING ROUTERS
 from app.routers.billing_google import router as billing_google_router
-from app.routers.offline_billing import router as offline_billing_router
 from app.routers.usage_billing import router as usage_billing_router
-from app.routers.interpreter_billing import router as interpreter_billing_router
-from app.routers.meeting_billing import router as meeting_billing_router
 
 # OPTIONAL ROUTERS
 try:
@@ -120,10 +114,8 @@ app.include_router(command_parse_router, prefix="/api")
 app.include_router(tts_router, prefix="/api")
 app.include_router(f2f_ws_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
-app.include_router(interpreter_router, prefix="/api")
 app.include_router(voice_enroll_router, prefix="/api")
 app.include_router(chat_ai_router, prefix="/api")
-app.include_router(onetoall_ws_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
 app.include_router(italkyai_chat_router)
 app.include_router(italkyai_voice_router)
@@ -134,7 +126,6 @@ if has_push_admin and push_admin_router:
     app.include_router(push_admin_router)
 
 app.include_router(session_router)
-app.include_router(practice_ai_router)
 app.include_router(license_router)
 app.include_router(delete_account_router)
 
@@ -143,10 +134,7 @@ app.include_router(auth_router)
 
 # BILLING
 app.include_router(billing_google_router)
-app.include_router(offline_billing_router)
 app.include_router(usage_billing_router)
-app.include_router(interpreter_billing_router)
-app.include_router(meeting_billing_router)
 
 # OPTIONAL
 if has_offline and offline_router:
