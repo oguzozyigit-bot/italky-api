@@ -9,12 +9,10 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 
 from app.routers.auth import router as auth_router
-from app.routers.nfc import router as nfc_router
 from app.routers.session import router as session_router
 from app.routers.practice_ai import router as practice_ai_router
 from app.routers.license import router as license_router
 from app.routers.delete_account import router as delete_account_router
-from app.routers.nfc_tokens import router as nfc_tokens_router
 from app.routers.italkyai_chat import router as italkyai_chat_router
 from app.routers.italkyai_voice import router as italkyai_voice_router
 # ROUTER IMPORTS
@@ -121,7 +119,6 @@ app.include_router(voice_enroll_router, prefix="/api")
 app.include_router(chat_ai_router, prefix="/api")
 app.include_router(onetoall_ws_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
-app.include_router(nfc_tokens_router, prefix="/api")
 app.include_router(italkyai_chat_router)
 app.include_router(italkyai_voice_router)
 app.include_router(arkadasla_router)
@@ -129,7 +126,6 @@ app.include_router(push_admin_router)
 app.include_router(wallet_router)
 app.include_router(promo_router)
 
-app.include_router(nfc_router)
 app.include_router(session_router)
 app.include_router(practice_ai_router)
 app.include_router(license_router)
