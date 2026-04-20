@@ -116,7 +116,7 @@ async def get_user_profile(user_id: Optional[str]) -> Optional[dict]:
         f"?id=eq.{user_id}"
         f"&select="
         f"id,full_name,"
-        f"tts_voice_id,tts_voice_ready,voice_sample_path,"
+        f"tts_voice_id,tts_voice_ready,voice_sample_path,tts_voice_last_error,"
         f"second_tts_voice_id,second_tts_voice_ready,second_voice_sample_path,"
         f"memory_tts_voice_id,memory_tts_voice_ready,memory_voice_sample_path"
     )
@@ -361,180 +361,194 @@ async def tts(
     req: TTSRequest,
     authorization: Optional[str] = Header(default=None),
 ):
-    text = (req.text or "").strip()
-    if not text:
-        raise HTTPException(status_code=422, detail="text is required")
+    try:
+        text = (req.text or "").strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="text is required")
 
-    tone = canon_tone(req.tone)
-    requested_voice = resolve_requested_voice(req)
-    chars_used = len(text)
+        tone = canon_tone(req.tone)
+        requested_voice = resolve_requested_voice(req)
+        chars_used = len(text)
 
-    logger.info(
-        "[tts] requested_voice=%s module=%s lang=%s user_id=%s",
-        requested_voice,
-        req.module,
-        canon_lang(req.lang),
-        req.user_id,
-    )
-
-    if requested_voice == "auto":
-        return TTSResponse(
-            ok=False,
-            error="TTS_UNAVAILABLE",
-            charged=False,
-            usage_kind="voice",
-            chars_used=chars_used,
-            jetons_spent=0,
+        logger.info(
+            "[tts] requested_voice=%s module=%s lang=%s user_id=%s",
+            requested_voice,
+            req.module,
+            canon_lang(req.lang),
+            req.user_id,
         )
 
-    jwt_user_id = None
-    if authorization:
-        jwt_token = _get_bearer(authorization)
-        jwt_user = await _get_user_from_jwt(jwt_token)
-        jwt_user_id = jwt_user["id"]
+        if requested_voice == "auto":
+            return TTSResponse(
+                ok=False,
+                error="TTS_UNAVAILABLE",
+                charged=False,
+                usage_kind="voice",
+                chars_used=chars_used,
+                jetons_spent=0,
+            )
 
-    if req.user_id and jwt_user_id and str(req.user_id).strip() != str(jwt_user_id).strip():
-        raise HTTPException(status_code=403, detail="user_mismatch")
+        jwt_user_id = None
+        if authorization:
+            jwt_token = _get_bearer(authorization)
+            jwt_user = await _get_user_from_jwt(jwt_token)
+            jwt_user_id = jwt_user["id"]
 
-    effective_user_id = jwt_user_id or (str(req.user_id).strip() if req.user_id else None)
-    if not effective_user_id:
-        raise HTTPException(status_code=401, detail="user_required")
+        if req.user_id and jwt_user_id and str(req.user_id).strip() != str(jwt_user_id).strip():
+            raise HTTPException(status_code=403, detail="user_mismatch")
 
-    profile = await get_user_profile(effective_user_id)
-    voice_id, voice_ready = resolve_profile_voice(profile, requested_voice)
+        effective_user_id = jwt_user_id or (str(req.user_id).strip() if req.user_id else None)
+        if not effective_user_id:
+            raise HTTPException(status_code=401, detail="user_required")
 
-    logger.info(
-        "[tts-debug] selected_voice=%s voice=%s preset_voice=%s voice_mode=%s requested=%s user_id=%s",
-        req.selected_voice,
-        req.voice,
-        req.preset_voice,
-        req.voice_mode,
-        requested_voice,
-        effective_user_id,
-    )
-    logger.info(
-        "[tts-debug] resolved voice_id=%s ready=%s profile=%s",
-        voice_id,
-        voice_ready,
-        profile,
-    )
+        profile = await get_user_profile(effective_user_id)
+        voice_id, voice_ready = resolve_profile_voice(profile, requested_voice)
 
-    if not voice_ready:
-        return TTSResponse(
-            ok=False,
-            error=f"{requested_voice.upper()}_VOICE_NOT_READY",
-            charged=False,
-            usage_kind="voice",
-            chars_used=chars_used,
-            jetons_spent=0,
+        logger.info(
+            "[tts-debug] selected_voice=%s voice=%s preset_voice=%s voice_mode=%s requested=%s user_id=%s",
+            req.selected_voice,
+            req.voice,
+            req.preset_voice,
+            req.voice_mode,
+            requested_voice,
+            effective_user_id,
+        )
+        logger.info(
+            "[tts-debug] resolved voice_id=%s ready=%s profile=%s",
+            voice_id,
+            voice_ready,
+            profile,
         )
 
-    if not voice_id or not is_uuid(voice_id):
-        return TTSResponse(
-            ok=False,
-            error=f"{requested_voice.upper()}_VOICE_ID_INVALID",
-            charged=False,
-            usage_kind="voice",
-            chars_used=chars_used,
-            jetons_spent=0,
-        )
+        if not voice_ready:
+            return TTSResponse(
+                ok=False,
+                error=f"{requested_voice.upper()}_VOICE_NOT_READY",
+                charged=False,
+                usage_kind="voice",
+                chars_used=chars_used,
+                jetons_spent=0,
+            )
 
-    precheck = await _precheck_voice_charge(effective_user_id, chars_used)
-    if not precheck["can_afford"]:
-        return TTSResponse(
-            ok=False,
-            error="INSUFFICIENT_TOKENS",
-            charged=False,
-            usage_kind="voice",
-            chars_used=chars_used,
-            jetons_spent=0,
-            tokens_after=int(precheck["tokens"]),
-            text_bucket=int(precheck["text_bucket"]),
-            voice_bucket=int(precheck["voice_bucket"]),
-        )
+        if not voice_id or not is_uuid(voice_id):
+            return TTSResponse(
+                ok=False,
+                error=f"{requested_voice.upper()}_VOICE_ID_INVALID",
+                charged=False,
+                usage_kind="voice",
+                chars_used=chars_used,
+                jetons_spent=0,
+            )
 
-    audio = await cartesia_tts(
-        text=text,
-        lang=req.lang,
-        voice_id=voice_id,
-        tone=tone,
-        use_tone=True,
-    )
-    provider_used = None
+        logger.info("[tts-step] before_precheck user_id=%s chars=%s", effective_user_id, chars_used)
+        precheck = await _precheck_voice_charge(effective_user_id, chars_used)
+        logger.info("[tts-step] after_precheck precheck=%s", precheck)
 
-    if audio:
-        provider_used = f"cartesia-{requested_voice}-tone"
-    else:
+        if not precheck["can_afford"]:
+            return TTSResponse(
+                ok=False,
+                error="INSUFFICIENT_TOKENS",
+                charged=False,
+                usage_kind="voice",
+                chars_used=chars_used,
+                jetons_spent=0,
+                tokens_after=int(precheck["tokens"]),
+                text_bucket=int(precheck["text_bucket"]),
+                voice_bucket=int(precheck["voice_bucket"]),
+            )
+
+        logger.info("[tts-step] before_cartesia voice_id=%s lang=%s tone=%s", voice_id, req.lang, tone)
         audio = await cartesia_tts(
             text=text,
             lang=req.lang,
             voice_id=voice_id,
             tone=tone,
-            use_tone=False,
+            use_tone=True,
         )
+        provider_used = None
+
         if audio:
-            provider_used = f"cartesia-{requested_voice}"
+            provider_used = f"cartesia-{requested_voice}-tone"
+        else:
+            audio = await cartesia_tts(
+                text=text,
+                lang=req.lang,
+                voice_id=voice_id,
+                tone=tone,
+                use_tone=False,
+            )
+            if audio:
+                provider_used = f"cartesia-{requested_voice}"
 
-    if not audio:
-        return TTSResponse(
-            ok=False,
-            error=f"{requested_voice.upper()}_TTS_FAILED",
-            charged=False,
-            usage_kind="voice",
+        logger.info("[tts-step] after_cartesia provider=%s audio_ok=%s", provider_used, bool(audio))
+
+        if not audio:
+            return TTSResponse(
+                ok=False,
+                error=f"{requested_voice.upper()}_TTS_FAILED",
+                charged=False,
+                usage_kind="voice",
+                chars_used=chars_used,
+                jetons_spent=0,
+                tokens_after=int(precheck["tokens"]),
+                text_bucket=int(precheck["text_bucket"]),
+                voice_bucket=int(precheck["voice_bucket"]),
+            )
+
+        logger.info("[tts-step] before_apply_charge user_id=%s chars=%s", effective_user_id, chars_used)
+        charge = await _apply_voice_charge(
+            user_id=effective_user_id,
             chars_used=chars_used,
-            jetons_spent=0,
-            tokens_after=int(precheck["tokens"]),
-            text_bucket=int(precheck["text_bucket"]),
-            voice_bucket=int(precheck["voice_bucket"]),
+            source=f"tts_{requested_voice}",
+            description=f"Özel ses TTS kullanımı ({requested_voice})",
+            meta={
+                "module": req.module,
+                "voice_mode": requested_voice,
+                "lang": canon_lang(req.lang),
+                "tone": tone,
+                "provider": provider_used,
+                "chars_used": chars_used,
+            },
         )
+        logger.info("[tts-step] after_apply_charge charge=%s", charge)
 
-    charge = await _apply_voice_charge(
-        user_id=effective_user_id,
-        chars_used=chars_used,
-        source=f"tts_{requested_voice}",
-        description=f"Özel ses TTS kullanımı ({requested_voice})",
-        meta={
-            "module": req.module,
-            "voice_mode": requested_voice,
-            "lang": canon_lang(req.lang),
-            "tone": tone,
-            "provider": provider_used,
-            "chars_used": chars_used,
-        },
-    )
+        if not bool(charge.get("ok")):
+            return TTSResponse(
+                ok=False,
+                error="USAGE_CHARGE_FAILED",
+                charged=False,
+                usage_kind="voice",
+                chars_used=chars_used,
+                jetons_spent=0,
+            )
 
-    if not bool(charge.get("ok")):
+        if charge.get("reason") == "insufficient_tokens":
+            return TTSResponse(
+                ok=False,
+                error="INSUFFICIENT_TOKENS",
+                charged=False,
+                usage_kind="voice",
+                chars_used=chars_used,
+                jetons_spent=0,
+                tokens_after=int(charge.get("tokens_after") or precheck["tokens"]),
+                text_bucket=int(charge.get("text_bucket") or precheck["text_bucket"]),
+                voice_bucket=int(charge.get("voice_bucket") or precheck["voice_bucket"]),
+            )
+
         return TTSResponse(
-            ok=False,
-            error="USAGE_CHARGE_FAILED",
-            charged=False,
+            ok=True,
+            audio_base64=audio,
+            provider_used=provider_used,
+            charged=bool(charge.get("charged", False)),
             usage_kind="voice",
             chars_used=chars_used,
-            jetons_spent=0,
-        )
-
-    if charge.get("reason") == "insufficient_tokens":
-        return TTSResponse(
-            ok=False,
-            error="INSUFFICIENT_TOKENS",
-            charged=False,
-            usage_kind="voice",
-            chars_used=chars_used,
-            jetons_spent=0,
+            jetons_spent=int(charge.get("jetons_spent") or 0),
             tokens_after=int(charge.get("tokens_after") or precheck["tokens"]),
             text_bucket=int(charge.get("text_bucket") or precheck["text_bucket"]),
             voice_bucket=int(charge.get("voice_bucket") or precheck["voice_bucket"]),
         )
-
-    return TTSResponse(
-        ok=True,
-        audio_base64=audio,
-        provider_used=provider_used,
-        charged=bool(charge.get("charged", False)),
-        usage_kind="voice",
-        chars_used=chars_used,
-        jetons_spent=int(charge.get("jetons_spent") or 0),
-        tokens_after=int(charge.get("tokens_after") or precheck["tokens"]),
-        text_bucket=int(charge.get("text_bucket") or precheck["text_bucket"]),
-        voice_bucket=int(charge.get("voice_bucket") or precheck["voice_bucket"]),
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[tts-fatal] unhandled exception: %s", e)
+        raise HTTPException(status_code=500, detail=f"tts_internal_error: {e}")
