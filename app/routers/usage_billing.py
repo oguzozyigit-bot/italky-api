@@ -9,26 +9,28 @@ from app.routers.token_engine import spend_chars, CHARS_PER_JETON
 
 router = APIRouter(tags=["usage-billing"])
 
-PAID_TEXT_MODULES = {
+PAID_MODULES = {
     "text_ai",
     "facetoface_ai",
     "eartoear_ai",
     "practice_ai",
     "text_translate_paid",
     "culture_translate",
-}
-
-PAID_VOICE_MODULES = {
     "voice_clone",
     "voice_clone_preview",
     "voice_ai",
     "voice_preset_use",
     "voice_live",
-    "practice_ai",
 }
 
-FREE_VOICE_MODULES = {
+FREE_MODULES = {
     "voice_preset_preview",
+    "offline",
+    "offline_translate",
+    "offline_mode",
+    "interpreter",
+    "interpreter_live",
+    "interpreter_qr",
 }
 
 
@@ -39,16 +41,18 @@ class UsageBillingReq(BaseModel):
     usage_kind: str = Field(min_length=1)  # text | voice | text_in | text_out | voice_out
     note: Optional[str] = None
     meta: Optional[Dict[str, Any]] = None
-    chars_per_jeton: Optional[int] = None
 
 
 def _normalize_module(module: str) -> str:
     value = str(module or "").strip().lower()
-    if value == "practic_ai":
-        return "practice_ai"
-    if value in {"practice", "practiceai"}:
-        return "practice_ai"
-    return value
+
+    aliases = {
+        "practic_ai": "practice_ai",
+        "practice": "practice_ai",
+        "practiceai": "practice_ai",
+    }
+
+    return aliases.get(value, value)
 
 
 def _normalize_kind(kind: str) -> str:
@@ -58,23 +62,10 @@ def _normalize_kind(kind: str) -> str:
     return value
 
 
-def _requires_billing(module: str, kind: str) -> bool:
-    if module in FREE_VOICE_MODULES:
+def _requires_billing(module: str) -> bool:
+    if module in FREE_MODULES:
         return False
-
-    if kind in {"text", "text_in", "text_out"}:
-        return module in PAID_TEXT_MODULES
-
-    if kind in {"voice", "voice_out"}:
-        return module in PAID_VOICE_MODULES
-
-    return False
-
-
-def _engine_module_key(kind: str) -> str:
-    if kind in {"voice", "voice_out"}:
-        return "usage_voice"
-    return "usage_text"
+    return module in PAID_MODULES
 
 
 @router.post("/api/usage/commit")
@@ -90,7 +81,7 @@ async def usage_commit(req: UsageBillingReq):
     if char_count <= 0:
         raise HTTPException(status_code=422, detail="char_count required")
 
-    if not _requires_billing(module, usage_kind):
+    if not _requires_billing(module):
         return {
             "ok": True,
             "module": module,
@@ -103,24 +94,16 @@ async def usage_commit(req: UsageBillingReq):
             "chars_per_jeton": CHARS_PER_JETON,
         }
 
-    engine_key = _engine_module_key(usage_kind)
-
     result = spend_chars(
         user_id=user_id,
-        module_key=engine_key,
+        module_key="usage_general",
         used_chars=char_count,
-        extra_meta={
-            "original_module": module,
-            "usage_kind": usage_kind,
-            "note": req.note or "",
-            **(req.meta or {}),
-        },
     )
 
     return {
         "ok": True,
         "module": module,
-        "engine_module": engine_key,
+        "engine_module": "usage_general",
         "usage_kind": usage_kind,
         "char_count": char_count,
         "tokens_before": result.get("tokens_before"),
