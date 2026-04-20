@@ -9,18 +9,22 @@ from app.routers.token_engine import spend_chars, CHARS_PER_JETON
 
 router = APIRouter(tags=["usage-billing"])
 
-PAID_MODULES = {
+PAID_TEXT_MODULES = {
     "text_ai",
     "facetoface_ai",
     "eartoear_ai",
     "practice_ai",
     "text_translate_paid",
     "culture_translate",
+}
+
+PAID_VOICE_MODULES = {
     "voice_clone",
     "voice_clone_preview",
     "voice_ai",
     "voice_preset_use",
     "voice_live",
+    "practice_ai",
 }
 
 FREE_MODULES = {
@@ -45,14 +49,11 @@ class UsageBillingReq(BaseModel):
 
 def _normalize_module(module: str) -> str:
     value = str(module or "").strip().lower()
-
-    aliases = {
-        "practic_ai": "practice_ai",
-        "practice": "practice_ai",
-        "practiceai": "practice_ai",
-    }
-
-    return aliases.get(value, value)
+    if value == "practic_ai":
+        return "practice_ai"
+    if value in {"practice", "practiceai"}:
+        return "practice_ai"
+    return value
 
 
 def _normalize_kind(kind: str) -> str:
@@ -62,10 +63,23 @@ def _normalize_kind(kind: str) -> str:
     return value
 
 
-def _requires_billing(module: str) -> bool:
+def _requires_billing(module: str, kind: str) -> bool:
     if module in FREE_MODULES:
         return False
-    return module in PAID_MODULES
+
+    if kind in {"text", "text_in", "text_out"}:
+        return module in PAID_TEXT_MODULES
+
+    if kind in {"voice", "voice_out"}:
+        return module in PAID_VOICE_MODULES
+
+    return False
+
+
+def _usage_type_for(kind: str) -> str:
+    if kind in {"voice", "voice_out"}:
+        return "voice_tts"
+    return "ai_text"
 
 
 @router.post("/api/usage/commit")
@@ -81,7 +95,7 @@ async def usage_commit(req: UsageBillingReq):
     if char_count <= 0:
         raise HTTPException(status_code=422, detail="char_count required")
 
-    if not _requires_billing(module):
+    if not _requires_billing(module, usage_kind):
         return {
             "ok": True,
             "module": module,
@@ -94,22 +108,29 @@ async def usage_commit(req: UsageBillingReq):
             "chars_per_jeton": CHARS_PER_JETON,
         }
 
+    usage_type = _usage_type_for(usage_kind)
+
     result = spend_chars(
         user_id=user_id,
-        module_key="usage_general",
         used_chars=char_count,
+        usage_type=usage_type,
+        extra_meta={
+            "original_module": module,
+            "usage_kind": usage_kind,
+            "note": req.note or "",
+            **(req.meta or {}),
+        },
     )
 
     return {
         "ok": True,
         "module": module,
-        "engine_module": "usage_general",
+        "engine_module": usage_type,
         "usage_kind": usage_kind,
         "char_count": char_count,
         "tokens_before": result.get("tokens_before"),
         "tokens_after": result.get("tokens_after"),
         "tokens_charged": result.get("charged_tokens", 0),
-        "counter_after": result.get("used_chars_total"),
         "chars_per_jeton": result.get("chars_per_jeton", CHARS_PER_JETON),
         "free_only": False,
     }
