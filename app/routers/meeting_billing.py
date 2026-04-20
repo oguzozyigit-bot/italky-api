@@ -11,18 +11,23 @@ router = APIRouter(tags=["meeting-billing"])
 class MeetingSpendReq(BaseModel):
     user_id: str
     used_chars: int
+    usage_type: str = "ai_text"  # ai_text | voice_tts
 
 
 @router.post("/api/meeting/spend")
 async def meeting_spend(req: MeetingSpendReq):
     user_id = (req.user_id or "").strip()
     used_chars = int(req.used_chars or 0)
+    usage_type = (req.usage_type or "ai_text").strip().lower()
 
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
 
     return spend_chars(
         user_id=user_id,
-        module_key="meeting",
         used_chars=used_chars,
+        usage_type=usage_type,
+        extra_meta={
+            "original_module": "meeting",
+        },
     )
