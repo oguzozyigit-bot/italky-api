@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import math
 import os
+from typing import Any, Dict, Optional
+
 from fastapi import HTTPException
-from supabase import create_client, Client
+from supabase import Client, create_client
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -12,31 +15,23 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# Yeni sabit kural
+# Tek sabit kural:
+# AI metin = 1000 karakter / 1 jeton
+# Ses/TTS   = 1000 karakter / 1 jeton
 CHARS_PER_JETON = 1000
 
-MODULE_COUNTER_MAP = {
-    "usage_text": "char_text_used",
-    "usage_voice": "char_voice_used",
-}
-
-VOICE_MODULE_KEYS = {
-    "usage_voice",
-}
-
-TEXT_MODULE_KEYS = {
-    "usage_text",
+# İleride farklı tarifeler istersek tek yerden açarız.
+VALID_USAGE_TYPES = {
+    "ai_text",
+    "voice_tts",
+    "general",
 }
 
 
-def _get_profile_or_404(user_id: str):
+def _get_profile_or_404(user_id: str) -> Dict[str, Any]:
     prof = (
         supabase.table("profiles")
-        .select(
-            "id,tokens,"
-            "char_text_used,"
-            "char_voice_used"
-        )
+        .select("id,tokens")
         .eq("id", user_id)
         .limit(1)
         .execute()
@@ -49,20 +44,30 @@ def _get_profile_or_404(user_id: str):
     return rows[0] or {}
 
 
-def _wallet_type_for(module_key: str) -> str:
-    if module_key in VOICE_MODULE_KEYS:
+def _reason_for(usage_type: str) -> str:
+    if usage_type == "voice_tts":
+        return f"Ses kullanımı ({CHARS_PER_JETON} karakter = 1 jeton)"
+    if usage_type == "ai_text":
+        return f"AI metin kullanımı ({CHARS_PER_JETON} karakter = 1 jeton)"
+    return f"Kullanım kesintisi ({CHARS_PER_JETON} karakter = 1 jeton)"
+
+
+def _wallet_tx_type_for(usage_type: str) -> str:
+    if usage_type == "voice_tts":
         return "usage_voice"
-    return "usage_text"
+    if usage_type == "ai_text":
+        return "usage_text"
+    return "usage_general"
 
 
-def _reason_for(module_key: str) -> str:
-    if module_key in VOICE_MODULE_KEYS:
-        return f"Ses kullanımı {CHARS_PER_JETON} karakter kesintisi"
-    return f"Metin kullanımı {CHARS_PER_JETON} karakter kesintisi"
-
-
-def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, reason: str, meta: dict):
-    return supabase.table("wallet_tx").insert(
+def _insert_wallet_tx(
+    user_id: str,
+    tx_type: str,
+    amount: int,
+    reason: str,
+    meta: Dict[str, Any],
+) -> None:
+    supabase.table("wallet_tx").insert(
         {
             "user_id": user_id,
             "type": tx_type,
@@ -73,34 +78,42 @@ def _insert_wallet_tx(user_id: str, tx_type: str, amount: int, reason: str, meta
     ).execute()
 
 
-def spend_chars(user_id: str, module_key: str, used_chars: int):
+def calc_tokens_for_chars(used_chars: int) -> int:
+    used_chars = int(used_chars or 0)
+    if used_chars <= 0:
+        return 0
+    return math.ceil(used_chars / CHARS_PER_JETON)
+
+
+def spend_chars(
+    user_id: str,
+    used_chars: int,
+    usage_type: str = "general",
+    extra_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
 
-    if module_key not in MODULE_COUNTER_MAP:
-        raise HTTPException(status_code=400, detail="invalid module_key")
+    if usage_type not in VALID_USAGE_TYPES:
+        raise HTTPException(status_code=400, detail="invalid usage_type")
 
+    used_chars = int(used_chars or 0)
     if used_chars <= 0:
         return {
             "ok": True,
             "charged_tokens": 0,
-            "used_chars_total": 0,
-            "module": module_key,
+            "module": usage_type,
+            "tokens_before": None,
+            "tokens_after": None,
             "chars_per_jeton": CHARS_PER_JETON,
         }
 
-    field_name = MODULE_COUNTER_MAP[module_key]
+    extra_meta = extra_meta or {}
+
     row = _get_profile_or_404(user_id)
 
     tokens_before = int(row.get("tokens") or 0)
-    used_before = int(row.get(field_name) or 0)
-    used_now = int(used_chars)
-    used_total = used_before + used_now
-
-    old_step = used_before // CHARS_PER_JETON
-    new_step = used_total // CHARS_PER_JETON
-
-    charged_tokens = max(0, new_step - old_step)
+    charged_tokens = calc_tokens_for_chars(used_chars)
     tokens_after = tokens_before - charged_tokens
 
     if tokens_after < 0:
@@ -110,14 +123,14 @@ def spend_chars(user_id: str, module_key: str, used_chars: int):
         supabase.table("profiles")
         .update({
             "tokens": tokens_after,
-            field_name: used_total
         })
         .eq("id", user_id)
         .execute()
     )
 
     if charged_tokens > 0:
-        tx_type = _wallet_type_for(module_key)
+        tx_type = _wallet_tx_type_for(usage_type)
+        reason = _reason_for(usage_type)
         temp_balance = tokens_before
 
         for idx in range(charged_tokens):
@@ -126,24 +139,23 @@ def spend_chars(user_id: str, module_key: str, used_chars: int):
                 user_id=user_id,
                 tx_type=tx_type,
                 amount=-1,
-                reason=_reason_for(module_key),
+                reason=reason,
                 meta={
-                    "module": module_key,
-                    "used_chars": used_now,
-                    "used_before": used_before,
-                    "used_total": used_total,
-                    "charge_type": "step_1000",
+                    "usage_type": usage_type,
+                    "used_chars": used_chars,
+                    "charge_type": "per_request_ceil_1000",
                     "step_index": idx + 1,
+                    "charged_tokens_total": charged_tokens,
                     "chars_per_jeton": CHARS_PER_JETON,
                     "balance_after": temp_balance,
+                    **extra_meta,
                 },
             )
 
     return {
         "ok": True,
         "charged_tokens": charged_tokens,
-        "used_chars_total": used_total,
-        "module": module_key,
+        "module": usage_type,
         "tokens_before": tokens_before,
         "tokens_after": tokens_after,
         "chars_per_jeton": CHARS_PER_JETON,
