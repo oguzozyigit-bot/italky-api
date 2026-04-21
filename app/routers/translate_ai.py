@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import json
@@ -36,10 +35,10 @@ class TranslateBody(BaseModel):
     tone: Optional[str] = "neutral"     # neutral | happy | angry | sad | excited
     style: Optional[str] = "balanced"   # balanced | warm | clear | social
 
+    # Ataların Dili
     atalar_mode: Optional[bool] = False
     atalar_source: Optional[str] = None
     atalar_target: Optional[str] = None
-
     historical_mode: Optional[bool] = False
     reading_mode: Optional[bool] = False
 
@@ -139,14 +138,6 @@ def normalize_compare_key(s: str) -> str:
     t = t.replace("’", "'").replace("`", "'")
     t = re.sub(r"[^\wçğıöşüâîû'-]+", "", t, flags=re.UNICODE)
     return t
-
-
-def is_single_token_like(text: str) -> bool:
-    s = normalize_text(text)
-    if not s:
-        return False
-    tokens = re.findall(r"\S+", s)
-    return len(tokens) <= 2 and len(s) <= 24
 
 
 SHORT_UTTERANCE_SET = {
@@ -294,25 +285,6 @@ def should_force_literal_mode(text: str, tone: str, style: str) -> bool:
 # =========================================================
 # LANGUAGE MAPS
 # =========================================================
-
-UNSUPPORTED_LOCAL_LANGS = {
-    "lzz": "Lazca",
-    "ady": "Çerkesce",
-    "ab": "Abhazca",
-    "kbd": "Kabardeyce",
-    "ce": "Çeçence",
-    "os": "Osetçe",
-    "lez": "Lezgice",
-    "av": "Avarca",
-    "kmr": "Kürtçe (Kurmancî)",
-    "ckb": "Kürtçe (Soranî)",
-    "zza": "Zazaca",
-    "syc": "Süryanice",
-    "gag": "Gagavuzca",
-    "crh": "Kırım Tatarcası",
-    "nog": "Nogayca",
-    "ba": "Başkurtça",
-}
 
 LANG_DISPLAY_NAMES = {
     "tr": "Türkçe",
@@ -503,7 +475,7 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
 
 
 # =========================================================
-# ATALARIN DİLİ - GÖKTÜRK DÖNÜŞÜM
+# ATALARIN DİLİ - SADECE LATİN -> GÖKTÜRK HARF DÖNÜŞÜMÜ
 # =========================================================
 
 MULTI_CHAR_MAP = [
@@ -544,32 +516,6 @@ CHAR_MAP_TR_TO_GOKTURK = {
     "x": "𐰴𐰽",
     "y": "𐰖",
     "z": "𐰔",
-}
-
-CHAR_MAP_GOKTURK_TO_TR = {
-    "𐰀": "a",
-    "𐰉": "b",
-    "𐰲": "ç",
-    "𐰑": "d",
-    "𐰏": "g",
-    "𐰍": "ğ",
-    "𐰴": "h",
-    "𐰃": "i",
-    "𐰚": "k",
-    "𐰞": "l",
-    "𐰢": "m",
-    "𐰤": "n",
-    "𐰆": "u",
-    "𐰇": "ü",
-    "𐰯": "p",
-    "𐰺": "r",
-    "𐰽": "s",
-    "𐱁": "ş",
-    "𐱅": "t",
-    "𐰖": "y",
-    "𐰔": "z",
-    "𐰭": "ng",
-    "𐰪": "ny",
 }
 
 WORD_OVERRIDES_TR_TO_GOKTURK = {
@@ -659,166 +605,6 @@ def turkish_to_gokturk_with_reading(text: str) -> Dict[str, str]:
     return {
         "gokturk_text": "".join(converted_parts).strip(),
         "gokturk_reading": "".join(reading_parts).strip(),
-    }
-
-
-def gokturk_to_turkish(text: str) -> str:
-    s = normalize_text(text)
-    if not s:
-        return ""
-
-    out = []
-    for ch in s:
-        out.append(CHAR_MAP_GOKTURK_TO_TR.get(ch, ch))
-
-    joined = "".join(out).strip()
-    return joined
-
-
-def _extract_json_object(text: str) -> Dict[str, Any]:
-    return safe_json_loads(text)
-
-
-def _historical_prompt(text: str, literal_runes: str, literal_reading: str) -> str:
-    return f"""
-You are an expert in Old Turkic / Göktürk writing and historical Turkish linguistics.
-
-We already have a literal Göktürk-script rendering of a modern Turkish input.
-
-You must be EXTREMELY conservative.
-
-Return STRICT JSON only.
-
-Rules:
-- If there is NO strong, historically defensible Old Turkic counterpart, return empty strings.
-- Do NOT invent a poetic substitute.
-- Do NOT guess.
-- Do NOT paraphrase loosely.
-- historical_text must only be filled if you are highly confident.
-- historical_reading must match historical_text exactly.
-- historical_meaning must be short modern Turkish explanation.
-- If uncertain, all three fields must be empty.
-
-Input:
-modern_text = {text}
-literal_runes = {literal_runes}
-literal_reading = {literal_reading}
-
-JSON:
-{{
-  "historical_text": "",
-  "historical_reading": "",
-  "historical_meaning": ""
-}}
-""".strip()
-
-
-def _historical_from_gemini(text: str, literal_runes: str, literal_reading: str) -> Dict[str, str]:
-    if not GEMINI_API_KEY:
-        return {}
-
-    try:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
-        )
-
-        payload = {
-            "contents": [{"parts": [{"text": _historical_prompt(text, literal_runes, literal_reading)}]}],
-            "generationConfig": {
-                "temperature": 0.05,
-                "topP": 0.4,
-                "maxOutputTokens": 220
-            }
-        }
-
-        r = requests.post(url, json=payload, timeout=18)
-        r.raise_for_status()
-        data = r.json()
-
-        candidates = data.get("candidates") or []
-        if not candidates:
-            return {}
-
-        parts = candidates[0].get("content", {}).get("parts", [])
-        raw = "".join(str(p.get("text", "")) for p in parts).strip()
-        parsed = _extract_json_object(raw)
-        if not parsed:
-            return {}
-
-        return {
-            "historical_text": normalize_text(parsed.get("historical_text", "")),
-            "historical_reading": normalize_text(parsed.get("historical_reading", "")),
-            "historical_meaning": normalize_text(parsed.get("historical_meaning", "")),
-        }
-    except Exception as e:
-        print("[translate_ai] historical gemini failed:", e)
-        return {}
-
-
-def _historical_from_openai(text: str, literal_runes: str, literal_reading: str) -> Dict[str, str]:
-    if not OPENAI_API_KEY:
-        return {}
-
-    try:
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-
-        payload = {
-            "model": OPENAI_MODEL,
-            "input": _historical_prompt(text, literal_runes, literal_reading),
-        }
-
-        r = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers=headers,
-            json=payload,
-            timeout=18,
-        )
-        r.raise_for_status()
-        data = r.json()
-
-        chunks = []
-        for item in data.get("output", []) or []:
-            for content in item.get("content", []) or []:
-                if content.get("type") in {"output_text", "text"}:
-                    txt = str(content.get("text") or "").strip()
-                    if txt:
-                        chunks.append(txt)
-
-        raw = "".join(chunks).strip()
-        if not raw:
-            raw = str(data.get("output_text") or data.get("text") or "").strip()
-
-        parsed = _extract_json_object(raw)
-        if not parsed:
-            return {}
-
-        return {
-            "historical_text": normalize_text(parsed.get("historical_text", "")),
-            "historical_reading": normalize_text(parsed.get("historical_reading", "")),
-            "historical_meaning": normalize_text(parsed.get("historical_meaning", "")),
-        }
-    except Exception as e:
-        print("[translate_ai] historical openai failed:", e)
-        return {}
-
-
-def historical_gokturk_enrichment(text: str, literal_runes: str, literal_reading: str) -> Dict[str, str]:
-    data = _historical_from_gemini(text, literal_runes, literal_reading)
-    if data.get("historical_text"):
-        return data
-
-    data = _historical_from_openai(text, literal_runes, literal_reading)
-    if data.get("historical_text"):
-        return data
-
-    return {
-        "historical_text": "",
-        "historical_reading": "",
-        "historical_meaning": "",
     }
 
 
@@ -1319,7 +1105,6 @@ def translate_ai(
     atalar_mode = bool(body.atalar_mode)
     atalar_source = canonical(body.atalar_source or source)
     atalar_target = canonical(body.atalar_target or target)
-    historical_mode = bool(body.historical_mode)
     reading_mode = bool(body.reading_mode)
 
     print("[translate_ai] request:", {
@@ -1332,7 +1117,6 @@ def translate_ai(
         "atalar_mode": atalar_mode,
         "atalar_source": atalar_source,
         "atalar_target": atalar_target,
-        "historical_mode": historical_mode,
         "reading_mode": reading_mode,
     })
 
@@ -1342,19 +1126,14 @@ def translate_ai(
     if not source or not target:
         return {"ok": False, "error": "missing_lang"}
 
+    # =====================================================
+    # ATALARIN DİLİ: SADECE LATİN -> GÖKTÜRK HARF ÇEVİRİSİ
+    # =====================================================
     if atalar_mode:
         if atalar_source == "tr" and atalar_target == "gokturk":
             local = turkish_to_gokturk_with_reading(text)
             gokturk_text = local["gokturk_text"]
             gokturk_reading = local["gokturk_reading"] if reading_mode else ""
-
-            historical = {
-                "historical_text": "",
-                "historical_reading": "",
-                "historical_meaning": "",
-            }
-            if historical_mode:
-                historical = historical_gokturk_enrichment(text, gokturk_text, gokturk_reading)
 
             return {
                 "ok": True,
@@ -1362,25 +1141,16 @@ def translate_ai(
                 "gokturk_text": gokturk_text,
                 "gokturk_reading": gokturk_reading,
                 "literal_reading": gokturk_reading,
-                "historical_text": historical.get("historical_text", ""),
-                "historical_reading": historical.get("historical_reading", ""),
-                "historical_meaning": historical.get("historical_meaning", ""),
-                "provider": "atalar_local",
-                "ai_used": bool(historical.get("historical_text")),
-                "charged": False,
-                "chars_used": len(text),
-            }
-
-        if atalar_source == "gokturk" and atalar_target == "tr":
-            translated = gokturk_to_turkish(text)
-            return {
-                "ok": True,
-                "translated": translated,
                 "provider": "atalar_local",
                 "ai_used": False,
                 "charged": False,
                 "chars_used": len(text),
             }
+
+        return {
+            "ok": False,
+            "error": "atalar_mode_only_supports_tr_to_gokturk"
+        }
 
     if source == target:
         return {
