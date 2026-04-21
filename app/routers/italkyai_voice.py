@@ -18,7 +18,7 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 VOICE_BUCKET = "voice-samples"
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_FILE_SIZE = 10 * 1024 * 1024
 VOICE_LIMITS = {
     "mine": 5,
     "second": 5,
@@ -36,11 +36,9 @@ def _safe_name(value: Optional[str], fallback: str) -> str:
 def _get_bearer(auth_header: Optional[str]) -> str:
     if not auth_header:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
-
     parts = auth_header.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=401, detail="Invalid Authorization header")
-
     token = parts[1].strip()
     if not token:
         raise HTTPException(status_code=401, detail="Empty token")
@@ -113,6 +111,18 @@ def _public_url_for_path(path: str) -> str:
     return supabase.storage.from_(VOICE_BUCKET).get_public_url(path)
 
 
+def _signed_url_for_path(path: Optional[str], expires_in: int = 3600) -> Optional[str]:
+    p = (path or "").strip()
+    if not p:
+        return None
+    try:
+        res = supabase.storage.from_(VOICE_BUCKET).create_signed_url(p, expires_in)
+        data = getattr(res, "data", None) or {}
+        return data.get("signedURL") or data.get("signedUrl")
+    except Exception:
+        return None
+
+
 def _insert_voice_library(
     user_id: str,
     voice_type: str,
@@ -158,7 +168,7 @@ def _insert_voice_library(
 @router.post("/api/italkyai/voice/upload")
 async def upload_voice(
     user_id: str = Form(...),
-    voice_type: str = Form(...),   # mine | second | memory
+    voice_type: str = Form(...),
     voice_name: str = Form(""),
     audio_file: UploadFile = File(...)
 ):
@@ -197,7 +207,7 @@ async def upload_voice(
 
     display_name = _safe_name(
         voice_name,
-        "Kendi Sesim" if voice_type == "mine" else ("Tanıdık Ses" if voice_type == "second" else "Hatıra Ses")
+        "Kendi Ses" if voice_type == "mine" else ("Tanıdık" if voice_type == "second" else "Hatıra")
     )
 
     try:
@@ -235,11 +245,20 @@ def get_voice_library(authorization: Optional[str] = Header(default=None)):
     second_items = _list_voice_kind(user_id, "second")
     memory_items = _list_voice_kind(user_id, "memory")
 
+    def enrich(items: list[dict]) -> list[dict]:
+        out = []
+        for item in items:
+            item = dict(item)
+            item["sample_signed_url"] = _signed_url_for_path(item.get("sample_path"))
+            item["preview_signed_url"] = _signed_url_for_path(item.get("preview_audio_path"))
+            out.append(item)
+        return out
+
     return {
         "ok": True,
-        "mine_items": mine_items,
-        "second_items": second_items,
-        "memory_items": memory_items,
+        "mine_items": enrich(mine_items),
+        "second_items": enrich(second_items),
+        "memory_items": enrich(memory_items),
         "limits": VOICE_LIMITS,
     }
 
