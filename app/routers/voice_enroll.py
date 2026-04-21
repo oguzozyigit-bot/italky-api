@@ -66,6 +66,22 @@ def _get_profile(user_id: str) -> dict:
     return profile
 
 
+def _check_token_access(user_id: str) -> None:
+    try:
+        profile = _get_profile(user_id)
+        tokens = int(profile.get("tokens") or 0)
+
+        if tokens <= 0:
+            raise HTTPException(
+                status_code=403,
+                detail="Premium özelliklerde jeton gereklidir. Lütfen jeton yüklemesi yapınız."
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Jeton kontrolü yapılamadı.")
+
+
 def _get_voice_row(user_id: str, voice_type: str, voice_id: Optional[str] = None) -> dict:
     query = (
         supabase.table("voice_library")
@@ -233,25 +249,6 @@ def _upload_preview_audio(user_id: str, voice_type: str, voice_row_id: str, cont
     return path
 
 
-def _charge_one_token_if_possible(user_id: str) -> None:
-    try:
-        profile = _get_profile(user_id)
-        tokens = int(profile.get("tokens") or 0)
-        if tokens <= 0:
-            raise HTTPException(status_code=403, detail="Premium özelliklerde jeton gereklidir. Lütfen jeton yüklemesi yapınız.")
-
-        (
-            supabase.table("profiles")
-            .update({"tokens": tokens - 1})
-            .eq("id", user_id)
-            .execute()
-        )
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Jeton kontrolü yapılamadı.")
-
-
 def _enroll_voice_by_type(
     voice_type: str,
     authorization: Optional[str],
@@ -262,9 +259,12 @@ def _enroll_voice_by_type(
     profile = _get_profile(user_id)
 
     if str(profile.get("plan") or "free").lower() == "free":
-        raise HTTPException(status_code=403, detail="Premium özelliklerde jeton gereklidir. Lütfen jeton yüklemesi yapınız.")
+        raise HTTPException(
+            status_code=403,
+            detail="Premium özelliklerde jeton gereklidir. Lütfen jeton yüklemesi yapınız."
+        )
 
-    _charge_one_token_if_possible(user_id)
+    _check_token_access(user_id)
 
     row = _get_voice_row(user_id=user_id, voice_type=voice_type, voice_id=voice_id)
     sample_path = str(row.get("sample_path") or "").strip()
@@ -307,7 +307,7 @@ def _enroll_voice_by_type(
                 "preview_text_key": voice_type,
                 "preview_ready": True,
                 "generation_chars_used": len(preview_text),
-                "generation_jetons_spent": 1,
+                "generation_jetons_spent": 0,
             }
         )
 
