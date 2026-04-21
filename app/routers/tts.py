@@ -175,6 +175,8 @@ class TTSRequest(FlexibleModel):
     voice_mode: Optional[str] = None
     preset_voice: Optional[str] = None
     selected_voice: Optional[str] = None
+    selected_voice_id: Optional[str] = None
+    voice_id: Optional[str] = None
     tone: Optional[str] = "neutral"
     user_id: Optional[str] = None
     module: str = "facetoface"
@@ -225,6 +227,40 @@ async def get_user_profile(user_id: Optional[str]) -> Optional[dict]:
         return data[0] if data else None
 
 
+async def get_voice_library_item(user_id: Optional[str], voice_row_id: Optional[str]) -> Optional[dict]:
+    if not user_id or not voice_row_id or not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
+        return None
+
+    voice_row_id = str(voice_row_id).strip()
+    if not is_uuid(voice_row_id):
+        return None
+
+    url = (
+        f"{SUPABASE_URL}/rest/v1/voice_library"
+        f"?id=eq.{voice_row_id}"
+        f"&user_id=eq.{user_id}"
+        f"&deleted_at=is.null"
+        f"&select="
+        f"id,user_id,voice_name,voice_kind,tts_voice_id,tts_voice_ready,preview_audio_path,sample_path"
+    )
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            url,
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE}",
+            },
+        )
+
+        if r.status_code != 200:
+            logger.warning("get_voice_library_item failed: %s", r.text[:400])
+            return None
+
+        data = r.json() or []
+        return data[0] if data else None
+
+
 def resolve_requested_voice(req: TTSRequest) -> str:
     candidates = [
         req.selected_voice,
@@ -261,6 +297,28 @@ def resolve_profile_voice(profile: Optional[dict], requested_voice: str) -> Tupl
         return voice_id, ready
 
     return "", False
+
+
+async def resolve_effective_voice(
+    profile: Optional[dict],
+    requested_voice: str,
+    user_id: Optional[str],
+    selected_voice_row_id: Optional[str],
+) -> Tuple[str, bool, str]:
+    selected_row_id = str(selected_voice_row_id or "").strip()
+
+    if requested_voice in ("mine", "second", "memory") and selected_row_id:
+        row = await get_voice_library_item(user_id, selected_row_id)
+        if row:
+            row_voice_id = str(row.get("tts_voice_id") or "").strip()
+            row_ready = bool(row.get("tts_voice_ready")) and bool(row_voice_id) and is_uuid(row_voice_id)
+            row_kind = str(row.get("voice_kind") or "").strip().lower()
+
+            if row_kind == requested_voice and row_ready:
+                return row_voice_id, True, "library"
+
+    voice_id, ready = resolve_profile_voice(profile, requested_voice)
+    return voice_id, ready, "profile"
 
 
 async def cartesia_tts(
@@ -460,11 +518,13 @@ async def tts(
         chars_used = len(text)
 
         logger.info(
-            "[tts] requested_voice=%s module=%s lang=%s user_id=%s",
+            "[tts] requested_voice=%s module=%s lang=%s user_id=%s selected_voice_id=%s voice_id=%s",
             requested_voice,
             module,
             canon_lang(req.lang),
             req.user_id,
+            req.selected_voice_id,
+            req.voice_id,
         )
 
         if requested_voice == "auto":
@@ -490,17 +550,26 @@ async def tts(
         if not effective_user_id:
             raise HTTPException(status_code=401, detail="user_required")
 
+        selected_voice_row_id = str(req.selected_voice_id or req.voice_id or "").strip()
+
         profile = await get_user_profile(effective_user_id)
-        voice_id, voice_ready = resolve_profile_voice(profile, requested_voice)
+        voice_id, voice_ready, voice_source = await resolve_effective_voice(
+            profile=profile,
+            requested_voice=requested_voice,
+            user_id=effective_user_id,
+            selected_voice_row_id=selected_voice_row_id,
+        )
 
         logger.info(
-            "[tts-debug] selected_voice=%s voice=%s preset_voice=%s voice_mode=%s requested=%s user_id=%s",
+            "[tts-debug] selected_voice=%s voice=%s preset_voice=%s voice_mode=%s requested=%s user_id=%s selected_voice_row_id=%s source=%s",
             req.selected_voice,
             req.voice,
             req.preset_voice,
             req.voice_mode,
             requested_voice,
             effective_user_id,
+            selected_voice_row_id,
+            voice_source,
         )
         logger.info(
             "[tts-debug] resolved voice_id=%s ready=%s profile=%s",
@@ -546,7 +615,14 @@ async def tts(
                 voice_bucket=int(precheck["voice_bucket"]),
             )
 
-        logger.info("[tts-step] before_cartesia voice_id=%s lang=%s tone=%s module=%s", voice_id, req.lang, tone, module)
+        logger.info(
+            "[tts-step] before_cartesia voice_id=%s lang=%s tone=%s module=%s source=%s",
+            voice_id,
+            req.lang,
+            tone,
+            module,
+            voice_source,
+        )
         audio = await cartesia_tts(
             text=text,
             lang=req.lang,
@@ -595,6 +671,8 @@ async def tts(
             meta={
                 "module": module,
                 "voice_mode": requested_voice,
+                "selected_voice_id": selected_voice_row_id or None,
+                "voice_source": voice_source,
                 "lang": canon_lang(req.lang),
                 "tone": tone,
                 "provider": provider_used,
