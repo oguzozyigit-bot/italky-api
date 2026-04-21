@@ -64,6 +64,54 @@ def canon_tone(value: Optional[str]) -> str:
     return "neutral"
 
 
+def canon_module(value: Optional[str]) -> str:
+    return (value or "facetoface").strip().lower()
+
+
+def is_chat_module(module: str) -> bool:
+    m = canon_module(module)
+    return m in {
+        "chat",
+        "chat_ai",
+        "chatai",
+        "sohbetai",
+        "italkyai_chat",
+        "chat_text",
+        "chat_voice",
+        "assistant_chat",
+    }
+
+
+def is_translate_module(module: str) -> bool:
+    m = canon_module(module)
+    return m in {
+        "facetoface",
+        "arkadasla",
+        "interpreter",
+        "translate",
+        "translation",
+        "translate_ai",
+        "balkanlarin_dili",
+        "kafkaslarin_dili",
+        "mezopotamyanin_dili",
+        "turklerin_dili",
+        "atalarin_dili",
+        "meeting",
+        "alltoall",
+        "side_to_side",
+        "onetoall",
+    }
+
+
+def is_memory_like_module(module: str) -> bool:
+    m = canon_module(module)
+    return m in {
+        "memory",
+        "hatira",
+        "memory_voice",
+    }
+
+
 def tone_instruction(tone: str) -> str:
     t = canon_tone(tone)
     if t == "happy":
@@ -75,6 +123,45 @@ def tone_instruction(tone: str) -> str:
     if t == "excited":
         return "Speak in an energetic, enthusiastic, vivid tone."
     return "Speak naturally, clearly and smoothly."
+
+
+def module_instruction(module: str) -> str:
+    m = canon_module(module)
+
+    if is_chat_module(m):
+        return (
+            "Use natural conversational pacing. "
+            "Do not sound robotic. "
+            "Add very subtle human-like pauses between thoughts. "
+            "Sound warm, real, relaxed and spontaneous, but do not overact. "
+            "Do not exaggerate filler sounds. "
+            "Only use a tiny hint of natural hesitation when it feels organic."
+        )
+
+    if is_memory_like_module(m):
+        return (
+            "Speak gently, warmly and naturally. "
+            "Use a soft human rhythm with calm pauses. "
+            "Avoid sounding mechanical. "
+            "Do not overuse dramatic emotion."
+        )
+
+    if is_translate_module(m):
+        return (
+            "Speak clearly and more steadily than casual conversation. "
+            "Keep the delivery natural and human, but cleaner and more direct. "
+            "Use light emotional color only when appropriate. "
+            "Do not sound flat, but do not overdo conversational hesitation."
+        )
+
+    return (
+        "Speak naturally, with a human rhythm and mild pauses. "
+        "Keep it clear, smooth and realistic."
+    )
+
+
+def build_generation_instruction(module: str, tone: str) -> str:
+    return f"{tone_instruction(tone)} {module_instruction(module)}".strip()
 
 
 class FlexibleModel(BaseModel):
@@ -181,6 +268,7 @@ async def cartesia_tts(
     lang: str,
     voice_id: str,
     tone: str,
+    module: str,
     use_tone: bool = True,
 ) -> Optional[str]:
     if not CARTESIA_API_KEY or not voice_id:
@@ -203,7 +291,7 @@ async def cartesia_tts(
 
     if use_tone:
         payload["generation_config"] = {
-            "instruction": tone_instruction(tone)
+            "instruction": build_generation_instruction(module, tone)
         }
 
     try:
@@ -367,13 +455,14 @@ async def tts(
             raise HTTPException(status_code=422, detail="text is required")
 
         tone = canon_tone(req.tone)
+        module = canon_module(req.module)
         requested_voice = resolve_requested_voice(req)
         chars_used = len(text)
 
         logger.info(
             "[tts] requested_voice=%s module=%s lang=%s user_id=%s",
             requested_voice,
-            req.module,
+            module,
             canon_lang(req.lang),
             req.user_id,
         )
@@ -457,12 +546,13 @@ async def tts(
                 voice_bucket=int(precheck["voice_bucket"]),
             )
 
-        logger.info("[tts-step] before_cartesia voice_id=%s lang=%s tone=%s", voice_id, req.lang, tone)
+        logger.info("[tts-step] before_cartesia voice_id=%s lang=%s tone=%s module=%s", voice_id, req.lang, tone, module)
         audio = await cartesia_tts(
             text=text,
             lang=req.lang,
             voice_id=voice_id,
             tone=tone,
+            module=module,
             use_tone=True,
         )
         provider_used = None
@@ -475,6 +565,7 @@ async def tts(
                 lang=req.lang,
                 voice_id=voice_id,
                 tone=tone,
+                module=module,
                 use_tone=False,
             )
             if audio:
@@ -502,7 +593,7 @@ async def tts(
             source=f"tts_{requested_voice}",
             description=f"Özel ses TTS kullanımı ({requested_voice})",
             meta={
-                "module": req.module,
+                "module": module,
                 "voice_mode": requested_voice,
                 "lang": canon_lang(req.lang),
                 "tone": tone,
