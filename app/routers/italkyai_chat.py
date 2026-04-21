@@ -77,6 +77,10 @@ def make_session_id() -> str:
     return uuid.uuid4().hex
 
 
+def make_saved_chat_id() -> str:
+    return str(uuid.uuid4())
+
+
 def normalize_text(text: str) -> str:
     return (text or "").strip()
 
@@ -321,7 +325,7 @@ def build_persona_prompt(state: PersonaState, global_memory: str, session_memory
             "Rolün: muhalif / rakip karakter.",
             "Kolay onay verme.",
             "Zekice ters açı kur.",
-            "Laf sok.",
+            "Laf sok ama seviyeyi düşürme.",
         ]
     elif state.persona_type == "celebrity":
         role_block += [
@@ -608,7 +612,11 @@ def upsert_saved_chat(body: ChatBody, session_id: str, state_persona: PersonaSta
     title = user_text[:80] if user_text else "Yeni Sohbet"
     summary = f"Son konu: {user_text[:200]}" if user_text else ""
 
-    saved_chat_id = body.session_id if body.session_id and re.fullmatch(r"[0-9a-fA-F-]{36}", body.session_id or "") else str(uuid.uuid4())
+    saved_chat_id = (
+        body.session_id
+        if body.session_id and re.fullmatch(r"[0-9a-fA-F-]{36}", body.session_id or "")
+        else make_saved_chat_id()
+    )
 
     payload = {
         "id": saved_chat_id,
@@ -666,18 +674,21 @@ def update_global_memory(user_id: Optional[str], text: str) -> None:
         if normalize_text(text):
             memory_summary = (memory_summary + " | " + normalize_text(text))[-2500:].strip(" |")
 
-        supabase.table("chat_persona_memory").upsert({
-            "user_id": user_id,
-            "memory_key": "global_profile",
-            "memory_value": normalize_text(text)[:500],
-            "source": "chat",
-            "importance": 1,
-            "is_active": True,
-            "known_name": known_name,
-            "known_facts": known_facts,
-            "memory_summary": memory_summary,
-            "updated_at": now_iso(),
-        }).execute()
+        supabase.table("chat_persona_memory").upsert(
+            {
+                "user_id": user_id,
+                "memory_key": "global_profile",
+                "memory_value": normalize_text(text)[:500],
+                "source": "chat",
+                "importance": 1,
+                "is_active": True,
+                "known_name": known_name,
+                "known_facts": known_facts,
+                "memory_summary": memory_summary,
+                "updated_at": now_iso(),
+            },
+            on_conflict="user_id"
+        ).execute()
 
     except Exception as e:
         print("update_global_memory error:", e)
