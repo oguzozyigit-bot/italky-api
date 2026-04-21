@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
+import requests
 from typing import Optional, Any
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Header
@@ -115,10 +116,23 @@ def _signed_url_for_path(path: Optional[str], expires_in: int = 3600) -> Optiona
     p = (path or "").strip()
     if not p:
         return None
-    try:
-        res = supabase.storage.from_(VOICE_BUCKET).create_signed_url(p, expires_in)
-        data = getattr(res, "data", None) or {}
 
+    try:
+        r = requests.post(
+            f"{SUPABASE_URL}/storage/v1/object/sign/{VOICE_BUCKET}/{p}",
+            headers={
+                "apikey": SUPABASE_SERVICE_ROLE_KEY,
+                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={"expiresIn": expires_in},
+            timeout=20,
+        )
+
+        if r.status_code not in (200, 201):
+            return None
+
+        data = r.json()
         signed = data.get("signedURL") or data.get("signedUrl")
         if not signed:
             return None
