@@ -118,7 +118,15 @@ def _signed_url_for_path(path: Optional[str], expires_in: int = 3600) -> Optiona
     try:
         res = supabase.storage.from_(VOICE_BUCKET).create_signed_url(p, expires_in)
         data = getattr(res, "data", None) or {}
-        return data.get("signedURL") or data.get("signedUrl")
+
+        signed = data.get("signedURL") or data.get("signedUrl")
+        if not signed:
+            return None
+
+        if str(signed).startswith("http://") or str(signed).startswith("https://"):
+            return signed
+
+        return f"{SUPABASE_URL}/storage/v1{signed}"
     except Exception:
         return None
 
