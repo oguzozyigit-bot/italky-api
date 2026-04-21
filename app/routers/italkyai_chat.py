@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
@@ -70,6 +71,10 @@ class ChatBody(BaseModel):
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def make_session_id() -> str:
+    return uuid.uuid4().hex
 
 
 def normalize_text(text: str) -> str:
@@ -316,7 +321,7 @@ def build_persona_prompt(state: PersonaState, global_memory: str, session_memory
             "Rolün: muhalif / rakip karakter.",
             "Kolay onay verme.",
             "Zekice ters açı kur.",
-            "Laf sok ama seviyeyi düşürme.",
+            "Laf sok.",
         ]
     elif state.persona_type == "celebrity":
         role_block += [
@@ -518,6 +523,7 @@ def get_global_memory(user_id: Optional[str]) -> str:
             supabase.table("chat_persona_memory")
             .select("known_name, known_facts, memory_summary")
             .eq("user_id", user_id)
+            .eq("memory_key", "global_profile")
             .maybe_single()
             .execute()
         )
@@ -526,7 +532,7 @@ def get_global_memory(user_id: Optional[str]) -> str:
         parts = []
 
         if data.get("known_name"):
-          parts.append(f"Kullanıcının adı: {data['known_name']}")
+            parts.append(f"Kullanıcının adı: {data['known_name']}")
 
         facts = data.get("known_facts") or {}
         if facts.get("team"):
@@ -551,45 +557,66 @@ def get_session_memory(session_id: Optional[str]) -> str:
         res = (
             supabase.table("chat_persona_saved_chats")
             .select("memory_summary")
-            .eq("id", session_id)
-            .maybe_single()
+            .eq("session_id", session_id)
+            .order("updated_at", desc=True)
+            .limit(1)
             .execute()
         )
 
-        data = getattr(res, "data", None) or {}
-        return str(data.get("memory_summary") or "").strip()
+        rows = getattr(res, "data", None) or []
+        if not rows:
+            return ""
+        return str(rows[0].get("memory_summary") or "").strip()
     except Exception as e:
         print("get_session_memory error:", e)
         return ""
 
 
-def save_message(session_id: Optional[str], role: str, content: str) -> None:
-    if not supabase or not session_id or not normalize_text(content):
+def save_message(
+    saved_chat_id: Optional[str],
+    user_id: Optional[str],
+    session_id: Optional[str],
+    role: str,
+    content: str,
+    persona_type: Optional[str],
+    tone_level: Optional[str],
+) -> None:
+    if not supabase or not saved_chat_id or not user_id or not session_id or not normalize_text(content):
         return
 
     try:
         supabase.table("chat_persona_saved_chat_messages").insert({
+            "saved_chat_id": saved_chat_id,
+            "user_id": user_id,
             "session_id": session_id,
             "role": role,
-            "content": normalize_text(content),
+            "message": normalize_text(content),
+            "char_count": len(normalize_text(content)),
             "created_at": now_iso(),
+            "persona_type": persona_type,
+            "tone_level": tone_level,
         }).execute()
     except Exception as e:
         print("save_message error:", e)
 
 
-def upsert_saved_chat(body: ChatBody, state_persona: PersonaState, reply: str) -> None:
-    if not supabase or not body.session_id or not body.user_id:
-        return
+def upsert_saved_chat(body: ChatBody, session_id: str, state_persona: PersonaState, reply: str) -> str:
+    if not supabase or not body.user_id:
+        return session_id
 
     user_text = normalize_text(body.text)
     title = user_text[:80] if user_text else "Yeni Sohbet"
     summary = f"Son konu: {user_text[:200]}" if user_text else ""
 
+    saved_chat_id = body.session_id if body.session_id and re.fullmatch(r"[0-9a-fA-F-]{36}", body.session_id or "") else str(uuid.uuid4())
+
     payload = {
-        "id": body.session_id,
+        "id": saved_chat_id,
         "user_id": body.user_id,
+        "session_id": session_id,
         "title": title,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
         "persona_type": state_persona.persona_type,
         "persona_name": state_persona.persona_name,
         "celebrity_name": state_persona.celebrity_name,
@@ -598,13 +625,14 @@ def upsert_saved_chat(body: ChatBody, state_persona: PersonaState, reply: str) -
         "selected_voice_mode": body.voice_mode or state_persona.selected_voice_mode or "tts",
         "memory_summary": summary,
         "last_message_preview": normalize_text(reply)[:160],
-        "updated_at": now_iso(),
     }
 
     try:
         supabase.table("chat_persona_saved_chats").upsert(payload).execute()
     except Exception as e:
         print("upsert_saved_chat error:", e)
+
+    return saved_chat_id
 
 
 def update_global_memory(user_id: Optional[str], text: str) -> None:
@@ -616,8 +644,9 @@ def update_global_memory(user_id: Optional[str], text: str) -> None:
     try:
         existing_res = (
             supabase.table("chat_persona_memory")
-            .select("known_name, known_facts, memory_summary")
+            .select("id, known_name, known_facts, memory_summary")
             .eq("user_id", user_id)
+            .eq("memory_key", "global_profile")
             .maybe_single()
             .execute()
         )
@@ -639,6 +668,11 @@ def update_global_memory(user_id: Optional[str], text: str) -> None:
 
         supabase.table("chat_persona_memory").upsert({
             "user_id": user_id,
+            "memory_key": "global_profile",
+            "memory_value": normalize_text(text)[:500],
+            "source": "chat",
+            "importance": 1,
+            "is_active": True,
             "known_name": known_name,
             "known_facts": known_facts,
             "memory_summary": memory_summary,
@@ -654,6 +688,8 @@ async def italkyai_chat(body: ChatBody):
     user_text = normalize_text(body.text)
     if not user_text:
         raise HTTPException(status_code=400, detail="empty_text")
+
+    session_id = normalize_text(body.session_id) or make_session_id()
 
     usage_kind = _resolve_usage_kind(body.input_mode)
     chars_used = len(user_text)
@@ -672,6 +708,7 @@ async def italkyai_chat(body: ChatBody):
                 "tokens_before": precheck["tokens"],
                 "text_bucket": precheck["text_bucket"],
                 "voice_bucket": precheck["voice_bucket"],
+                "session_id": session_id,
             }
 
     persona_state = detect_persona_from_text(user_text)
@@ -679,7 +716,7 @@ async def italkyai_chat(body: ChatBody):
     persona_state = merge_persona_from_history(body.history, persona_state)
 
     global_memory = get_global_memory(body.user_id)
-    session_memory = get_session_memory(body.session_id)
+    session_memory = get_session_memory(session_id)
 
     messages = build_messages(
         history=body.history,
@@ -704,6 +741,7 @@ async def italkyai_chat(body: ChatBody):
             "charged": False,
             "usage_kind": usage_kind,
             "chars_used": chars_used,
+            "session_id": session_id,
         }
 
     reply = cleanup_reply(reply)
@@ -727,7 +765,7 @@ async def italkyai_chat(body: ChatBody):
             description="AI sesli sohbet kullanımı" if usage_kind == "voice" else "AI yazılı sohbet kullanımı",
             meta={
                 "module": "italkyai_chat",
-                "session_id": body.session_id,
+                "session_id": session_id,
                 "input_mode": body.input_mode,
                 "voice_mode": body.voice_mode,
                 "chars_used": chars_used,
@@ -740,6 +778,7 @@ async def italkyai_chat(body: ChatBody):
                 "ok": False,
                 "error": "usage_charge_failed",
                 "charge": charge_result,
+                "session_id": session_id,
             }
 
         if charge_result.get("reason") == "insufficient_tokens":
@@ -753,11 +792,14 @@ async def italkyai_chat(body: ChatBody):
                 "tokens_before": charge_result.get("tokens_before", 0),
                 "text_bucket": charge_result.get("text_bucket", 0),
                 "voice_bucket": charge_result.get("voice_bucket", 0),
+                "session_id": session_id,
             }
 
-    save_message(body.session_id, "user", user_text)
-    save_message(body.session_id, "assistant", reply)
-    upsert_saved_chat(body, persona_state, reply)
+    saved_chat_id = upsert_saved_chat(body, session_id, persona_state, reply)
+
+    save_message(saved_chat_id, body.user_id, session_id, "user", user_text, persona_state.persona_type, persona_state.tone_level)
+    save_message(saved_chat_id, body.user_id, session_id, "assistant", reply, persona_state.persona_type, persona_state.tone_level)
+
     update_global_memory(body.user_id, user_text)
 
     return {
@@ -771,6 +813,8 @@ async def italkyai_chat(body: ChatBody):
         "tokens_after": int(charge_result.get("tokens_after") or 0),
         "text_bucket": int(charge_result.get("text_bucket") or 0),
         "voice_bucket": int(charge_result.get("voice_bucket") or 0),
+        "session_id": session_id,
+        "saved_chat_id": saved_chat_id,
         "persona": {
             "persona_type": persona_state.persona_type,
             "persona_name": persona_state.persona_name,
