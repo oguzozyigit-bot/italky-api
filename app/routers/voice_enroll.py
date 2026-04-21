@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import Optional, Any
+from typing import Optional
 from datetime import datetime, timezone
 
 import requests
@@ -26,6 +26,12 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE)
 
+PREVIEW_TEXTS = {
+    "mine": "Merhaba ben senin sesinin benzeriyim.",
+    "second": "Merhaba. Artık dil çevirilerini ve sohbeti benim bu sesimle yapabilirsin.",
+    "memory": "Ben senin hatıralarından gelen sesim."
+}
+
 
 def _get_bearer(auth_header: str | None) -> str:
     if not auth_header:
@@ -43,19 +49,14 @@ def _get_user_id_from_token(access_token: str) -> str:
     res = supabase.auth.get_user(access_token)
     user = getattr(res, "user", None)
     if not user or not getattr(user, "id", None):
-        raise HTTPException(status_code=401, detail="Invalid or expired session")
+      raise HTTPException(status_code=401, detail="Invalid or expired session")
     return str(user.id)
 
 
 def _get_profile(user_id: str) -> dict:
     res = (
         supabase.table("profiles")
-        .select(
-            "id,voice_profile_lang,plan,"
-            "voice_sample_path,tts_voice_id,tts_voice_ready,"
-            "second_voice_name,second_voice_sample_path,second_tts_voice_id,second_tts_voice_ready,"
-            "memory_voice_name,memory_voice_sample_path,memory_tts_voice_id,memory_tts_voice_ready"
-        )
+        .select("id,voice_profile_lang,plan")
         .eq("id", user_id)
         .maybe_single()
         .execute()
@@ -87,24 +88,13 @@ def _get_voice_row(user_id: str, voice_type: str, voice_id: Optional[str] = None
     return rows[0]
 
 
-def _update_profile(user_id: str, payload: dict) -> None:
-    res = (
-        supabase.table("profiles")
-        .update(payload)
-        .eq("id", user_id)
-        .execute()
-    )
-    _ = res
-
-
 def _update_voice_library(voice_id: str, payload: dict) -> None:
-    res = (
+    (
         supabase.table("voice_library")
         .update(payload)
         .eq("id", voice_id)
         .execute()
     )
-    _ = res
 
 
 def _signed_url_for_storage_path(path: str, expires_in: int = 3600) -> str:
@@ -184,59 +174,64 @@ def _cartesia_clone(user_id: str, sample_url: str, lang: str) -> dict:
     }
 
 
-def _success_profile_payload(voice_type: str, row: dict, result: dict) -> dict:
-    now = datetime.now(timezone.utc).isoformat()
+def _cartesia_preview_tts(voice_id: str, text: str, lang: str) -> bytes:
+    if not CARTESIA_API_KEY:
+        raise HTTPException(status_code=500, detail="CARTESIA_API_KEY missing")
 
-    if voice_type == "mine":
-        return {
-            "voice_sample_path": row.get("sample_path"),
-            "tts_voice_provider": result["provider"],
-            "tts_voice_id": result["voice_id"],
-            "tts_voice_ready": True,
-            "tts_voice_last_error": None,
-            "tts_voice_updated_at": now,
-        }
+    payload = {
+        "model_id": "sonic-3",
+        "transcript": text,
+        "voice": {
+            "mode": "id",
+            "id": voice_id,
+        },
+        "output_format": {
+            "container": "mp3",
+            "bit_rate": 128000,
+            "sample_rate": 44100,
+        },
+        "language": (lang or "en").split("-")[0].lower(),
+    }
 
-    if voice_type == "second":
-        return {
-            "second_voice_name": row.get("voice_name"),
-            "second_voice_sample_path": row.get("sample_path"),
-            "second_tts_voice_id": result["voice_id"],
-            "second_tts_voice_ready": True,
-        }
+    r = requests.post(
+        "https://api.cartesia.ai/tts/bytes",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {CARTESIA_API_KEY}",
+            "Cartesia-Version": CARTESIA_VERSION,
+            "Content-Type": "application/json",
+        },
+        timeout=60,
+    )
 
-    if voice_type == "memory":
-        return {
-            "memory_voice_name": row.get("voice_name"),
-            "memory_voice_sample_path": row.get("sample_path"),
-            "memory_tts_voice_id": result["voice_id"],
-            "memory_tts_voice_ready": True,
-        }
+    if r.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Cartesia preview failed: {r.text}")
 
-    raise HTTPException(status_code=400, detail="invalid_voice_type")
+    if not r.content:
+        raise HTTPException(status_code=500, detail="Cartesia preview empty")
+
+    return r.content
 
 
-def _failure_profile_payload(voice_type: str, detail: str) -> dict:
-    now = datetime.now(timezone.utc).isoformat()
-
-    if voice_type == "mine":
-        return {
-            "tts_voice_ready": False,
-            "tts_voice_last_error": detail,
-            "tts_voice_updated_at": now,
-        }
-
-    if voice_type == "second":
-        return {
-            "second_tts_voice_ready": False,
-        }
-
-    if voice_type == "memory":
-        return {
-            "memory_tts_voice_ready": False,
-        }
-
-    raise HTTPException(status_code=400, detail="invalid_voice_type")
+def _upload_preview_audio(user_id: str, voice_type: str, voice_row_id: str, content: bytes) -> str:
+    path = f"{user_id}/{voice_type}/preview_{voice_row_id}.mp3"
+    try:
+        supabase.storage.from_(VOICE_BUCKET).upload(
+            path,
+            content,
+            {"content-type": "audio/mpeg", "x-upsert": "true"}
+        )
+    except Exception:
+        try:
+            supabase.storage.from_(VOICE_BUCKET).remove([path])
+        except Exception:
+            pass
+        supabase.storage.from_(VOICE_BUCKET).upload(
+            path,
+            content,
+            {"content-type": "audio/mpeg"}
+        )
+    return path
 
 
 def _enroll_voice_by_type(
@@ -260,25 +255,40 @@ def _enroll_voice_by_type(
         if VOICE_PROVIDER != "cartesia":
             raise HTTPException(status_code=500, detail="VOICE_PROVIDER must be cartesia")
 
+        lang = str(profile.get("voice_profile_lang") or "en")
         sample_url = _signed_url_for_storage_path(sample_path)
-        result = _cartesia_clone(
+
+        clone = _cartesia_clone(
             user_id=user_id,
             sample_url=sample_url,
-            lang=str(profile.get("voice_profile_lang") or "en"),
+            lang=lang,
+        )
+
+        preview_text = PREVIEW_TEXTS.get(voice_type, "Merhaba")
+        preview_bytes = _cartesia_preview_tts(
+            voice_id=clone["voice_id"],
+            text=preview_text,
+            lang=lang,
+        )
+        preview_path = _upload_preview_audio(
+            user_id=user_id,
+            voice_type=voice_type,
+            voice_row_id=str(row["id"]),
+            content=preview_bytes,
         )
 
         _update_voice_library(
             row["id"],
             {
-                "tts_voice_id": result["voice_id"],
+                "tts_voice_id": clone["voice_id"],
                 "tts_voice_ready": True,
                 "tts_voice_last_error": None,
+                "preview_audio_path": preview_path,
+                "preview_text_key": voice_type,
+                "preview_ready": True,
+                "generation_chars_used": len(preview_text),
+                "generation_jetons_spent": 1 if len(preview_text) > 0 else 0,
             }
-        )
-
-        _update_profile(
-            user_id,
-            _success_profile_payload(voice_type, row, result)
         )
 
     except HTTPException as e:
@@ -288,45 +298,37 @@ def _enroll_voice_by_type(
                 {
                     "tts_voice_ready": False,
                     "tts_voice_last_error": str(e.detail),
+                    "preview_ready": False,
                 }
             )
-        except Exception:
-            pass
-
-        try:
-            _update_profile(user_id, _failure_profile_payload(voice_type, str(e.detail)))
         except Exception:
             pass
         raise
 
     except Exception as e:
         logger.exception("VOICE_ENROLL_FAIL %s", e)
-
         try:
             _update_voice_library(
                 row["id"],
                 {
                     "tts_voice_ready": False,
                     "tts_voice_last_error": str(e),
+                    "preview_ready": False,
                 }
             )
         except Exception:
             pass
-
-        try:
-            _update_profile(user_id, _failure_profile_payload(voice_type, str(e)))
-        except Exception:
-            pass
-
         raise HTTPException(status_code=500, detail=f"Voice enroll failed: {e}")
 
     return {
         "ok": True,
-        "provider": result["provider"],
-        "voice_id": result["voice_id"],
+        "provider": clone["provider"],
+        "voice_id": clone["voice_id"],
         "voice_type": voice_type,
         "voice_library_id": row["id"],
         "voice_name": row.get("voice_name"),
+        "preview_audio_path": preview_path,
+        "preview_ready": True,
     }
 
 
