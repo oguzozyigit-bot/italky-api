@@ -37,9 +37,9 @@ PREVIEW_TEXTS = {
         "Umarım kulağına doğal gelirim."
     ),
     "memory": (
-        "Ben... senin hatıralarından gelen bir sesim. "
+        "Ben... senin geçmişinden gelen bir sesim. "
         "Bazen bir ses, bir insanı yeniden hatırlatır. "
-        "Umarım bu sesi duyduğunda güzel anılar da seninle gelir."
+        "Umarım bu sesi duyduğunda güzel anılar aklına gelir."
     ),
 }
 
