@@ -26,9 +26,21 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE:
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE)
 
 PREVIEW_TEXTS = {
-    "mine": "Merhaba ben senin sesinin benzeriyim.",
-    "second": "Merhaba. Artık dil çevirilerini ve sohbeti benim bu sesimle yapabilirsin.",
-    "memory": "Ben senin hatıralarından gelen sesim."
+    "mine": (
+        "Merhaba... ben, senin sesinin benzeriyim. "
+        "Kendi sesin sana ilk anda biraz farklı gelebilir. "
+        "Ama dikkatle dinlersen, sana ne kadar benzediğimi fark edebilirsin."
+    ),
+    "second": (
+        "Merhaba... ben artık senin için hazırlanmış tanıdık bir sesim. "
+        "İstersen konuşmaları, çevirileri ve sohbetleri benim bu sesimle yapabilirsin. "
+        "Umarım kulağına doğal gelirim."
+    ),
+    "memory": (
+        "Ben... senin hatıralarından gelen bir sesim. "
+        "Bazen bir ses, bir insanı yeniden hatırlatır. "
+        "Umarım bu sesi duyduğunda güzel anılar da seninle gelir."
+    ),
 }
 
 
