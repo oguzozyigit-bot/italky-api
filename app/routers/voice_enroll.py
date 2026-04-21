@@ -39,7 +39,7 @@ PREVIEW_TEXTS = {
     "memory": (
         "Ben... senin geçmişinden gelen bir sesim. "
         "Bazen bir ses, bir insanı yeniden hatırlatır. "
-        "Umarım bu sesi duyduğunda güzel anılar aklına gelir."
+        "Umarım bu sesi duyduğunda güzel anılar aklına gelir ve çok mutlu olursun..."
     ),
 }
 
