@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import json
@@ -35,12 +36,10 @@ class TranslateBody(BaseModel):
     tone: Optional[str] = "neutral"     # neutral | happy | angry | sad | excited
     style: Optional[str] = "balanced"   # balanced | warm | clear | social
 
-    # Ataların Dili desteği
     atalar_mode: Optional[bool] = False
     atalar_source: Optional[str] = None
     atalar_target: Optional[str] = None
 
-    # Ataların Dili ek alanları
     historical_mode: Optional[bool] = False
     reading_mode: Optional[bool] = False
 
@@ -231,12 +230,10 @@ def probably_expanded_too_much(src: str, out: str, source: str = "", target: str
     if not src_wc or not out_wc:
         return False
 
-    # Selamlaşma / kısa gündelik kalıplarda biraz esnek ol
     if is_common_greeting_like(src, source):
         if out_wc <= 6 and char_count(out) <= 36:
             return False
 
-    # Tek kelimelik çok kısa cevaplarda sert ol
     if src_wc == 1:
         if out_wc >= src_wc + 3:
             return True
@@ -244,7 +241,6 @@ def probably_expanded_too_much(src: str, out: str, source: str = "", target: str
             return True
         return False
 
-    # 2-3 kelimelik kısa cümlelerde daha yumuşak ol
     if src_wc <= 3:
         if out_wc >= src_wc + 5:
             return True
@@ -252,7 +248,6 @@ def probably_expanded_too_much(src: str, out: str, source: str = "", target: str
             return True
         return False
 
-    # genel koruma
     if out_wc >= max(src_wc * 3, src_wc + 8):
         return True
 
@@ -278,10 +273,8 @@ def validate_translation_output(
         if probably_expanded_too_much(src_text, out, source, target):
             return False, "expanded_short_text"
 
-    # Aynı dilde değilsek ve çıktı birebir girişle aynıysa, çoğu durumda şüpheli
     if canonical(source) != canonical(target):
         if normalize_compare_key(src_text) == normalize_compare_key(out):
-            # Tek kelime özel isim olabilir, onu direkt öldürme
             if word_count(src_text) == 1 and char_count(src_text) >= 3:
                 pass
             elif is_short_utterance(src_text) or word_count(src_text) <= 3:
@@ -363,6 +356,52 @@ LANG_DISPLAY_NAMES = {
     "crh": "Kırım Tatarcası",
     "nog": "Nogayca",
     "gokturk": "Göktürkçe",
+}
+
+SUPPORTED_GOOGLE_LANGS = {
+    "tr", "en", "de", "fr", "it", "es",
+    "sq", "bs", "sr", "hr", "mk", "bg", "ro", "el",
+    "ab", "ce", "av", "os", "crh",
+    "ku", "kmr", "ckb",
+    "ka", "az", "kk", "ky", "uz", "tk", "ug", "tt", "ba", "gag",
+    "he"
+}
+
+SHORT_PHRASE_MAP: Dict[Tuple[str, str, str], str] = {
+    ("tr", "ab", "merhaba"): "Бзиа убааит",
+    ("tr", "ab", "selam"): "Бзиа убааит",
+    ("tr", "ab", "nasılsın"): "Ушԥаџьума?",
+    ("tr", "ab", "nasilsin"): "Ушԥаџьума?",
+    ("tr", "ab", "iyiyim"): "Сара сыбзиоуп",
+    ("tr", "ab", "teşekkür ederim"): "Иҭабуп",
+    ("tr", "ab", "tesekkur ederim"): "Иҭабуп",
+    ("tr", "ab", "teşekkürler"): "Иҭабуп",
+    ("tr", "ab", "tesekkurler"): "Иҭабуп",
+    ("tr", "ab", "evet"): "Ааи",
+    ("tr", "ab", "hayır"): "Мап",
+    ("tr", "ab", "hayir"): "Мап",
+
+    ("tr", "ckb", "merhaba"): "سڵاو",
+    ("tr", "ckb", "selam"): "سڵاو",
+    ("tr", "ckb", "nasılsın"): "چۆنی؟",
+    ("tr", "ckb", "nasilsin"): "چۆنی؟",
+    ("tr", "ckb", "iyiyim"): "باشم",
+    ("tr", "ckb", "teşekkür ederim"): "سوپاس",
+    ("tr", "ckb", "tesekkur ederim"): "سوپاس",
+    ("tr", "ckb", "evet"): "بەڵێ",
+    ("tr", "ckb", "hayır"): "نەخێر",
+    ("tr", "ckb", "hayir"): "نەخێر",
+
+    ("tr", "kmr", "merhaba"): "Silav",
+    ("tr", "kmr", "selam"): "Silav",
+    ("tr", "kmr", "nasılsın"): "Tu çawa yî?",
+    ("tr", "kmr", "nasilsin"): "Tu çawa yî?",
+    ("tr", "kmr", "iyiyim"): "Ez baş im",
+    ("tr", "kmr", "teşekkür ederim"): "Spas dikim",
+    ("tr", "kmr", "tesekkur ederim"): "Spas dikim",
+    ("tr", "kmr", "evet"): "Erê",
+    ("tr", "kmr", "hayır"): "Na",
+    ("tr", "kmr", "hayir"): "Na",
 }
 
 
@@ -787,10 +826,25 @@ def historical_gokturk_enrichment(text: str, literal_runes: str, literal_reading
 # PROVIDER DECISION
 # =========================================================
 
+def lookup_short_phrase(text: str, source: str, target: str) -> str:
+    key = (canonical(source), canonical(target), normalize_text(text).lower())
+    return SHORT_PHRASE_MAP.get(key, "").strip()
+
+
+def is_google_supported_pair(source: str, target: str) -> bool:
+    s = canonical(source)
+    t = canonical(target)
+    return s in SUPPORTED_GOOGLE_LANGS and t in SUPPORTED_GOOGLE_LANGS
+
+
 def should_force_ai_for_language_pair(source: str, target: str) -> bool:
     s = canonical(source)
     t = canonical(target)
-    return s in UNSUPPORTED_LOCAL_LANGS or t in UNSUPPORTED_LOCAL_LANGS
+
+    if s == "gokturk" or t == "gokturk":
+        return True
+
+    return not is_google_supported_pair(s, t)
 
 
 # =========================================================
@@ -1009,7 +1063,6 @@ def ai_direct_translate_by_language_name(
 ) -> Tuple[str, str]:
     literal_mode = should_force_literal_mode(text, tone, style)
 
-    # 1) Gemini
     try:
         out = _gemini_translate_structured(text, source, target, tone, style, literal_mode=literal_mode)
         ok, reason = validate_translation_output(text, out, source, target, strict_short=literal_mode)
@@ -1019,7 +1072,6 @@ def ai_direct_translate_by_language_name(
     except Exception as e:
         print("[translate_ai] gemini local-lang failed:", e)
 
-    # 2) OpenAI
     try:
         out = _openai_translate_structured(text, source, target, tone, style, literal_mode=literal_mode)
         ok, reason = validate_translation_output(text, out, source, target, strict_short=literal_mode)
@@ -1290,9 +1342,6 @@ def translate_ai(
     if not source or not target:
         return {"ok": False, "error": "missing_lang"}
 
-    # =====================================================
-    # ATALARIN DİLİ ÖZEL AKIŞI
-    # =====================================================
     if atalar_mode:
         if atalar_source == "tr" and atalar_target == "gokturk":
             local = turkish_to_gokturk_with_reading(text)
@@ -1342,37 +1391,44 @@ def translate_ai(
             "charged": False,
         }
 
-    # =====================================================
-    # NORMAL MODE
-    # =====================================================
+    short_phrase_hit = lookup_short_phrase(text, source, target)
+    if short_phrase_hit:
+        return {
+            "ok": True,
+            "translated": short_phrase_hit,
+            "provider": "phrase_map",
+            "ai_used": False,
+            "charged": False,
+            "chars_used": len(text),
+        }
+
     if mode == "normal":
         try:
-            if should_force_ai_for_language_pair(source, target):
-                print("[translate_ai] normal local-lang path -> ai")
-                translated, provider = ai_direct_translate_by_language_name(
-                    text=text,
-                    source=source,
-                    target=target,
-                    tone=tone,
-                    style=style,
-                )
+            if is_google_supported_pair(source, target):
+                translated = fast_translate_fallback(text, source, target)
                 if translated:
                     return {
                         "ok": True,
                         "translated": translated,
-                        "provider": provider,
-                        "ai_used": True,
+                        "provider": "google",
+                        "ai_used": False,
                         "charged": False,
                         "chars_used": len(text),
                     }
 
-            translated = fast_translate_fallback(text, source, target)
+            translated, provider = ai_direct_translate_by_language_name(
+                text=text,
+                source=source,
+                target=target,
+                tone=tone,
+                style=style,
+            )
             if translated:
                 return {
                     "ok": True,
                     "translated": translated,
-                    "provider": "google",
-                    "ai_used": False,
+                    "provider": provider,
+                    "ai_used": True,
                     "charged": False,
                     "chars_used": len(text),
                 }
@@ -1381,16 +1437,22 @@ def translate_ai(
 
         return {"ok": False, "error": "normal_translate_failed"}
 
-    # =====================================================
-    # CULTURAL MODE
-    # =====================================================
     if mode == "cultural":
         force_local_ai = should_force_ai_for_language_pair(source, target)
 
-        # Kısa ve basit şeylerde önce hızlı literal fallback dene
-        if not force_local_ai and not should_use_ai_for_cultural(text, tone, style):
+        short_phrase_hit = lookup_short_phrase(text, source, target)
+        if short_phrase_hit:
+            return {
+                "ok": True,
+                "translated": short_phrase_hit,
+                "provider": "phrase_map",
+                "ai_used": False,
+                "charged": False,
+                "chars_used": len(text),
+            }
+
+        if is_short_utterance(text) and is_google_supported_pair(source, target):
             try:
-                print("[translate_ai] cultural fast path -> google")
                 translated = fast_translate_fallback(text, source, target)
                 if translated:
                     return {
@@ -1402,7 +1464,22 @@ def translate_ai(
                         "chars_used": len(text),
                     }
             except Exception as e0:
-                print("[translate_ai] cultural fast path failed:", e0)
+                print("[translate_ai] short literal fallback failed:", e0)
+
+        if not force_local_ai and is_google_supported_pair(source, target) and not should_use_ai_for_cultural(text, tone, style):
+            try:
+                translated = fast_translate_fallback(text, source, target)
+                if translated:
+                    return {
+                        "ok": True,
+                        "translated": translated,
+                        "provider": "google",
+                        "ai_used": False,
+                        "charged": False,
+                        "chars_used": len(text),
+                    }
+            except Exception as e0:
+                print("[translate_ai] cultural google-first failed:", e0)
 
         jwt_token = _get_bearer(authorization)
         user = _get_user_from_jwt(jwt_token)
@@ -1438,7 +1515,9 @@ def translate_ai(
             try:
                 print("[translate_ai] trying google official fallback")
                 translated = google_translate_official(text, source, target)
-                ok, reason = validate_translation_output(text, translated, source, target, strict_short=is_short_utterance(text))
+                ok, reason = validate_translation_output(
+                    text, translated, source, target, strict_short=is_short_utterance(text)
+                )
                 if ok:
                     return {
                         "ok": True,
@@ -1455,7 +1534,9 @@ def translate_ai(
             try:
                 print("[translate_ai] trying google free fallback")
                 translated = google_translate_free(text, source, target)
-                ok, reason = validate_translation_output(text, translated, source, target, strict_short=is_short_utterance(text))
+                ok, reason = validate_translation_output(
+                    text, translated, source, target, strict_short=is_short_utterance(text)
+                )
                 if ok:
                     return {
                         "ok": True,
