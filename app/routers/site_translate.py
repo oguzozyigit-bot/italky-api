@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 import requests
 from fastapi import APIRouter, Header, HTTPException
@@ -19,6 +19,40 @@ SUPPORTED_SITE_LANGS = [
     {"code": "it", "label": "Italiano", "dir": "ltr"},
     {"code": "es", "label": "Español", "dir": "ltr"},
     {"code": "ar", "label": "العربية", "dir": "rtl"},
+    {"code": "ru", "label": "Русский", "dir": "ltr"},
+    {"code": "bg", "label": "Български", "dir": "ltr"},
+    {"code": "bn", "label": "বাংলা", "dir": "ltr"},
+    {"code": "ca", "label": "Català", "dir": "ltr"},
+    {"code": "cs", "label": "Čeština", "dir": "ltr"},
+    {"code": "da", "label": "Dansk", "dir": "ltr"},
+    {"code": "el", "label": "Ελληνικά", "dir": "ltr"},
+    {"code": "et", "label": "Eesti", "dir": "ltr"},
+    {"code": "eu", "label": "Euskara", "dir": "ltr"},
+    {"code": "fi", "label": "Suomi", "dir": "ltr"},
+    {"code": "gl", "label": "Galego", "dir": "ltr"},
+    {"code": "hu", "label": "Magyar", "dir": "ltr"},
+    {"code": "id", "label": "Bahasa Indonesia", "dir": "ltr"},
+    {"code": "lt", "label": "Lietuvių", "dir": "ltr"},
+    {"code": "lv", "label": "Latviešu", "dir": "ltr"},
+    {"code": "ms", "label": "Bahasa Melayu", "dir": "ltr"},
+    {"code": "nl", "label": "Nederlands", "dir": "ltr"},
+    {"code": "pl", "label": "Polski", "dir": "ltr"},
+    {"code": "ro", "label": "Română", "dir": "ltr"},
+    {"code": "sk", "label": "Slovenčina", "dir": "ltr"},
+    {"code": "sl", "label": "Slovenščina", "dir": "ltr"},
+    {"code": "sq", "label": "Shqip", "dir": "ltr"},
+    {"code": "th", "label": "ไทย", "dir": "ltr"},
+    {"code": "ur", "label": "اردو", "dir": "rtl"},
+    {"code": "vi", "label": "Tiếng Việt", "dir": "ltr"},
+    {"code": "zh", "label": "中文", "dir": "ltr"},
+    {"code": "pt", "label": "Português", "dir": "ltr"},
+    {"code": "hi", "label": "हिन्दी", "dir": "ltr"},
+    {"code": "ja", "label": "日本語", "dir": "ltr"},
+    {"code": "ko", "label": "한국어", "dir": "ltr"},
+    {"code": "sv", "label": "Svenska", "dir": "ltr"},
+    {"code": "no", "label": "Norsk", "dir": "ltr"},
+    {"code": "uk", "label": "Українська", "dir": "ltr"},
+    {"code": "fa", "label": "فارسی", "dir": "rtl"},
 ]
 
 SUPPORTED_CODES = {x["code"] for x in SUPPORTED_SITE_LANGS}
@@ -75,7 +109,7 @@ def translate_batch_google(
     out: List[str] = []
 
     for item in items:
-        out.append(str(item.get("translatedText") or ""))
+      out.append(str(item.get("translatedText") or ""))
 
     if len(out) != len(cleaned):
         raise HTTPException(status_code=500, detail="google_translate_count_mismatch")
