@@ -4,7 +4,7 @@ import os
 from typing import List, Optional
 
 import requests
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(tags=["site-translate"])
@@ -57,6 +57,48 @@ SUPPORTED_SITE_LANGS = [
 
 SUPPORTED_CODES = {x["code"] for x in SUPPORTED_SITE_LANGS}
 
+COUNTRY_TO_LANG = {
+    "TR": "tr",
+    "GB": "en", "US": "en", "CA": "en", "AU": "en", "NZ": "en", "IE": "en",
+    "DE": "de", "AT": "de", "CH": "de",
+    "FR": "fr", "BE": "fr", "LU": "fr",
+    "IT": "it",
+    "ES": "es", "MX": "es", "AR": "es", "CO": "es", "CL": "es", "PE": "es", "VE": "es",
+    "SA": "ar", "AE": "ar", "EG": "ar", "IQ": "ar", "JO": "ar", "KW": "ar", "LB": "ar",
+    "LY": "ar", "MA": "ar", "OM": "ar", "QA": "ar", "SY": "ar", "TN": "ar", "YE": "ar",
+    "RU": "ru",
+    "BG": "bg",
+    "BD": "bn",
+    "CZ": "cs",
+    "DK": "da",
+    "GR": "el", "CY": "el",
+    "EE": "et",
+    "FI": "fi",
+    "HU": "hu",
+    "ID": "id",
+    "LT": "lt",
+    "LV": "lv",
+    "MY": "ms",
+    "NL": "nl",
+    "PL": "pl",
+    "RO": "ro", "MD": "ro",
+    "SK": "sk",
+    "SI": "sl",
+    "AL": "sq", "XK": "sq",
+    "TH": "th",
+    "PK": "ur",
+    "VN": "vi",
+    "CN": "zh", "TW": "zh", "HK": "zh", "SG": "zh",
+    "PT": "pt", "BR": "pt",
+    "IN": "hi",
+    "JP": "ja",
+    "KR": "ko",
+    "SE": "sv",
+    "NO": "no",
+    "UA": "uk",
+    "IR": "fa",
+}
+
 
 class SiteTranslateBody(BaseModel):
     texts: List[str]
@@ -86,7 +128,6 @@ def translate_batch_google(
     fmt: str = "text",
 ) -> List[str]:
     api_key = require_google_key()
-
     cleaned = [str(x or "") for x in texts]
     if not cleaned:
         return []
@@ -106,15 +147,39 @@ def translate_batch_google(
 
     data = r.json() or {}
     items = data.get("data", {}).get("translations", []) or []
-    out: List[str] = []
-
-    for item in items:
-      out.append(str(item.get("translatedText") or ""))
+    out: List[str] = [str(item.get("translatedText") or "") for item in items]
 
     if len(out) != len(cleaned):
         raise HTTPException(status_code=500, detail="google_translate_count_mismatch")
 
     return out
+
+
+def detect_country_from_headers(request: Request) -> str:
+    candidates = [
+        request.headers.get("cf-ipcountry"),
+        request.headers.get("x-vercel-ip-country"),
+        request.headers.get("x-country-code"),
+        request.headers.get("cloudfront-viewer-country"),
+    ]
+    for value in candidates:
+        code = str(value or "").strip().upper()
+        if len(code) == 2 and code.isalpha():
+            return code
+    return ""
+
+
+def detect_country_from_ip_service() -> str:
+    try:
+        r = requests.get("https://ipapi.co/json/", timeout=5)
+        if r.status_code == 200:
+            data = r.json() or {}
+            code = str(data.get("country_code") or "").strip().upper()
+            if len(code) == 2 and code.isalpha():
+                return code
+    except Exception:
+        pass
+    return ""
 
 
 @router.get("/api/site-languages")
@@ -123,6 +188,25 @@ def site_languages():
         "ok": True,
         "languages": SUPPORTED_SITE_LANGS,
         "default_lang": "tr",
+    }
+
+
+@router.get("/api/site-country")
+def site_country(request: Request):
+    country = detect_country_from_headers(request)
+    source = "header"
+
+    if not country:
+        country = detect_country_from_ip_service()
+        source = "ip"
+
+    lang = COUNTRY_TO_LANG.get(country, "tr") if country else "tr"
+
+    return {
+        "ok": True,
+        "country": country or "",
+        "suggested_lang": lang,
+        "source": source if country else "default",
     }
 
 
