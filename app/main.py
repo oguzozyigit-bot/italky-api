@@ -19,6 +19,7 @@ from app.routers.italkyai_voice import router as italkyai_voice_router
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers.wallet import router as wallet_router
 from app.routers.promo import router as promo_router
+from app.routers.site_translate import router as site_translate_router
 
 # CORE ROUTERS
 from app.routers.chat_ai import router as chat_ai_router
@@ -121,6 +122,7 @@ app.include_router(italkyai_chat_router)
 app.include_router(italkyai_voice_router)
 app.include_router(wallet_router)
 app.include_router(promo_router)
+app.include_router(site_translate_router)
 
 if has_push_admin and push_admin_router:
     app.include_router(push_admin_router)
