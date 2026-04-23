@@ -20,6 +20,7 @@ from app.routers.ui_translate import router as ui_translate_router
 from app.routers.wallet import router as wallet_router
 from app.routers.promo import router as promo_router
 from app.routers.site_translate import router as site_translate_router
+from app.routers.meeting import router as meeting_router
 
 # CORE ROUTERS
 from app.routers.chat_ai import router as chat_ai_router
@@ -118,6 +119,8 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(voice_enroll_router, prefix="/api")
 app.include_router(chat_ai_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
+app.include_router(meeting_router)
+
 app.include_router(italkyai_chat_router)
 app.include_router(italkyai_voice_router)
 app.include_router(wallet_router)
