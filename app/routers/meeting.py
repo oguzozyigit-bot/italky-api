@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel
 from supabase import Client, create_client
 
@@ -19,9 +20,6 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
-# =========================================================
-# MODELS
-# =========================================================
 class BootstrapBody(BaseModel):
     membership_no: str | None = None
     display_name: str | None = None
@@ -51,9 +49,15 @@ class LeaveBody(BaseModel):
     room_id: str
 
 
-# =========================================================
-# HELPERS
-# =========================================================
+class RemoveParticipantBody(BaseModel):
+    room_id: str
+    target_user_id: str
+
+
+class CancelMeetingBody(BaseModel):
+    room_id: str
+
+
 def _clean(v: Any) -> str:
     return " ".join(str(v or "").strip().split())
 
@@ -61,6 +65,10 @@ def _clean(v: Any) -> str:
 def _clean_lang(v: Any) -> str:
     s = str(v or "tr").strip().lower()
     return s[:12] or "tr"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _get_bearer(authorization: str | None) -> str:
@@ -174,13 +182,6 @@ def _participant_room(room_id: str, user_id: str) -> dict[str, Any] | None:
         return None
 
 
-def _translate_for_viewer(text: str, sender_lang: str, viewer_lang: str) -> str:
-    text = _clean(text)
-    if not text:
-        return ""
-    return text
-
-
 def _participant_public(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row.get("id"),
@@ -193,7 +194,15 @@ def _participant_public(row: dict[str, Any]) -> dict[str, Any]:
         "is_active": bool(row.get("is_active")),
         "joined_at": row.get("joined_at"),
         "last_seen_at": row.get("last_seen_at"),
+        "color_key": row.get("color_key") or "c1",
     }
+
+
+def _translate_for_viewer(text: str, sender_lang: str, viewer_lang: str) -> str:
+    text = _clean(text)
+    if not text:
+        return ""
+    return text
 
 
 def _generate_meeting_code(seed: str) -> str:
@@ -271,28 +280,22 @@ def _ensure_creator_participant(
             pass
         return
 
-    try:
-        supabase.from_("meeting_participants").insert(
-            {
-                "meeting_id": room_id,
-                "user_id": user_id,
-                "member_no": member_no,
-                "display_name": display_name,
-                "avatar_url": avatar_url,
-                "lang_code": lang,
-                "color_key": "c1",
-                "is_host": True,
-                "is_active": True,
-            }
-        ).execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"host_participant_insert_failed: {e}")
+    supabase.from_("meeting_participants").insert(
+        {
+            "meeting_id": room_id,
+            "user_id": user_id,
+            "member_no": member_no,
+            "display_name": display_name,
+            "avatar_url": avatar_url,
+            "lang_code": lang,
+            "color_key": "c1",
+            "is_host": True,
+            "is_active": True,
+        }
+    ).execute()
 
 
 def _promote_next_host(room_id: str) -> dict[str, Any] | None:
-    """
-    Host çıkarsa aktif kalanlar içinden joined_at'e göre en eski kullanıcı yeni host olsun.
-    """
     try:
         resp = (
             supabase
@@ -318,9 +321,37 @@ def _promote_next_host(room_id: str) -> dict[str, Any] | None:
         return None
 
 
-# =========================================================
-# ENDPOINTS
-# =========================================================
+@router.get("/resolve")
+def resolve_meeting(meeting_code: str = Query(...)):
+    code = _clean(meeting_code).upper()
+    if not code:
+        raise HTTPException(status_code=400, detail="meeting_code boş")
+
+    try:
+        resp = (
+            supabase
+            .from_("meetings")
+            .select("*")
+            .eq("meeting_code", code)
+            .maybe_single()
+            .execute()
+        )
+        row = resp.data
+        if not row:
+            raise HTTPException(status_code=404, detail="Oda bulunamadı")
+
+        return {
+            "ok": True,
+            "room_id": row.get("id"),
+            "room_code": row.get("meeting_code"),
+            "title": row.get("title") or "Toplantı"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"resolve_failed: {e}")
+
+
 @router.post("/bootstrap")
 def bootstrap_meeting(
     body: BootstrapBody,
@@ -373,27 +404,6 @@ def bootstrap_meeting(
 
     if not existing_room_id:
         try:
-            rpc = supabase.rpc(
-                "create_meeting",
-                {
-                    "p_host_user_id": user_id,
-                    "p_host_member_no": member_no,
-                    "p_host_display_name": display_name,
-                    "p_host_avatar_url": avatar_url,
-                    "p_lang_code": lang,
-                    "p_title": "Yeni Meeting",
-                },
-            ).execute()
-
-            row = (rpc.data or [{}])[0]
-            existing_room_id = row.get("meeting_id")
-            existing_room_code = row.get("meeting_code")
-        except Exception:
-            existing_room_id = None
-            existing_room_code = None
-
-    if not existing_room_id:
-        try:
             meeting_code = _generate_meeting_code(member_no or user_id)
             meeting_insert = (
                 supabase
@@ -433,27 +443,17 @@ def bootstrap_meeting(
                     f"{display_name} katıldı",
                 )
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"meeting_create_fallback_failed: {e}")
+            raise HTTPException(status_code=500, detail=f"meeting_create_failed: {e}")
 
     if not existing_room_id:
         raise HTTPException(status_code=500, detail="room_id üretilemedi")
 
     try:
-        supabase.rpc(
-            "update_meeting_language",
-            {
-                "p_meeting_id": existing_room_id,
-                "p_user_id": user_id,
-                "p_lang_code": lang,
-            },
-        ).execute()
+        supabase.from_("meeting_participants").update(
+            {"lang_code": lang}
+        ).eq("meeting_id", existing_room_id).eq("user_id", user_id).execute()
     except Exception:
-        try:
-            supabase.from_("meeting_participants").update(
-                {"lang_code": lang}
-            ).eq("meeting_id", existing_room_id).eq("user_id", user_id).execute()
-        except Exception:
-            pass
+        pass
 
     try:
         participants_resp = (
@@ -650,47 +650,6 @@ def join_meeting_by_membership(
     lang = _clean_lang(target_profile.get("lang_code") or "tr")
 
     try:
-        meeting_resp = (
-            supabase
-            .from_("meetings")
-            .select("meeting_code")
-            .eq("id", body.room_id)
-            .maybe_single()
-            .execute()
-        )
-        meeting_code = _clean(meeting_resp.data.get("meeting_code") if meeting_resp.data else "")
-        if not meeting_code:
-            raise HTTPException(status_code=404, detail="Meeting code bulunamadı")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"meeting_code_fetch_failed: {e}")
-
-    try:
-        rpc = supabase.rpc(
-            "join_meeting",
-            {
-                "p_meeting_code": meeting_code,
-                "p_user_id": target_user_id,
-                "p_member_no": target_member_no,
-                "p_display_name": display_name,
-                "p_avatar_url": avatar_url,
-                "p_lang_code": lang,
-            },
-        ).execute()
-
-        row = (rpc.data or [{}])[0]
-        return {
-            "ok": True,
-            "meeting_id": row.get("meeting_id") or body.room_id,
-            "joined_now": bool(row.get("joined", True)),
-            "member_no": target_member_no,
-            "display_name": display_name,
-        }
-    except Exception:
-        pass
-
-    try:
         color_key = _pick_next_color_key(body.room_id)
         supabase.from_("meeting_participants").insert(
             {
@@ -736,9 +695,6 @@ def send_message(
     user = _auth_user(authorization)
     user_id = str(user["id"])
 
-    if not body.room_id:
-        raise HTTPException(status_code=400, detail="room_id boş")
-
     participant = _participant_room(body.room_id, user_id)
     if not participant:
         raise HTTPException(status_code=403, detail="Bu meeting'e erişiminiz yok")
@@ -746,23 +702,6 @@ def send_message(
     text = _clean(body.text)
     if not text:
         raise HTTPException(status_code=400, detail="Mesaj boş olamaz")
-
-    try:
-        rpc = supabase.rpc(
-            "send_meeting_message",
-            {
-                "p_meeting_id": body.room_id,
-                "p_user_id": user_id,
-                "p_original_text": text,
-            },
-        ).execute()
-
-        return {
-            "ok": True,
-            "message_id": rpc.data,
-        }
-    except Exception:
-        pass
 
     try:
         insert_resp = supabase.from_("meeting_messages").insert(
@@ -800,24 +739,6 @@ def update_language(
         raise HTTPException(status_code=403, detail="Bu meeting'e erişiminiz yok")
 
     try:
-        rpc = supabase.rpc(
-            "update_meeting_language",
-            {
-                "p_meeting_id": body.room_id,
-                "p_user_id": user_id,
-                "p_lang_code": _clean_lang(body.lang),
-            },
-        ).execute()
-
-        return {
-            "ok": True,
-            "updated": bool(rpc.data),
-            "lang": _clean_lang(body.lang),
-        }
-    except Exception:
-        pass
-
-    try:
         supabase.from_("meeting_participants").update(
             {"lang_code": _clean_lang(body.lang)}
         ).eq("meeting_id", body.room_id).eq("user_id", user_id).execute()
@@ -846,40 +767,11 @@ def leave_meeting(
     was_host = bool(participant.get("is_host"))
 
     try:
-        rpc = supabase.rpc(
-            "leave_meeting",
-            {
-                "p_meeting_id": body.room_id,
-                "p_user_id": user_id,
-            },
-        ).execute()
-
-        if was_host:
-            new_host = _promote_next_host(body.room_id)
-            if new_host:
-                _insert_system_message(
-                    body.room_id,
-                    new_host.get("user_id"),
-                    new_host.get("member_no"),
-                    new_host.get("display_name"),
-                    new_host.get("lang_code"),
-                    new_host.get("color_key"),
-                    "host_changed",
-                    f'{new_host.get("display_name") or "Kullanıcı"} artık yönetici',
-                )
-
-        return {
-            "ok": True,
-            "left": bool(rpc.data) if rpc is not None else True,
-        }
-    except Exception:
-        pass
-
-    try:
         supabase.from_("meeting_participants").update(
             {
                 "is_active": False,
                 "is_host": False,
+                "left_at": _now_iso(),
             }
         ).eq("meeting_id", body.room_id).eq("user_id", user_id).execute()
 
@@ -914,3 +806,86 @@ def leave_meeting(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"leave_meeting_failed: {e}")
+
+
+@router.post("/remove-participant")
+def remove_participant(
+    body: RemoveParticipantBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = _auth_user(authorization)
+    me = _participant_room(body.room_id, str(user["id"]))
+
+    if not me or not me.get("is_host"):
+        raise HTTPException(status_code=403, detail="Bu işlem için yönetici olmalısınız")
+
+    if str(body.target_user_id) == str(user["id"]):
+        raise HTTPException(status_code=400, detail="Yönetici kendini çıkaramaz")
+
+    target = _participant_room(body.room_id, body.target_user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Katılımcı bulunamadı")
+
+    try:
+        supabase.from_("meeting_participants").update(
+            {
+                "is_active": False,
+                "is_host": False,
+                "left_at": _now_iso(),
+            }
+        ).eq("meeting_id", body.room_id).eq("user_id", body.target_user_id).execute()
+
+        _insert_system_message(
+            body.room_id,
+            body.target_user_id,
+            target.get("member_no"),
+            target.get("display_name"),
+            target.get("lang_code"),
+            target.get("color_key"),
+            "removed",
+            f'{target.get("display_name") or "Kullanıcı"} toplantıdan çıkarıldı',
+        )
+
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"remove_participant_failed: {e}")
+
+
+@router.post("/cancel")
+def cancel_meeting(
+    body: CancelMeetingBody,
+    authorization: Optional[str] = Header(default=None),
+):
+    user = _auth_user(authorization)
+    me = _participant_room(body.room_id, str(user["id"]))
+
+    if not me or not me.get("is_host"):
+        raise HTTPException(status_code=403, detail="Bu işlem için yönetici olmalısınız")
+
+    try:
+        supabase.from_("meetings").update(
+            {"status": "cancelled"}
+        ).eq("id", body.room_id).execute()
+
+        supabase.from_("meeting_participants").update(
+            {
+                "is_active": False,
+                "is_host": False,
+                "left_at": _now_iso(),
+            }
+        ).eq("meeting_id", body.room_id).execute()
+
+        _insert_system_message(
+            body.room_id,
+            str(user["id"]),
+            me.get("member_no"),
+            me.get("display_name"),
+            me.get("lang_code"),
+            me.get("color_key"),
+            "cancelled",
+            "Toplantı iptal edildi",
+        )
+
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"cancel_meeting_failed: {e}")
