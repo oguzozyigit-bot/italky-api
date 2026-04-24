@@ -23,8 +23,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # MODELS
 # =========================================================
 class BootstrapBody(BaseModel):
-    membership_no: str
-    display_name: str
+    membership_no: str | None = None
+    display_name: str | None = None
     avatar_url: str | None = None
     lang: str = "tr"
 
@@ -114,13 +114,13 @@ def _build_member_no(user: dict[str, Any], profile: dict[str, Any] | None) -> st
     meta = user.get("user_metadata") or {}
     v = _first_nonempty(
         profile.get("member_no") if profile else None,
-        profile.get("user_no") if profile else None,
-        profile.get("public_user_id") if profile else None,
-        profile.get("short_id") if profile else None,
+        profile.get("user_key") if profile else None,
+        profile.get("uid") if profile else None,
+        profile.get("chat_code") if profile else None,
         meta.get("member_no"),
-        meta.get("user_no"),
-        meta.get("public_user_id"),
-        meta.get("short_id"),
+        meta.get("user_key"),
+        meta.get("uid"),
+        meta.get("chat_code"),
     )
     if v:
         return v
@@ -289,6 +289,35 @@ def _ensure_creator_participant(
         raise HTTPException(status_code=500, detail=f"host_participant_insert_failed: {e}")
 
 
+def _promote_next_host(room_id: str) -> dict[str, Any] | None:
+    """
+    Host çıkarsa aktif kalanlar içinden joined_at'e göre en eski kullanıcı yeni host olsun.
+    """
+    try:
+        resp = (
+            supabase
+            .from_("meeting_participants")
+            .select("*")
+            .eq("meeting_id", room_id)
+            .eq("is_active", True)
+            .order("joined_at", desc=False)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            return None
+
+        new_host = rows[0]
+        supabase.from_("meeting_participants").update(
+            {"is_host": True}
+        ).eq("meeting_id", room_id).eq("user_id", new_host.get("user_id")).execute()
+
+        return new_host
+    except Exception:
+        return None
+
+
 # =========================================================
 # ENDPOINTS
 # =========================================================
@@ -433,6 +462,7 @@ def bootstrap_meeting(
             .select("*")
             .eq("meeting_id", existing_room_id)
             .eq("is_active", True)
+            .order("is_host", desc=True)
             .order("joined_at", desc=False)
             .execute()
         )
@@ -508,6 +538,7 @@ def room_state(
             .select("*")
             .eq("meeting_id", room_id)
             .eq("is_active", True)
+            .order("is_host", desc=True)
             .order("joined_at", desc=False)
             .execute()
         )
@@ -585,7 +616,7 @@ def join_meeting_by_membership(
             .from_("profiles")
             .select("*")
             .or_(
-                f"member_no.eq.{target_member_no},user_no.eq.{target_member_no},public_user_id.eq.{target_member_no},short_id.eq.{target_member_no}"
+                f"member_no.eq.{target_member_no},user_key.eq.{target_member_no},uid.eq.{target_member_no},chat_code.eq.{target_member_no}"
             )
             .limit(1)
             .execute()
@@ -706,7 +737,7 @@ def send_message(
     user_id = str(user["id"])
 
     if not body.room_id:
-      raise HTTPException(status_code=400, detail="room_id boş")
+        raise HTTPException(status_code=400, detail="room_id boş")
 
     participant = _participant_room(body.room_id, user_id)
     if not participant:
@@ -812,6 +843,8 @@ def leave_meeting(
     if not participant:
         return {"ok": True, "left": False}
 
+    was_host = bool(participant.get("is_host"))
+
     try:
         rpc = supabase.rpc(
             "leave_meeting",
@@ -821,9 +854,23 @@ def leave_meeting(
             },
         ).execute()
 
+        if was_host:
+            new_host = _promote_next_host(body.room_id)
+            if new_host:
+                _insert_system_message(
+                    body.room_id,
+                    new_host.get("user_id"),
+                    new_host.get("member_no"),
+                    new_host.get("display_name"),
+                    new_host.get("lang_code"),
+                    new_host.get("color_key"),
+                    "host_changed",
+                    f'{new_host.get("display_name") or "Kullanıcı"} artık yönetici',
+                )
+
         return {
             "ok": True,
-            "left": bool(rpc.data),
+            "left": bool(rpc.data) if rpc is not None else True,
         }
     except Exception:
         pass
@@ -832,6 +879,7 @@ def leave_meeting(
         supabase.from_("meeting_participants").update(
             {
                 "is_active": False,
+                "is_host": False,
             }
         ).eq("meeting_id", body.room_id).eq("user_id", user_id).execute()
 
@@ -845,6 +893,20 @@ def leave_meeting(
             "left",
             f'{participant.get("display_name") or "Kullanıcı"} ayrıldı',
         )
+
+        if was_host:
+            new_host = _promote_next_host(body.room_id)
+            if new_host:
+                _insert_system_message(
+                    body.room_id,
+                    new_host.get("user_id"),
+                    new_host.get("member_no"),
+                    new_host.get("display_name"),
+                    new_host.get("lang_code"),
+                    new_host.get("color_key"),
+                    "host_changed",
+                    f'{new_host.get("display_name") or "Kullanıcı"} artık yönetici',
+                )
 
         return {
             "ok": True,
