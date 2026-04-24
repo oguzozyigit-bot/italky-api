@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from supabase import Client, create_client
 
 router = APIRouter(prefix="/api/meeting", tags=["meeting"])
@@ -21,52 +22,54 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # =========================================================
 # MODELS
 # =========================================================
-class CreateMeetingBody(BaseModel):
-    title: str = Field(default="Yeni Meeting", max_length=120)
-    lang_code: str = Field(default="tr", max_length=12)
+class BootstrapBody(BaseModel):
+    membership_no: str
+    display_name: str
+    avatar_url: str | None = None
+    lang: str = "tr"
 
 
-class JoinMeetingBody(BaseModel):
-    meeting_code: str = Field(min_length=4, max_length=32)
-    member_no: str = Field(min_length=1, max_length=64)
-    lang_code: str = Field(default="tr", max_length=12)
+class JoinBody(BaseModel):
+    room_id: str
+    target_membership_no: str
+    inviter_membership_no: str | None = None
 
 
-class SendMessageBody(BaseModel):
-    text: str = Field(min_length=1, max_length=5000)
+class MessageBody(BaseModel):
+    room_id: str
+    text: str
+    sender_lang: str = "tr"
+    target_lang: str = "tr"
 
 
-class UpdateLanguageBody(BaseModel):
-    lang_code: str = Field(min_length=2, max_length=12)
+class LanguageBody(BaseModel):
+    room_id: str
+    lang: str
 
 
-class LeaveMeetingBody(BaseModel):
-    meeting_id: str
+class LeaveBody(BaseModel):
+    room_id: str
 
 
 # =========================================================
 # HELPERS
 # =========================================================
-def _clean_lang(v: str | None) -> str:
-    raw = str(v or "tr").strip().lower()
-    return raw[:12] or "tr"
-
-
-def _clean_text(v: str | None) -> str:
+def _clean(v: Any) -> str:
     return " ".join(str(v or "").strip().split())
 
 
-def _clean_code(v: str | None) -> str:
-    return str(v or "").strip().upper()
+def _clean_lang(v: Any) -> str:
+    s = str(v or "tr").strip().lower()
+    return s[:12] or "tr"
 
 
 def _get_bearer(authorization: str | None) -> str:
     raw = str(authorization or "").strip()
     if not raw.lower().startswith("bearer "):
-      raise HTTPException(status_code=401, detail="Missing bearer token")
+        raise HTTPException(status_code=401, detail="Missing bearer token")
     token = raw[7:].strip()
     if not token:
-      raise HTTPException(status_code=401, detail="Empty bearer token")
+        raise HTTPException(status_code=401, detail="Empty bearer token")
     return token
 
 
@@ -92,31 +95,6 @@ def _first_nonempty(*values: Any) -> str | None:
     return None
 
 
-def _cached_user() -> dict[str, Any]:
-    # Backend tarafında local storage yok; boş döner.
-    return {}
-
-
-def _build_member_no(user: dict[str, Any], profile: dict[str, Any] | None) -> str:
-    meta = user.get("user_metadata") or {}
-    cached = _cached_user()
-    member_no = _first_nonempty(
-        profile.get("member_no") if profile else None,
-        profile.get("membership_no") if profile else None,
-        profile.get("user_no") if profile else None,
-        profile.get("public_user_id") if profile else None,
-        profile.get("short_id") if profile else None,
-        meta.get("membership_no"),
-        meta.get("member_no"),
-        cached.get("membership_no"),
-        cached.get("uyelik_no"),
-    )
-    if member_no:
-        return member_no
-    uid = str(user.get("id") or "").replace("-", "").upper()
-    return uid[:8] if uid else "UNKNOWN"
-
-
 def _get_profile(user_id: str) -> dict[str, Any] | None:
     try:
         resp = (
@@ -132,11 +110,33 @@ def _get_profile(user_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _build_member_no(user: dict[str, Any], profile: dict[str, Any] | None) -> str:
+    meta = user.get("user_metadata") or {}
+    v = _first_nonempty(
+        profile.get("member_no") if profile else None,
+        profile.get("membership_no") if profile else None,
+        profile.get("user_no") if profile else None,
+        profile.get("public_user_id") if profile else None,
+        profile.get("short_id") if profile else None,
+        meta.get("membership_no"),
+        meta.get("member_no"),
+    )
+    if v:
+        return v
+    uid = str(user.get("id") or "").replace("-", "").upper()
+    return uid[:8] if uid else "UNKNOWN"
+
+
 def _display_name(user: dict[str, Any], profile: dict[str, Any] | None) -> str:
     meta = user.get("user_metadata") or {}
     return (
         _first_nonempty(
+            profile.get("hitap") if profile else None,
+            profile.get("display_name") if profile else None,
             profile.get("full_name") if profile else None,
+            profile.get("name") if profile else None,
+            meta.get("hitap"),
+            meta.get("display_name"),
             meta.get("full_name"),
             meta.get("name"),
             user.get("email", "").split("@")[0] if user.get("email") else None,
@@ -149,20 +149,38 @@ def _avatar_url(user: dict[str, Any], profile: dict[str, Any] | None) -> str | N
     meta = user.get("user_metadata") or {}
     return _first_nonempty(
         profile.get("avatar_url") if profile else None,
+        profile.get("picture") if profile else None,
+        profile.get("avatar") if profile else None,
         meta.get("avatar_url"),
         meta.get("picture"),
+        meta.get("avatar"),
     )
 
 
-def _meeting_for_user(meeting_id: str, user_id: str) -> bool:
+def _participant_room(room_id: str, user_id: str) -> dict[str, Any] | None:
     try:
         resp = (
             supabase
             .from_("meeting_participants")
-            .select("id")
-            .eq("meeting_id", meeting_id)
+            .select("*")
+            .eq("meeting_id", room_id)
             .eq("user_id", user_id)
-            .limit(1)
+            .maybe_single()
+            .execute()
+        )
+        return resp.data if resp and getattr(resp, "data", None) else None
+    except Exception:
+        return None
+
+
+def _room_exists(room_id: str) -> bool:
+    try:
+        resp = (
+            supabase
+            .from_("meetings")
+            .select("id")
+            .eq("id", room_id)
+            .maybe_single()
             .execute()
         )
         return bool(resp.data)
@@ -170,12 +188,131 @@ def _meeting_for_user(meeting_id: str, user_id: str) -> bool:
         return False
 
 
+def _translate_for_viewer(text: str, sender_lang: str, viewer_lang: str) -> str:
+    text = _clean(text)
+    if not text:
+        return ""
+    sender_lang = _clean_lang(sender_lang)
+    viewer_lang = _clean_lang(viewer_lang)
+    if sender_lang == viewer_lang:
+        return text
+    return f"[{viewer_lang.upper()}] {text}"
+
+
+def _participant_public(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "membership_no": row.get("member_no"),
+        "display_name": row.get("display_name"),
+        "avatar_url": row.get("avatar_url"),
+        "lang": row.get("lang_code") or "tr",
+        "is_host": bool(row.get("is_host")),
+        "is_active": bool(row.get("is_active")),
+        "joined_at": row.get("joined_at"),
+        "last_seen_at": row.get("last_seen_at"),
+    }
+
+
+def _generate_meeting_code(seed: str) -> str:
+    base = (seed or uuid.uuid4().hex).replace("-", "").upper()
+    return f"M{base[:7]}"
+
+
+def _pick_next_color_key(room_id: str) -> str:
+    palette = ["c1", "c2", "c3", "c4", "c5", "c6"]
+    try:
+        resp = (
+            supabase
+            .from_("meeting_participants")
+            .select("id", count="exact")
+            .eq("meeting_id", room_id)
+            .execute()
+        )
+        count = int(getattr(resp, "count", 0) or 0)
+        return palette[count % len(palette)]
+    except Exception:
+        return "c1"
+
+
+def _insert_system_message(
+    room_id: str,
+    sender_user_id: str | None,
+    sender_member_no: str | None,
+    sender_name: str | None,
+    sender_lang: str | None,
+    color_key: str | None,
+    event_type: str,
+    text: str,
+) -> None:
+    try:
+        supabase.from_("meeting_messages").insert(
+            {
+                "meeting_id": room_id,
+                "sender_user_id": sender_user_id,
+                "sender_member_no": sender_member_no,
+                "sender_name": sender_name,
+                "sender_lang": sender_lang,
+                "color_key": color_key,
+                "message_type": "system",
+                "event_type": event_type,
+                "original_text": text,
+            }
+        ).execute()
+    except Exception:
+        pass
+
+
+def _ensure_creator_participant(
+    room_id: str,
+    user_id: str,
+    member_no: str,
+    display_name: str,
+    avatar_url: str | None,
+    lang: str,
+) -> None:
+    existing = _participant_room(room_id, user_id)
+    if existing:
+        try:
+            supabase.from_("meeting_participants").update(
+                {
+                    "member_no": member_no,
+                    "display_name": display_name,
+                    "avatar_url": avatar_url,
+                    "lang_code": lang,
+                    "is_host": True,
+                    "is_active": True,
+                    "left_at": None,
+                }
+            ).eq("meeting_id", room_id).eq("user_id", user_id).execute()
+        except Exception:
+            pass
+        return
+
+    try:
+        supabase.from_("meeting_participants").insert(
+            {
+                "meeting_id": room_id,
+                "user_id": user_id,
+                "member_no": member_no,
+                "display_name": display_name,
+                "avatar_url": avatar_url,
+                "lang_code": lang,
+                "color_key": "c1",
+                "is_host": True,
+                "is_active": True,
+            }
+        ).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"host_participant_insert_failed: {e}")
+
+
 # =========================================================
 # ENDPOINTS
 # =========================================================
-@router.post("/create")
-def create_meeting(
-    body: CreateMeetingBody,
+@router.post("/bootstrap")
+def bootstrap_meeting(
+    body: BootstrapBody,
     authorization: Optional[str] = Header(default=None),
 ):
     user = _auth_user(authorization)
@@ -185,280 +322,239 @@ def create_meeting(
     member_no = _build_member_no(user, profile)
     display_name = _display_name(user, profile)
     avatar_url = _avatar_url(user, profile)
-    lang_code = _clean_lang(body.lang_code)
-    title = _clean_text(body.title) or "Yeni Meeting"
+    lang = _clean_lang(body.lang)
 
-    try:
-        rpc = supabase.rpc(
-            "create_meeting",
-            {
-                "p_host_user_id": user_id,
-                "p_host_member_no": member_no,
-                "p_host_display_name": display_name,
-                "p_host_avatar_url": avatar_url,
-                "p_lang_code": lang_code,
-                "p_title": title,
-            },
-        ).execute()
+    existing_room_id = None
+    existing_room_code = None
 
-        row = (rpc.data or [{}])[0]
-        return {
-            "ok": True,
-            "meeting_id": row.get("meeting_id"),
-            "meeting_code": row.get("meeting_code"),
-            "title": row.get("title"),
-            "host_member_no": member_no,
-            "host_display_name": display_name,
-            "lang_code": lang_code,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"create_meeting_failed: {e}")
-
-
-@router.post("/join")
-def join_meeting(
-    body: JoinMeetingBody,
-    authorization: Optional[str] = Header(default=None),
-):
-    user = _auth_user(authorization)
-    user_id = str(user["id"])
-    profile = _get_profile(user_id)
-
-    actual_member_no = _build_member_no(user, profile)
-    display_name = _display_name(user, profile)
-    avatar_url = _avatar_url(user, profile)
-
-    # Güvenlik için kullanıcının kendi gerçek üyelik numarası ile eşleşmesini bekliyoruz.
-    requested_member_no = _clean_text(body.member_no)
-    if requested_member_no and requested_member_no != actual_member_no:
-        raise HTTPException(
-            status_code=400,
-            detail="Girilen üyelik numarası aktif kullanıcıya ait değil",
-        )
-
-    try:
-        rpc = supabase.rpc(
-            "join_meeting",
-            {
-                "p_meeting_code": _clean_code(body.meeting_code),
-                "p_user_id": user_id,
-                "p_member_no": actual_member_no,
-                "p_display_name": display_name,
-                "p_avatar_url": avatar_url,
-                "p_lang_code": _clean_lang(body.lang_code),
-            },
-        ).execute()
-
-        row = (rpc.data or [{}])[0]
-        return {
-            "ok": True,
-            "meeting_id": row.get("meeting_id"),
-            "joined_now": bool(row.get("joined")),
-            "member_no": actual_member_no,
-            "display_name": display_name,
-        }
-    except Exception as e:
-        detail = str(e)
-        if "MEETING_NOT_FOUND" in detail:
-            raise HTTPException(status_code=404, detail="Meeting bulunamadı")
-        raise HTTPException(status_code=500, detail=f"join_meeting_failed: {e}")
-
-
-@router.post("/leave")
-def leave_meeting(
-    body: LeaveMeetingBody,
-    authorization: Optional[str] = Header(default=None),
-):
-    user = _auth_user(authorization)
-    user_id = str(user["id"])
-
-    if not _meeting_for_user(body.meeting_id, user_id):
-        raise HTTPException(status_code=403, detail="Bu meeting'e erişiminiz yok")
-
-    try:
-        rpc = supabase.rpc(
-            "leave_meeting",
-            {
-                "p_meeting_id": body.meeting_id,
-                "p_user_id": user_id,
-            },
-        ).execute()
-
-        return {
-            "ok": True,
-            "left": bool(rpc.data),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"leave_meeting_failed: {e}")
-
-
-@router.get("/{meeting_id}")
-def get_meeting(
-    meeting_id: str,
-    authorization: Optional[str] = Header(default=None),
-):
-    user = _auth_user(authorization)
-    user_id = str(user["id"])
-
-    if not _meeting_for_user(meeting_id, user_id):
-        raise HTTPException(status_code=403, detail="Bu meeting'e erişiminiz yok")
-
-    try:
-        meeting_resp = (
-            supabase
-            .from_("meeting_overview")
-            .select("*")
-            .eq("id", meeting_id)
-            .maybe_single()
-            .execute()
-        )
-        meeting = meeting_resp.data or None
-        if not meeting:
-            raise HTTPException(status_code=404, detail="Meeting bulunamadı")
-
-        participants_resp = (
-            supabase
-            .from_("meeting_participants")
-            .select(
-                "id, meeting_id, user_id, member_no, display_name, avatar_url, "
-                "lang_code, color_key, is_host, is_active, joined_at, last_seen_at, left_at"
-            )
-            .eq("meeting_id", meeting_id)
-            .order("joined_at", desc=False)
-            .execute()
-        )
-
-        return {
-            "ok": True,
-            "meeting": meeting,
-            "participants": participants_resp.data or [],
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"get_meeting_failed: {e}")
-
-
-@router.get("/{meeting_id}/messages")
-def get_meeting_messages(
-    meeting_id: str,
-    authorization: Optional[str] = Header(default=None),
-):
-    user = _auth_user(authorization)
-    user_id = str(user["id"])
-
-    if not _meeting_for_user(meeting_id, user_id):
-        raise HTTPException(status_code=403, detail="Bu meeting'e erişiminiz yok")
-
+    # 1) Aktif host olduğu oda var mı?
     try:
         participant_resp = (
             supabase
             .from_("meeting_participants")
-            .select("lang_code")
-            .eq("meeting_id", meeting_id)
+            .select("meeting_id,is_host,is_active")
             .eq("user_id", user_id)
-            .maybe_single()
+            .eq("is_host", True)
+            .eq("is_active", True)
+            .order("joined_at", desc=True)
+            .limit(1)
             .execute()
         )
-        viewer_lang = _clean_lang((participant_resp.data or {}).get("lang_code") or "tr")
+        rows = participant_resp.data or []
+        if rows:
+            existing_room_id = rows[0].get("meeting_id")
+    except Exception:
+        existing_room_id = None
 
+    # 2) Odaya ait meeting_code bul
+    if existing_room_id:
+        try:
+            meeting_resp = (
+                supabase
+                .from_("meetings")
+                .select("id,meeting_code,title")
+                .eq("id", existing_room_id)
+                .maybe_single()
+                .execute()
+            )
+            if meeting_resp.data:
+                existing_room_code = meeting_resp.data.get("meeting_code")
+        except Exception:
+            existing_room_code = None
+
+    # 3) RPC ile oluşturmayı dene
+    if not existing_room_id:
+        try:
+            rpc = supabase.rpc(
+                "create_meeting",
+                {
+                    "p_host_user_id": user_id,
+                    "p_host_member_no": member_no,
+                    "p_host_display_name": display_name,
+                    "p_host_avatar_url": avatar_url,
+                    "p_lang_code": lang,
+                    "p_title": "Yeni Meeting",
+                },
+            ).execute()
+
+            row = (rpc.data or [{}])[0]
+            existing_room_id = row.get("meeting_id")
+            existing_room_code = row.get("meeting_code")
+        except Exception:
+            existing_room_id = None
+            existing_room_code = None
+
+    # 4) RPC çalışmadıysa fallback: direkt tabloya insert
+    if not existing_room_id:
+        try:
+            meeting_code = _generate_meeting_code(member_no or user_id)
+            meeting_insert = (
+                supabase
+                .from_("meetings")
+                .insert(
+                    {
+                        "meeting_code": meeting_code,
+                        "title": "Yeni Meeting",
+                        "host_user_id": user_id,
+                        "status": "active",
+                    }
+                )
+                .execute()
+            )
+
+            inserted = (meeting_insert.data or [{}])[0]
+            existing_room_id = inserted.get("id")
+            existing_room_code = inserted.get("meeting_code") or meeting_code
+
+            if existing_room_id:
+                _ensure_creator_participant(
+                    existing_room_id,
+                    user_id,
+                    member_no,
+                    display_name,
+                    avatar_url,
+                    lang,
+                )
+                _insert_system_message(
+                    existing_room_id,
+                    user_id,
+                    member_no,
+                    display_name,
+                    lang,
+                    "c1",
+                    "joined",
+                    f"{display_name} katıldı",
+                )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"meeting_create_fallback_failed: {e}")
+
+    # 5) Hâlâ room yoksa sert hata
+    if not existing_room_id:
+        raise HTTPException(status_code=500, detail="room_id üretilemedi")
+
+    # 6) Dil güncelle
+    try:
+        supabase.rpc(
+            "update_meeting_language",
+            {
+                "p_meeting_id": existing_room_id,
+                "p_user_id": user_id,
+                "p_lang_code": lang,
+            },
+        ).execute()
+    except Exception:
+        try:
+            supabase.from_("meeting_participants").update(
+                {"lang_code": lang}
+            ).eq("meeting_id", existing_room_id).eq("user_id", user_id).execute()
+        except Exception:
+            pass
+
+    # 7) Katılımcıları çek
+    try:
+        participants_resp = (
+            supabase
+            .from_("meeting_participants")
+            .select("*")
+            .eq("meeting_id", existing_room_id)
+            .eq("is_active", True)
+            .order("joined_at", desc=False)
+            .execute()
+        )
+        participants = [_participant_public(x) for x in (participants_resp.data or [])]
+    except Exception:
+        participants = []
+
+    # 8) Mesajları çek
+    try:
         messages_resp = (
             supabase
             .from_("meeting_messages")
-            .select(
-                "id, meeting_id, sender_user_id, sender_member_no, sender_name, "
-                "sender_lang, color_key, message_type, event_type, original_text, created_at"
-            )
-            .eq("meeting_id", meeting_id)
+            .select("*")
+            .eq("meeting_id", existing_room_id)
             .order("created_at", desc=False)
             .execute()
         )
 
-        rows = messages_resp.data or []
-        for row in rows:
-            original_text = row.get("original_text") or ""
-            original_lang = _clean_lang(row.get("sender_lang") or "tr")
-            if row.get("message_type") == "system":
-                row["translated_text"] = original_text
-            else:
-                row["translated_text"] = (
-                    original_text
-                    if original_lang == viewer_lang
-                    else f"[{viewer_lang.upper()}] {original_text}"
-                )
+        messages = []
+        for row in (messages_resp.data or []):
+            sender_lang = _clean_lang(row.get("sender_lang") or "tr")
+            original_text = _clean(row.get("original_text"))
+            translated = (
+                original_text
+                if row.get("message_type") == "system"
+                else _translate_for_viewer(original_text, sender_lang, lang)
+            )
+            messages.append(
+                {
+                    "id": row.get("id"),
+                    "sender_id": row.get("sender_user_id"),
+                    "sender_name": row.get("sender_name"),
+                    "sender_member_no": row.get("sender_member_no"),
+                    "message_type": row.get("message_type"),
+                    "event_type": row.get("event_type"),
+                    "original_text": original_text,
+                    "translated_text": translated,
+                    "created_at": row.get("created_at"),
+                }
+            )
+    except Exception:
+        messages = []
 
-        return {
-            "ok": True,
-            "viewer_lang": viewer_lang,
-            "messages": rows,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"get_messages_failed: {e}")
+    return {
+        "ok": True,
+        "room_id": existing_room_id,
+        "room_code": existing_room_code,
+        "participants": participants,
+        "messages": messages,
+    }
 
 
-@router.post("/{meeting_id}/message")
-def send_meeting_message(
-    meeting_id: str,
-    body: SendMessageBody,
+@router.get("/state")
+def room_state(
+    room_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
     user = _auth_user(authorization)
     user_id = str(user["id"])
 
-    if not _meeting_for_user(meeting_id, user_id):
+    participant = _participant_room(room_id, user_id)
+    if not participant:
         raise HTTPException(status_code=403, detail="Bu meeting'e erişiminiz yok")
 
-    text = _clean_text(body.text)
-    if not text:
-        raise HTTPException(status_code=400, detail="Mesaj boş olamaz")
+    viewer_lang = _clean_lang(participant.get("lang_code") or "tr")
 
     try:
-        rpc = supabase.rpc(
-            "send_meeting_message",
-            {
-                "p_meeting_id": meeting_id,
-                "p_user_id": user_id,
-                "p_original_text": text,
-            },
-        ).execute()
-
-        return {
-            "ok": True,
-            "message_id": rpc.data,
-        }
+        participants_resp = (
+            supabase
+            .from_("meeting_participants")
+            .select("*")
+            .eq("meeting_id", room_id)
+            .eq("is_active", True)
+            .order("joined_at", desc=False)
+            .execute()
+        )
+        participants = [_participant_public(x) for x in (participants_resp.data or [])]
     except Exception as e:
-        detail = str(e)
-        if "PARTICIPANT_NOT_FOUND" in detail:
-            raise HTTPException(status_code=404, detail="Katılımcı bulunamadı")
-        raise HTTPException(status_code=500, detail=f"send_message_failed: {e}")
-
-
-@router.patch("/{meeting_id}/my-language")
-def update_my_meeting_language(
-    meeting_id: str,
-    body: UpdateLanguageBody,
-    authorization: Optional[str] = Header(default=None),
-):
-    user = _auth_user(authorization)
-    user_id = str(user["id"])
-
-    if not _meeting_for_user(meeting_id, user_id):
-        raise HTTPException(status_code=403, detail="Bu meeting'e erişiminiz yok")
+        raise HTTPException(status_code=500, detail=f"participants_fetch_failed: {e}")
 
     try:
-        rpc = supabase.rpc(
-            "update_meeting_language",
-            {
-                "p_meeting_id": meeting_id,
-                "p_user_id": user_id,
-                "p_lang_code": _clean_lang(body.lang_code),
-            },
-        ).execute()
+        messages_resp = (
+            supabase
+            .from_("meeting_messages")
+            .select("*")
+            .eq("meeting_id", room_id)
+            .order("created_at", desc=False)
+            .execute()
+        )
 
-        return {
-            "ok": True,
-            "updated": bool(rpc.data),
-            "lang_code": _clean_lang(body.lang_code),
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"update_language_failed: {e}")
+        messages = []
+        for row in (messages_resp.data or []):
+            sender_lang = _clean_lang(row.get("sender_lang") or "tr")
+            original_text = _clean(row.get("original_text"))
+            translated = (
+                original_text
+                if row.get("message_type") == "system"
+                else _translate_for_viewer(original_text, sender_lang, viewer_lang)
+            )
+            messages
