@@ -114,12 +114,13 @@ def _build_member_no(user: dict[str, Any], profile: dict[str, Any] | None) -> st
     meta = user.get("user_metadata") or {}
     v = _first_nonempty(
         profile.get("member_no") if profile else None,
-        profile.get("membership_no") if profile else None,
         profile.get("user_no") if profile else None,
         profile.get("public_user_id") if profile else None,
         profile.get("short_id") if profile else None,
-        meta.get("membership_no"),
         meta.get("member_no"),
+        meta.get("user_no"),
+        meta.get("public_user_id"),
+        meta.get("short_id"),
     )
     if v:
         return v
@@ -173,30 +174,11 @@ def _participant_room(room_id: str, user_id: str) -> dict[str, Any] | None:
         return None
 
 
-def _room_exists(room_id: str) -> bool:
-    try:
-        resp = (
-            supabase
-            .from_("meetings")
-            .select("id")
-            .eq("id", room_id)
-            .maybe_single()
-            .execute()
-        )
-        return bool(resp.data)
-    except Exception:
-        return False
-
-
 def _translate_for_viewer(text: str, sender_lang: str, viewer_lang: str) -> str:
     text = _clean(text)
     if not text:
         return ""
-    sender_lang = _clean_lang(sender_lang)
-    viewer_lang = _clean_lang(viewer_lang)
-    if sender_lang == viewer_lang:
-        return text
-    return f"[{viewer_lang.upper()}] {text}"
+    return text
 
 
 def _participant_public(row: dict[str, Any]) -> dict[str, Any]:
@@ -470,12 +452,15 @@ def bootstrap_meeting(
 
         messages = []
         for row in (messages_resp.data or []):
-            sender_lang = _clean_lang(row.get("sender_lang") or "tr")
             original_text = _clean(row.get("original_text"))
             translated = (
                 original_text
                 if row.get("message_type") == "system"
-                else _translate_for_viewer(original_text, sender_lang, lang)
+                else _translate_for_viewer(
+                    original_text,
+                    row.get("sender_lang") or "tr",
+                    lang,
+                )
             )
             messages.append(
                 {
@@ -542,12 +527,15 @@ def room_state(
 
         messages = []
         for row in (messages_resp.data or []):
-            sender_lang = _clean_lang(row.get("sender_lang") or "tr")
             original_text = _clean(row.get("original_text"))
             translated = (
                 original_text
                 if row.get("message_type") == "system"
-                else _translate_for_viewer(original_text, sender_lang, viewer_lang)
+                else _translate_for_viewer(
+                    original_text,
+                    row.get("sender_lang") or "tr",
+                    viewer_lang,
+                )
             )
             messages.append(
                 {
@@ -597,7 +585,7 @@ def join_meeting_by_membership(
             .from_("profiles")
             .select("*")
             .or_(
-                f"member_no.eq.{target_member_no},membership_no.eq.{target_member_no},user_no.eq.{target_member_no},public_user_id.eq.{target_member_no},short_id.eq.{target_member_no}"
+                f"member_no.eq.{target_member_no},user_no.eq.{target_member_no},public_user_id.eq.{target_member_no},short_id.eq.{target_member_no}"
             )
             .limit(1)
             .execute()
@@ -718,7 +706,7 @@ def send_message(
     user_id = str(user["id"])
 
     if not body.room_id:
-        raise HTTPException(status_code=400, detail="room_id boş")
+      raise HTTPException(status_code=400, detail="room_id boş")
 
     participant = _participant_room(body.room_id, user_id)
     if not participant:
@@ -751,7 +739,7 @@ def send_message(
                 "meeting_id": body.room_id,
                 "sender_user_id": user_id,
                 "sender_member_no": participant.get("member_no"),
-                "sender_name": participant.get("display_name"),
+                "sender_name": participant.get("display_name") or "Kullanıcı",
                 "sender_lang": participant.get("lang_code") or _clean_lang(body.sender_lang),
                 "color_key": participant.get("color_key") or "c1",
                 "message_type": "text",
@@ -844,7 +832,6 @@ def leave_meeting(
         supabase.from_("meeting_participants").update(
             {
                 "is_active": False,
-                "left_at": None,
             }
         ).eq("meeting_id", body.room_id).eq("user_id", user_id).execute()
 
