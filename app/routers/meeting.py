@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -10,6 +11,8 @@ from pydantic import BaseModel
 from supabase import Client, create_client
 
 router = APIRouter(prefix="/api/meeting", tags=["meeting"])
+
+logger = logging.getLogger("meeting-router")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -107,6 +110,7 @@ def _auth_user(authorization: str | None) -> dict[str, Any]:
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("auth_failed")
         raise HTTPException(status_code=401, detail=f"Auth failed: {e}")
 
 
@@ -130,6 +134,7 @@ def _get_profile(user_id: str) -> dict[str, Any] | None:
         )
         return resp.data if resp and getattr(resp, "data", None) else None
     except Exception:
+        logger.exception("get_profile_failed")
         return None
 
 
@@ -194,6 +199,7 @@ def _participant_room(room_id: str, user_id: str) -> dict[str, Any] | None:
         )
         return resp.data if resp and getattr(resp, "data", None) else None
     except Exception:
+        logger.exception("participant_room_lookup_failed")
         return None
 
 
@@ -239,6 +245,7 @@ def _pick_next_color_key(room_id: str) -> str:
         count = int(getattr(resp, "count", 0) or 0)
         return palette[count % len(palette)]
     except Exception:
+        logger.exception("pick_next_color_key_failed")
         return "c1"
 
 
@@ -267,7 +274,7 @@ def _insert_system_message(
             }
         ).execute()
     except Exception:
-        pass
+        logger.exception("insert_system_message_failed")
 
 
 def _ensure_creator_participant(
@@ -298,22 +305,26 @@ def _ensure_creator_participant(
                 }
             ).eq("meeting_id", room_id).eq("user_id", user_id).execute()
         except Exception:
-            pass
+            logger.exception("update_creator_participant_failed")
         return
 
-    supabase.from_("meeting_participants").insert(
-        {
-            "meeting_id": room_id,
-            "user_id": user_id,
-            "member_no": member_no,
-            "display_name": display_name,
-            "avatar_url": avatar_url,
-            "lang_code": lang,
-            "color_key": "c1",
-            "is_host": True,
-            "is_active": True,
-        }
-    ).execute()
+    try:
+        supabase.from_("meeting_participants").insert(
+            {
+                "meeting_id": room_id,
+                "user_id": user_id,
+                "member_no": member_no,
+                "display_name": display_name,
+                "avatar_url": avatar_url,
+                "lang_code": lang,
+                "color_key": "c1",
+                "is_host": True,
+                "is_active": True,
+            }
+        ).execute()
+    except Exception:
+        logger.exception("insert_creator_participant_failed")
+        raise
 
 
 def _promote_next_host(room_id: str) -> dict[str, Any] | None:
@@ -339,6 +350,7 @@ def _promote_next_host(room_id: str) -> dict[str, Any] | None:
 
         return new_host
     except Exception:
+        logger.exception("promote_next_host_failed")
         return None
 
 
@@ -372,6 +384,7 @@ def resolve_meeting(meeting_code: str = Query(...)):
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("resolve_failed")
         raise HTTPException(status_code=500, detail=f"resolve_failed: {e}")
 
 
@@ -407,6 +420,14 @@ def bootstrap_meeting(
         if meeting_at is not None:
             meeting_payload["meeting_at"] = meeting_at
 
+        logger.info(
+            "meeting create payload prepared: user_id=%s code=%s title=%s meeting_at=%s",
+            user_id,
+            meeting_code,
+            title,
+            meeting_at,
+        )
+
         supabase.from_("meetings").insert(meeting_payload).execute()
 
         fetch_inserted = (
@@ -421,6 +442,8 @@ def bootstrap_meeting(
         inserted = fetch_inserted.data or {}
         existing_room_id = inserted.get("id")
         existing_room_code = inserted.get("meeting_code") or meeting_code
+
+        logger.info("meeting fetched after insert: %s", inserted)
 
         if not existing_room_id:
             raise HTTPException(
@@ -451,6 +474,7 @@ def bootstrap_meeting(
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("meeting_create_failed")
         raise HTTPException(status_code=500, detail=f"meeting_create_failed: {e}")
 
     try:
@@ -458,7 +482,7 @@ def bootstrap_meeting(
             {"lang_code": lang}
         ).eq("meeting_id", existing_room_id).eq("user_id", user_id).execute()
     except Exception:
-        pass
+        logger.exception("meeting_participant_language_update_failed")
 
     try:
         participants_resp = (
@@ -472,8 +496,9 @@ def bootstrap_meeting(
             .execute()
         )
         participants = [_participant_public(x) for x in (participants_resp.data or [])]
-    except Exception:
-        participants = []
+    except Exception as e:
+        logger.exception("participants_fetch_failed")
+        raise HTTPException(status_code=500, detail=f"participants_fetch_failed: {e}")
 
     try:
         messages_resp = (
@@ -510,8 +535,9 @@ def bootstrap_meeting(
                     "created_at": row.get("created_at"),
                 }
             )
-    except Exception:
-        messages = []
+    except Exception as e:
+        logger.exception("messages_fetch_failed")
+        raise HTTPException(status_code=500, detail=f"messages_fetch_failed: {e}")
 
     return {
         "ok": True,
@@ -549,6 +575,7 @@ def room_state(
         )
         meeting_row = meeting_resp.data or {}
     except Exception:
+        logger.exception("meeting_state_meeting_fetch_failed")
         meeting_row = {}
 
     try:
@@ -564,6 +591,7 @@ def room_state(
         )
         participants = [_participant_public(x) for x in (participants_resp.data or [])]
     except Exception as e:
+        logger.exception("participants_fetch_failed")
         raise HTTPException(status_code=500, detail=f"participants_fetch_failed: {e}")
 
     try:
@@ -602,6 +630,7 @@ def room_state(
                 }
             )
     except Exception as e:
+        logger.exception("messages_fetch_failed")
         raise HTTPException(status_code=500, detail=f"messages_fetch_failed: {e}")
 
     return {
@@ -651,6 +680,7 @@ def join_meeting_by_membership(
             target_profile = rows[0]
             target_user_id = str(target_profile.get("id") or target_profile.get("user_id") or "")
     except Exception as e:
+        logger.exception("profile_lookup_failed")
         raise HTTPException(status_code=500, detail=f"profile_lookup_failed: {e}")
 
     if not target_profile or not target_user_id:
@@ -709,6 +739,7 @@ def join_meeting_by_membership(
             "display_name": display_name,
         }
     except Exception as e:
+        logger.exception("join_meeting_failed")
         raise HTTPException(status_code=500, detail=f"join_meeting_failed: {e}")
 
 
@@ -748,6 +779,7 @@ def send_message(
             "message_id": row.get("id"),
         }
     except Exception as e:
+        logger.exception("send_message_failed")
         raise HTTPException(status_code=500, detail=f"send_message_failed: {e}")
 
 
@@ -777,6 +809,7 @@ def update_language(
             "lang": _clean_lang(body.lang),
         }
     except Exception as e:
+        logger.exception("update_language_failed")
         raise HTTPException(status_code=500, detail=f"update_language_failed: {e}")
 
 
@@ -833,6 +866,7 @@ def leave_meeting(
             "left": True,
         }
     except Exception as e:
+        logger.exception("leave_meeting_failed")
         raise HTTPException(status_code=500, detail=f"leave_meeting_failed: {e}")
 
 
@@ -876,6 +910,7 @@ def remove_participant(
 
         return {"ok": True}
     except Exception as e:
+        logger.exception("remove_participant_failed")
         raise HTTPException(status_code=500, detail=f"remove_participant_failed: {e}")
 
 
@@ -916,4 +951,5 @@ def cancel_meeting(
 
         return {"ok": True}
     except Exception as e:
+        logger.exception("cancel_meeting_failed")
         raise HTTPException(status_code=500, detail=f"cancel_meeting_failed: {e}")
