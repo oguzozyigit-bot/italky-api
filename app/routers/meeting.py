@@ -227,9 +227,25 @@ def _translate_for_viewer(text: str, sender_lang: str, viewer_lang: str) -> str:
     return text
 
 
-def _generate_meeting_code(seed: str) -> str:
-    base = (seed or uuid.uuid4().hex).replace("-", "").upper()
-    return f"M{base[:7]}"
+def _generate_unique_meeting_code(max_try: int = 10) -> str:
+    for _ in range(max_try):
+        code = f"M{uuid.uuid4().hex[:7].upper()}"
+        try:
+            resp = (
+                supabase
+                .from_("meetings")
+                .select("id")
+                .eq("meeting_code", code)
+                .limit(1)
+                .execute()
+            )
+            rows = resp.data or []
+            if not rows:
+                return code
+        except Exception:
+            logger.exception("meeting_code_lookup_failed")
+            return code
+    raise RuntimeError("unique meeting code üretilemedi")
 
 
 def _pick_next_color_key(room_id: str) -> str:
@@ -409,7 +425,7 @@ def bootstrap_meeting(
     existing_room_code = None
 
     try:
-        meeting_code = _generate_meeting_code(member_no or user_id)
+        meeting_code = _generate_unique_meeting_code()
 
         meeting_payload = {
             "meeting_code": meeting_code,
