@@ -198,20 +198,23 @@ def is_common_greeting_like(text: str, source: str) -> bool:
 
 def contains_forbidden_meta_output(text: str) -> bool:
     s = normalize_text(text).lower()
-    forbidden_markers = [
-        "translation:",
-        "translated text:",
-        "here is the translation",
-        "çeviri:",
-        "işte çeviri",
-        "the translation is",
-        "ai",
-        "model",
-        "gemini",
-        "openai",
-        "google translate",
+
+    forbidden_patterns = [
+        r"\btranslation\s*:",
+        r"\btranslated text\s*:",
+        r"\bhere is the translation\b",
+        r"\bthe translation is\b",
+        r"\bçeviri\s*:",
+        r"\bişte çeviri\b",
+        r"\bgemini\b",
+        r"\bopenai\b",
+        r"\bgoogle translate\b",
+        r"\blanguage model\b",
+        r"\bai model\b",
+        r"\byapay zeka\b",
     ]
-    return any(x in s for x in forbidden_markers)
+
+    return any(re.search(p, s, flags=re.IGNORECASE) for p in forbidden_patterns)
 
 
 def probably_expanded_too_much(src: str, out: str, source: str = "", target: str = "") -> bool:
