@@ -25,6 +25,8 @@ class BootstrapBody(BaseModel):
     display_name: str | None = None
     avatar_url: str | None = None
     lang: str = "tr"
+    title: str | None = None
+    meeting_at: str | None = None
 
 
 class JoinBody(BaseModel):
@@ -69,6 +71,19 @@ def _clean_lang(v: Any) -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_or_none(v: str | None) -> str | None:
+    s = _clean(v)
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return None
 
 
 def _get_bearer(authorization: str | None) -> str:
@@ -194,6 +209,7 @@ def _participant_public(row: dict[str, Any]) -> dict[str, Any]:
         "is_active": bool(row.get("is_active")),
         "joined_at": row.get("joined_at"),
         "last_seen_at": row.get("last_seen_at"),
+        "left_at": row.get("left_at"),
         "color_key": row.get("color_key") or "c1",
     }
 
@@ -274,6 +290,7 @@ def _ensure_creator_participant(
                     "is_host": True,
                     "is_active": True,
                     "left_at": None,
+                    "last_seen_at": _now_iso(),
                 }
             ).eq("meeting_id", room_id).eq("user_id", user_id).execute()
         except Exception:
@@ -333,6 +350,7 @@ def resolve_meeting(meeting_code: str = Query(...)):
             .from_("meetings")
             .select("*")
             .eq("meeting_code", code)
+            .eq("status", "active")
             .maybe_single()
             .execute()
         )
@@ -344,7 +362,8 @@ def resolve_meeting(meeting_code: str = Query(...)):
             "ok": True,
             "room_id": row.get("id"),
             "room_code": row.get("meeting_code"),
-            "title": row.get("title") or "Toplantı"
+            "title": row.get("title") or "Toplantı",
+            "meeting_at": row.get("meeting_at"),
         }
     except HTTPException:
         raise
@@ -366,84 +385,56 @@ def bootstrap_meeting(
     avatar_url = _avatar_url(user, profile)
     lang = _clean_lang(body.lang)
 
+    title = _clean(body.title) or "Yeni Meeting"
+    meeting_at = _parse_iso_or_none(body.meeting_at)
+
+    # Her "oda oluştur" çağrısında yeni oda aç
     existing_room_id = None
     existing_room_code = None
 
     try:
-        participant_resp = (
+        meeting_code = _generate_meeting_code(member_no or user_id)
+        meeting_payload = {
+            "meeting_code": meeting_code,
+            "title": title,
+            "host_user_id": user_id,
+            "status": "active",
+        }
+        if meeting_at is not None:
+            meeting_payload["meeting_at"] = meeting_at
+
+        meeting_insert = (
             supabase
-            .from_("meeting_participants")
-            .select("meeting_id,is_host,is_active")
-            .eq("user_id", user_id)
-            .eq("is_host", True)
-            .eq("is_active", True)
-            .order("joined_at", desc=True)
-            .limit(1)
+            .from_("meetings")
+            .insert(meeting_payload)
             .execute()
         )
-        rows = participant_resp.data or []
-        if rows:
-            existing_room_id = rows[0].get("meeting_id")
-    except Exception:
-        existing_room_id = None
 
-    if existing_room_id:
-        try:
-            meeting_resp = (
-                supabase
-                .from_("meetings")
-                .select("id,meeting_code,title")
-                .eq("id", existing_room_id)
-                .maybe_single()
-                .execute()
+        inserted = (meeting_insert.data or [{}])[0]
+        existing_room_id = inserted.get("id")
+        existing_room_code = inserted.get("meeting_code") or meeting_code
+
+        if existing_room_id:
+            _ensure_creator_participant(
+                existing_room_id,
+                user_id,
+                member_no,
+                display_name,
+                avatar_url,
+                lang,
             )
-            if meeting_resp.data:
-                existing_room_code = meeting_resp.data.get("meeting_code")
-        except Exception:
-            existing_room_code = None
-
-    if not existing_room_id:
-        try:
-            meeting_code = _generate_meeting_code(member_no or user_id)
-            meeting_insert = (
-                supabase
-                .from_("meetings")
-                .insert(
-                    {
-                        "meeting_code": meeting_code,
-                        "title": "Yeni Meeting",
-                        "host_user_id": user_id,
-                        "status": "active",
-                    }
-                )
-                .execute()
+            _insert_system_message(
+                existing_room_id,
+                user_id,
+                member_no,
+                display_name,
+                lang,
+                "c1",
+                "joined",
+                f"{display_name} katıldı",
             )
-
-            inserted = (meeting_insert.data or [{}])[0]
-            existing_room_id = inserted.get("id")
-            existing_room_code = inserted.get("meeting_code") or meeting_code
-
-            if existing_room_id:
-                _ensure_creator_participant(
-                    existing_room_id,
-                    user_id,
-                    member_no,
-                    display_name,
-                    avatar_url,
-                    lang,
-                )
-                _insert_system_message(
-                    existing_room_id,
-                    user_id,
-                    member_no,
-                    display_name,
-                    lang,
-                    "c1",
-                    "joined",
-                    f"{display_name} katıldı",
-                )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"meeting_create_failed: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"meeting_create_failed: {e}")
 
     if not existing_room_id:
         raise HTTPException(status_code=500, detail="room_id üretilemedi")
@@ -512,6 +503,8 @@ def bootstrap_meeting(
         "ok": True,
         "room_id": existing_room_id,
         "room_code": existing_room_code,
+        "title": title,
+        "meeting_at": meeting_at,
         "participants": participants,
         "messages": messages,
     }
@@ -530,6 +523,19 @@ def room_state(
         raise HTTPException(status_code=403, detail="Bu meeting'e erişiminiz yok")
 
     viewer_lang = _clean_lang(participant.get("lang_code") or "tr")
+
+    try:
+        meeting_resp = (
+            supabase
+            .from_("meetings")
+            .select("*")
+            .eq("id", room_id)
+            .maybe_single()
+            .execute()
+        )
+        meeting_row = meeting_resp.data or {}
+    except Exception:
+        meeting_row = {}
 
     try:
         participants_resp = (
@@ -586,6 +592,11 @@ def room_state(
 
     return {
         "ok": True,
+        "room_id": room_id,
+        "room_code": meeting_row.get("meeting_code"),
+        "title": meeting_row.get("title") or "Toplantı",
+        "meeting_at": meeting_row.get("meeting_at"),
+        "status": meeting_row.get("status") or "active",
         "participants": participants,
         "messages": messages,
     }
@@ -740,7 +751,10 @@ def update_language(
 
     try:
         supabase.from_("meeting_participants").update(
-            {"lang_code": _clean_lang(body.lang)}
+            {
+                "lang_code": _clean_lang(body.lang),
+                "last_seen_at": _now_iso(),
+            }
         ).eq("meeting_id", body.room_id).eq("user_id", user_id).execute()
 
         return {
