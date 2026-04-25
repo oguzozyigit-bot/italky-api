@@ -278,6 +278,10 @@ def _ensure_creator_participant(
     avatar_url: str | None,
     lang: str,
 ) -> None:
+    member_no = _clean(member_no) or "UNKNOWN"
+    display_name = _clean(display_name) or "Kullanıcı"
+    lang = _clean_lang(lang)
+
     existing = _participant_room(room_id, user_id)
     if existing:
         try:
@@ -388,12 +392,12 @@ def bootstrap_meeting(
     title = _clean(body.title) or "Yeni Meeting"
     meeting_at = _parse_iso_or_none(body.meeting_at)
 
-    # Her "oda oluştur" çağrısında yeni oda aç
     existing_room_id = None
     existing_room_code = None
 
     try:
         meeting_code = _generate_meeting_code(member_no or user_id)
+
         meeting_payload = {
             "meeting_code": meeting_code,
             "title": title,
@@ -403,41 +407,51 @@ def bootstrap_meeting(
         if meeting_at is not None:
             meeting_payload["meeting_at"] = meeting_at
 
-        meeting_insert = (
+        supabase.from_("meetings").insert(meeting_payload).execute()
+
+        fetch_inserted = (
             supabase
             .from_("meetings")
-            .insert(meeting_payload)
+            .select("*")
+            .eq("meeting_code", meeting_code)
+            .maybe_single()
             .execute()
         )
 
-        inserted = (meeting_insert.data or [{}])[0]
+        inserted = fetch_inserted.data or {}
         existing_room_id = inserted.get("id")
         existing_room_code = inserted.get("meeting_code") or meeting_code
 
-        if existing_room_id:
-            _ensure_creator_participant(
-                existing_room_id,
-                user_id,
-                member_no,
-                display_name,
-                avatar_url,
-                lang,
+        if not existing_room_id:
+            raise HTTPException(
+                status_code=500,
+                detail="meeting_create_failed: insert sonrası meeting bulunamadı",
             )
-            _insert_system_message(
-                existing_room_id,
-                user_id,
-                member_no,
-                display_name,
-                lang,
-                "c1",
-                "joined",
-                f"{display_name} katıldı",
-            )
+
+        _ensure_creator_participant(
+            existing_room_id,
+            user_id,
+            member_no,
+            display_name,
+            avatar_url,
+            lang,
+        )
+
+        _insert_system_message(
+            existing_room_id,
+            user_id,
+            member_no,
+            display_name,
+            lang,
+            "c1",
+            "joined",
+            f"{display_name} katıldı",
+        )
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"meeting_create_failed: {e}")
-
-    if not existing_room_id:
-        raise HTTPException(status_code=500, detail="room_id üretilemedi")
 
     try:
         supabase.from_("meeting_participants").update(
