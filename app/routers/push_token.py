@@ -1,4 +1,4 @@
-# FILE: backend/routes/push_token.py
+# FILE: app/routers/push_token.py
 
 from __future__ import annotations
 
@@ -38,18 +38,15 @@ def save_token(req: SaveTokenReq):
 
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    res = (
-        supabase.table("profiles")
-        .update({
+    supabase.table("profiles").update(
+        {
             "fcm_token": token,
-            "active_session_updated_at": now_iso
-        })
-        .eq("id", user_id)
-        .execute()
-    )
+            "active_session_updated_at": now_iso,
+        }
+    ).eq("id", user_id).execute()
 
     return {
         "ok": True,
+        "saved": True,
         "user_id": user_id,
-        "saved": True
     }
