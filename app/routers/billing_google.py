@@ -1,7 +1,9 @@
+# FILE: billing_google.py
+
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -18,8 +20,21 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-PLAY_SUBSCRIPTION_PRODUCT_ID = "italky_pro"
+# Yeni Play Console abonelik ürün kimliği.
+PLAY_SUBSCRIPTION_PRODUCT_ID = "reklamsiz"
+
+# Eski test / önceki sürümden gelirse sistemi kırmamak için kabul ediyoruz.
+LEGACY_SUBSCRIPTION_PRODUCT_IDS = {
+    "italky_pro",
+}
+
+ALLOWED_SUBSCRIPTION_PRODUCT_IDS = {
+    PLAY_SUBSCRIPTION_PRODUCT_ID,
+    *LEGACY_SUBSCRIPTION_PRODUCT_IDS,
+}
+
 SUBSCRIPTION_WELCOME_BONUS = 5
+DEFAULT_SUBSCRIPTION_DAYS = 365
 
 PRODUCT_TOKENS = {
     "jeton_10": 10,
@@ -59,13 +74,35 @@ def _safe_data(res: Any):
     return getattr(res, "data", None) or (res.get("data") if isinstance(res, dict) else None)
 
 
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _clean_lower(value: Any) -> str:
+    return _clean(value).lower()
+
+
 def _parse_dt(raw: str | None) -> datetime | None:
     if not raw:
         return None
+
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
+
+
+def _canonical_subscription_product_id(product_id: str) -> str:
+    clean = _clean_lower(product_id)
+
+    if clean not in ALLOWED_SUBSCRIPTION_PRODUCT_IDS:
+        raise HTTPException(status_code=400, detail="invalid_subscription_product_id")
+
+    # DB ve access-state tarafında tek isim kullanılacak.
+    return PLAY_SUBSCRIPTION_PRODUCT_ID
 
 
 def _profile_or_404(user_id: str) -> dict[str, Any]:
@@ -80,9 +117,12 @@ def _profile_or_404(user_id: str) -> dict[str, Any]:
         .limit(1)
         .execute()
     )
+
     rows = _safe_data(prof) or []
+
     if not rows:
         raise HTTPException(status_code=404, detail="profile_not_found")
+
     return rows[0] or {}
 
 
@@ -94,6 +134,7 @@ def _get_purchase_owner(purchase_token: str) -> dict[str, Any] | None:
         .limit(1)
         .execute()
     )
+
     rows = _safe_data(existing) or []
     return rows[0] if rows else None
 
@@ -152,7 +193,10 @@ def _insert_wallet_credit_tx(
     ).execute()
 
 
-def _grant_subscription_welcome_bonus_if_needed(user_id: str, purchase_token: str) -> tuple[bool, int]:
+def _grant_subscription_welcome_bonus_if_needed(
+    user_id: str,
+    purchase_token: str
+) -> tuple[bool, int]:
     prof = _profile_or_404(user_id)
 
     already_claimed = bool(prof.get("welcome_bonus_claimed"))
@@ -183,6 +227,7 @@ def _grant_subscription_welcome_bonus_if_needed(user_id: str, purchase_token: st
             "provider": "google_play",
             "purchase_token": purchase_token,
             "bonus_tokens": SUBSCRIPTION_WELCOME_BONUS,
+            "subscription_product_id": PLAY_SUBSCRIPTION_PRODUCT_ID,
         },
     )
 
@@ -191,9 +236,9 @@ def _grant_subscription_welcome_bonus_if_needed(user_id: str, purchase_token: st
 
 @router.post("/api/billing/google/confirm")
 async def billing_google_confirm(req: GoogleBillingConfirmReq):
-    user_id = (req.user_id or "").strip()
-    product_id = (req.product_id or "").strip()
-    purchase_token = (req.purchase_token or "").strip()
+    user_id = _clean(req.user_id)
+    product_id = _clean_lower(req.product_id)
+    purchase_token = _clean(req.purchase_token)
 
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id_required")
@@ -202,22 +247,24 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
     if not purchase_token:
         raise HTTPException(status_code=422, detail="purchase_token_required")
 
-    if product_id == PLAY_SUBSCRIPTION_PRODUCT_ID:
+    if product_id in ALLOWED_SUBSCRIPTION_PRODUCT_IDS:
         raise HTTPException(
             status_code=400,
             detail="subscription_product_must_use_subscription_confirm"
         )
 
     amount = PRODUCT_TOKENS.get(product_id)
+
     if not amount:
         raise HTTPException(status_code=400, detail="invalid_token_product_id")
 
     prof = _profile_or_404(user_id)
-    user_email = str(prof.get("email") or "").strip().lower()
+    user_email = _clean_lower(prof.get("email"))
 
     existing_owner = _get_purchase_owner(purchase_token)
+
     if existing_owner:
-        existing_user_id = str(existing_owner.get("user_id") or "").strip()
+        existing_user_id = _clean(existing_owner.get("user_id"))
         current_tokens = int(prof.get("tokens") or 0)
 
         if existing_user_id and existing_user_id != user_id:
@@ -277,22 +324,23 @@ async def billing_google_confirm(req: GoogleBillingConfirmReq):
 
 @router.post("/api/billing/google/subscription/confirm")
 async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq):
-    user_id = (req.user_id or "").strip()
-    product_id = (req.product_id or "").strip()
-    purchase_token = (req.purchase_token or "").strip()
-    source = (req.source or "google_play").strip()
+    user_id = _clean(req.user_id)
+    incoming_product_id = _clean_lower(req.product_id)
+    purchase_token = _clean(req.purchase_token)
+    source = _clean_lower(req.source or "google_play") or "google_play"
 
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id_required")
-    if not product_id:
+    if not incoming_product_id:
         raise HTTPException(status_code=422, detail="product_id_required")
     if not purchase_token:
         raise HTTPException(status_code=422, detail="purchase_token_required")
-    if product_id != PLAY_SUBSCRIPTION_PRODUCT_ID:
-        raise HTTPException(status_code=400, detail="invalid_subscription_product_id")
+
+    product_id = _canonical_subscription_product_id(incoming_product_id)
 
     prof = _profile_or_404(user_id)
-    user_email = str(prof.get("email") or "").strip().lower()
+    user_email = _clean_lower(prof.get("email"))
+
     if not user_email:
         raise HTTPException(status_code=422, detail="profile_email_missing")
 
@@ -300,9 +348,10 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
     now_iso = _iso(now_dt)
 
     start_dt = _parse_dt(req.subscription_starts_at) or now_dt
-    end_dt = _parse_dt(req.subscription_ends_at)
-    if not end_dt:
-        raise HTTPException(status_code=422, detail="subscription_ends_at_required")
+
+    # Google Play tarafı bitiş tarihi göndermezse varsayılan 365 gün.
+    # Play'den expiry geliyorsa zaten onu kullanır.
+    end_dt = _parse_dt(req.subscription_ends_at) or (start_dt + timedelta(days=DEFAULT_SUBSCRIPTION_DAYS))
 
     membership_status = "active" if req.is_active and end_dt > now_dt else "expired"
 
@@ -311,8 +360,8 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
     restored = False
 
     if existing_owner:
-        existing_user_id = str(existing_owner.get("user_id") or "").strip()
-        existing_user_email = str(existing_owner.get("user_email") or "").strip().lower()
+        existing_user_id = _clean(existing_owner.get("user_id"))
+        existing_user_email = _clean_lower(existing_owner.get("user_email"))
 
         # Aynı kullanıcı -> normal restore
         if existing_user_id == user_id:
@@ -371,16 +420,32 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
         "ok": True,
         "already_processed": already_processed,
         "restored": restored,
+
         "bonus_given": bonus_given,
         "bonus_tokens": SUBSCRIPTION_WELCOME_BONUS if bonus_given else 0,
+
         "membership_status": fresh.get("membership_status"),
         "membership_source": fresh.get("membership_source"),
         "membership_product_id": fresh.get("membership_product_id"),
         "membership_started_at": fresh.get("membership_started_at"),
         "membership_ends_at": fresh.get("membership_ends_at"),
         "membership_last_checked_at": fresh.get("membership_last_checked_at"),
+
+        # Frontend erişim / reklam kapısı için net alanlar
+        "subscription_active": fresh.get("membership_status") == "active",
+        "subscription_product_id": fresh.get("membership_product_id"),
+        "subscription_started_at": fresh.get("membership_started_at"),
+        "subscription_ends_at": fresh.get("membership_ends_at"),
+
+        "is_member": fresh.get("membership_status") == "active",
+        "has_active_membership": fresh.get("membership_status") == "active",
+        "no_ads": fresh.get("membership_status") == "active" and fresh.get("membership_product_id") == PLAY_SUBSCRIPTION_PRODUCT_ID,
+        "ads_disabled": fresh.get("membership_status") == "active" and fresh.get("membership_product_id") == PLAY_SUBSCRIPTION_PRODUCT_ID,
+        "is_no_ads_member": fresh.get("membership_status") == "active" and fresh.get("membership_product_id") == PLAY_SUBSCRIPTION_PRODUCT_ID,
+
         "welcome_bonus_claimed": bool(fresh.get("welcome_bonus_claimed")),
         "welcome_bonus_claimed_at": fresh.get("welcome_bonus_claimed_at"),
+
         "tokens": int(fresh.get("tokens") or 0),
         "tokens_after_bonus": tokens_after_bonus,
     }
@@ -388,25 +453,28 @@ async def billing_google_subscription_confirm(req: GoogleSubscriptionConfirmReq)
 
 @router.post("/api/billing/google/subscription/cancel")
 async def billing_google_subscription_cancel(req: GoogleSubscriptionConfirmReq):
-    user_id = (req.user_id or "").strip()
-    product_id = (req.product_id or "").strip()
+    user_id = _clean(req.user_id)
+    incoming_product_id = _clean_lower(req.product_id)
 
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id_required")
-    if product_id != PLAY_SUBSCRIPTION_PRODUCT_ID:
-        raise HTTPException(status_code=400, detail="invalid_subscription_product_id")
+
+    product_id = _canonical_subscription_product_id(incoming_product_id)
 
     prof = _profile_or_404(user_id)
     end_dt = _parse_dt(prof.get("membership_ends_at"))
 
     status_value = "cancelled"
+
+    # Google Play iptal edilse bile süre bitene kadar aktif kalır.
     if end_dt and end_dt > _now():
         status_value = "active"
 
     supabase.table("profiles").update(
         {
             "membership_status": status_value,
-            "membership_last_checked_at": _iso(_now())
+            "membership_product_id": product_id,
+            "membership_last_checked_at": _iso(_now()),
         }
     ).eq("id", user_id).execute()
 
@@ -415,5 +483,13 @@ async def billing_google_subscription_cancel(req: GoogleSubscriptionConfirmReq):
     return {
         "ok": True,
         "membership_status": fresh.get("membership_status"),
+        "membership_product_id": fresh.get("membership_product_id"),
         "membership_ends_at": fresh.get("membership_ends_at"),
+
+        "subscription_active": fresh.get("membership_status") == "active",
+        "subscription_product_id": fresh.get("membership_product_id"),
+        "subscription_ends_at": fresh.get("membership_ends_at"),
+
+        "no_ads": fresh.get("membership_status") == "active" and fresh.get("membership_product_id") == PLAY_SUBSCRIPTION_PRODUCT_ID,
+        "ads_disabled": fresh.get("membership_status") == "active" and fresh.get("membership_product_id") == PLAY_SUBSCRIPTION_PRODUCT_ID,
     }
