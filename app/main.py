@@ -14,6 +14,7 @@ from app.routers.license import router as license_router
 from app.routers.delete_account import router as delete_account_router
 from app.routers.italkyai_chat import router as italkyai_chat_router
 from app.routers.italkyai_voice import router as italkyai_voice_router
+from app.routers.push_token import router as push_token_router
 
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
@@ -120,6 +121,7 @@ app.include_router(voice_enroll_router, prefix="/api")
 app.include_router(chat_ai_router, prefix="/api")
 app.include_router(ui_translate_router, prefix="/api")
 app.include_router(meeting_router)
+app.include_router(push_token_router)
 
 app.include_router(italkyai_chat_router)
 app.include_router(italkyai_voice_router)
