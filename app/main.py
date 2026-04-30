@@ -15,7 +15,7 @@ from app.routers.delete_account import router as delete_account_router
 from app.routers.italkyai_chat import router as italkyai_chat_router
 from app.routers.italkyai_voice import router as italkyai_voice_router
 from app.routers.push_token import router as push_token_router
-
+from app.routers.whatsapp_bridge import router as whatsapp_bridge_router
 # ROUTER IMPORTS
 from app.routers.ui_translate import router as ui_translate_router
 from app.routers.wallet import router as wallet_router
@@ -128,7 +128,7 @@ app.include_router(italkyai_voice_router)
 app.include_router(wallet_router)
 app.include_router(promo_router)
 app.include_router(site_translate_router)
-
+app.include_router(whatsapp_bridge_router)
 if has_push_admin and push_admin_router:
     app.include_router(push_admin_router)
 
