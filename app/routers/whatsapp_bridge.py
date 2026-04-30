@@ -1,10 +1,23 @@
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 import os
+import shutil
+import uuid
+import speech_recognition as sr
+from googletrans import Translator
+from pydub import AudioSegment
 
 router = APIRouter(
     prefix="/api/whatsapp",
     tags=["WhatsApp Bridge"]
 )
+
+# Tercüman motorunu başlatıyoruz
+translator = Translator()
+
+def convert_ogg_to_wav(ogg_path, wav_path):
+    """Android'den gelen OGG dosyasını STT için WAV formatına çevirir."""
+    audio = AudioSegment.from_file(ogg_path, format="ogg")
+    audio.export(wav_path, format="wav")
 
 @router.post("/process")
 async def process_whatsapp_voice(
@@ -13,20 +26,52 @@ async def process_whatsapp_voice(
     target_lang: str = Form("en-US")
 ):
     """
-    WhatsApp'tan gelen ses verisini italkyAI motoruyla işler.
+    WhatsApp Bridge: Sesi alır, metne çevirir, tercüme eder ve sonucu döner.
     """
+    session_id = str(uuid.uuid4())
+    temp_ogg = f"temp_{session_id}.ogg"
+    temp_wav = f"temp_{session_id}.wav"
+
     try:
-        # 1. Ses dosyasını geçici olarak kaydet veya byte olarak oku
-        content = await audio_file.read()
+        # 1. Gelen sesi geçici olarak kaydet
+        with open(temp_ogg, "wb") as buffer:
+            shutil.copyfileobj(audio_file.file, buffer)
+
+        # 2. Format Dönüştürme (OGG -> WAV)
+        # Not: SpeechRecognition kütüphanesi WAV/FLAC tercih eder.
+        convert_ogg_to_wav(temp_ogg, temp_wav)
+
+        # 3. STT - Speech to Text (Sesi Yazıya Dökme)
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(temp_wav) as source:
+            audio_data = recognizer.record(source)
+            # Google STT kullanarak metni çözüyoruz
+            original_text = recognizer.recognize_google(audio_data, language=source_lang)
+
+        # 4. Çeviri İşlemi
+        # tr-TR -> tr , en-US -> en formatına çeviriyoruz
+        src_code = source_lang.split("-")[0]
+        dest_code = target_lang.split("-")[0]
         
-        # TODO: Buraya senin mevcut 'italkyai_voice_router' veya 
-        # 'translate_ai_router' içindeki STT + Çeviri + TTS mantığını bağlayacağız.
-        
+        translation = translator.translate(original_text, src=src_code, dest=dest_code)
+        translated_text = translation.text
+
+        # 5. Başarılı Sonuç
         return {
             "status": "success",
-            "original_text": "Türkçe ses başarıyla çözüldü", # Dinamik gelecek
-            "translated_text": "English voice generated",    # Dinamik gelecek
-            "audio_url": "https://storage.italky.ai/temp/output.ogg" # Üretilen ses
+            "original_text": original_text,
+            "translated_text": translated_text,
+            "audio_url": "" # Şimdilik sadece metin kopyalıyoruz
         }
+
+    except sr.UnknownValueError:
+        return {"status": "error", "message": "Ses anlaşılamadı, lütfen tekrar deneyin."}
     except Exception as e:
+        print(f"Bridge Hatası: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+    
+    finally:
+        # Geçici dosyaları temizle
+        for f in [temp_ogg, temp_wav]:
+            if os.path.exists(f):
+                os.remove(f)
