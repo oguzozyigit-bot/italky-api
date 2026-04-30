@@ -1,12 +1,14 @@
+# --- Core Framework ---
 fastapi==0.115.2
 uvicorn==0.32.0
 pydantic==2.10.6
 typing-extensions==4.12.2
 python-dotenv==1.0.1
 requests==2.31.0
-httpx==0.27.0
+httpx
 python-multipart==0.0.9
 
+# --- Database & Utilities ---
 sqlalchemy
 psycopg2-binary
 Pillow
@@ -14,13 +16,16 @@ gunicorn
 setuptools
 wheel
 
+# --- AI Services (Existing) ---
 supabase==2.6.0
 edge-tts==6.1.12
 google-generativeai==0.8.3
 google-auth==2.33.0
 openai==1.51.2
-# --- Bridge & OCR Gereksinimleri ---
+
+# --- Bridge & OCR (New & Compatible) ---
 SpeechRecognition
-googletrans==3.1.0a0
+deep-translator
 pydub
 easyocr
+static-ffmpeg
