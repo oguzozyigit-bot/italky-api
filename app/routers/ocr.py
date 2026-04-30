@@ -1,32 +1,31 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
 import easyocr
-import io
-from PIL import Image
 from deep_translator import GoogleTranslator
 
+# main.py zaten '/api' prefix'i ile eklediği için burada sadece '/ocr' bırakıyoruz.
 router = APIRouter(
-    prefix="/api/ocr",
+    prefix="/ocr",
     tags=["OCR Bridge"]
 )
 
 # OCR Motorunu başlatıyoruz. 
-# gpu=False: Render ücretsiz/standart planlarda GPU olmadığı için CPU modunda çalıştırır.
+# Render üzerinde GPU olmadığı için gpu=False olarak ayarladık.
 reader = easyocr.Reader(['en', 'tr'], gpu=False)
 
 @router.post("/process")
 async def process_screen_ocr(image_file: UploadFile = File(...)):
     """
     italkyAI OCR: Ekran görüntüsündeki metinleri ayıklar ve Türkçeye çevirir.
+    URL: /api/ocr/process
     """
     try:
-        # 1. Gelen görseli belleğe oku
+        # 1. Gelen görseli oku
         image_bytes = await image_file.read()
         
-        # 2. OCR İşlemi (Görseldeki metni yazıya dökme)
-        # detail=0: Koordinatlar olmadan sadece düz metin listesi döner.
+        # 2. OCR İşlemi (Metin çıkarma)
         results = reader.readtext(image_bytes, detail=0)
         
-        # 3. Yakalanan metin parçalarını tek bir metin haline getir
+        # 3. Metinleri birleştir
         original_text = " ".join(results).strip()
         
         if not original_text:
@@ -37,11 +36,10 @@ async def process_screen_ocr(image_file: UploadFile = File(...)):
                 "message": "Empty"
             }
 
-        # 4. Çeviri İşlemi (Deep Translator ile)
-        # Kaynak dili otomatik algılayıp (auto), hedef dili Türkçe (tr) yaparız.
+        # 4. Çeviri İşlemi (deep-translator ile - modern ve uyumlu)
+        # Kaynak dili otomatik algılar (auto), hedefi Türkçe (tr) yapar.
         translated_text = GoogleTranslator(source='auto', target='tr').translate(original_text)
 
-        # 5. Sonuç Dönüşü
         return {
             "status": "success",
             "detected_text": original_text,
