@@ -11,6 +11,7 @@ from supabase import Client, create_client
 
 router = APIRouter(prefix="/api/promo/corporate", tags=["Corporate Promo Activation"])
 
+CORPORATE_PROMO_TABLE = "corporate_promo_codes"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 SMS_PROVIDER_ENABLED = os.getenv("SMS_PROVIDER_ENABLED", "").strip().lower() in {"1", "true", "yes"}
@@ -88,7 +89,7 @@ def require_user(authorization: Optional[str]) -> Dict[str, str]:
 
 
 def get_active_code(code: str) -> dict:
-    res = supabase.table("promo_codes").select("*").eq("code", code).limit(1).execute()
+    res = supabase.table(CORPORATE_PROMO_TABLE).select("*").eq("code", code).limit(1).execute()
     rows = safe_data(res) or []
     if not rows:
         raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
@@ -98,7 +99,7 @@ def get_active_code(code: str) -> dict:
     valid_until = parse_dt(row.get("valid_until"))
     if valid_until and valid_until < now_utc():
         try:
-            supabase.table("promo_codes").update({"status": "expired"}).eq("id", row["id"]).execute()
+            supabase.table(CORPORATE_PROMO_TABLE).update({"status": "expired"}).eq("id", row["id"]).execute()
         except Exception:
             pass
         raise HTTPException(status_code=400, detail="PROMO_EXPIRED")
@@ -184,7 +185,7 @@ def verify_otp(payload: PromoOtpVerifyIn, authorization: Optional[str] = Header(
         supabase.table("promo_phone_otps").update({"verified_at": iso(start)}).eq("id", otp_row["id"]).execute()
 
         updated = (
-            supabase.table("promo_codes")
+            supabase.table(CORPORATE_PROMO_TABLE)
             .update({
                 "status": "activated",
                 "activated_by": user["id"],
