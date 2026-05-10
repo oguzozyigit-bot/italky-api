@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import random
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -14,7 +13,6 @@ router = APIRouter(prefix="/api/promo/corporate", tags=["Corporate Promo Activat
 CORPORATE_PROMO_TABLE = "corporate_promo_codes"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-SMS_PROVIDER_ENABLED = os.getenv("SMS_PROVIDER_ENABLED", "").strip().lower() in {"1", "true", "yes"}
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing")
@@ -22,18 +20,8 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
-class PromoOtpSendIn(BaseModel):
+class CorporatePromoActivateIn(BaseModel):
     code: str = Field(..., min_length=8, max_length=8)
-    phone: str = Field(..., min_length=8, max_length=24)
-    sms_consent: bool = False
-    email_consent: bool = False
-
-
-class PromoOtpVerifyIn(BaseModel):
-    code: str = Field(..., min_length=8, max_length=8)
-    phone: str = Field(..., min_length=8, max_length=24)
-    otp: str = Field(..., min_length=4, max_length=4)
-    sms_consent: bool = False
     email_consent: bool = False
 
 
@@ -63,13 +51,6 @@ def safe_data(res: Any):
 
 def normalize_code(value: str) -> str:
     return "".join(ch for ch in str(value or "").upper() if ch.isalnum())[:8]
-
-
-def normalize_phone(value: str) -> str:
-    cleaned = "".join(ch for ch in str(value or "").strip() if ch.isdigit() or ch == "+")
-    if len(cleaned) < 8:
-        raise HTTPException(status_code=400, detail="PHONE_REQUIRED")
-    return cleaned[:24]
 
 
 def require_user(authorization: Optional[str]) -> Dict[str, str]:
@@ -106,95 +87,32 @@ def get_active_code(code: str) -> dict:
     return row
 
 
-def otp_code() -> str:
-    return f"{random.randint(0, 9999):04d}"
-
-
-@router.post("/otp/send")
-def send_otp(payload: PromoOtpSendIn, authorization: Optional[str] = Header(None)):
-    require_user(authorization)
-    code = normalize_code(payload.code)
-    phone = normalize_phone(payload.phone)
-    if not payload.sms_consent or not payload.email_consent:
-        raise HTTPException(status_code=400, detail="CONSENT_REQUIRED")
-
-    get_active_code(code)
-    otp = otp_code()
-    expires_at = now_utc() + timedelta(minutes=10)
-
-    try:
-        supabase.table("promo_phone_otps").insert({
-            "code": code,
-            "phone": phone,
-            "otp_code": otp,
-            "expires_at": iso(expires_at),
-            "verified_at": None,
-        }).execute()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OTP_STORE_FAILED: {e}")
-
-    # TODO: gerçek SMS provider bağlanınca burada SMS gönderilecek.
-    # Geçici taslak: SMS_PROVIDER_ENABLED false ise debug_otp döner.
-    return {
-        "ok": True,
-        "sms_sent": SMS_PROVIDER_ENABLED,
-        "debug_otp": None if SMS_PROVIDER_ENABLED else otp,
-        "message": "OTP hazır" if not SMS_PROVIDER_ENABLED else "SMS gönderildi",
-    }
-
-
-@router.post("/otp/verify")
-def verify_otp(payload: PromoOtpVerifyIn, authorization: Optional[str] = Header(None)):
+@router.post("/activate")
+def activate_corporate_promo(payload: CorporatePromoActivateIn, authorization: Optional[str] = Header(None)):
     user = require_user(authorization)
     code = normalize_code(payload.code)
-    phone = normalize_phone(payload.phone)
-    otp = str(payload.otp or "").strip()
-    if not payload.sms_consent or not payload.email_consent:
+    if not payload.email_consent:
         raise HTTPException(status_code=400, detail="CONSENT_REQUIRED")
 
     code_row = get_active_code(code)
-
-    otp_res = (
-        supabase.table("promo_phone_otps")
-        .select("*")
-        .eq("code", code)
-        .eq("phone", phone)
-        .eq("otp_code", otp)
-        .is_("verified_at", "null")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    otp_rows = safe_data(otp_res) or []
-    if not otp_rows:
-        raise HTTPException(status_code=400, detail="OTP_INVALID")
-
-    otp_row = otp_rows[0]
-    expires_at = parse_dt(otp_row.get("expires_at"))
-    if expires_at and expires_at < now_utc():
-        raise HTTPException(status_code=400, detail="OTP_EXPIRED")
-
     start = now_utc()
     duration_days = int(code_row.get("duration_days") or 0)
     if duration_days <= 0:
         raise HTTPException(status_code=400, detail="PROMO_DURATION_INVALID")
     end = start + timedelta(days=duration_days)
-    consent_at = start
 
     try:
-        supabase.table("promo_phone_otps").update({"verified_at": iso(start)}).eq("id", otp_row["id"]).execute()
-
         updated = (
             supabase.table(CORPORATE_PROMO_TABLE)
             .update({
                 "status": "activated",
                 "activated_by": user["id"],
                 "activated_email": user.get("email"),
-                "activated_phone": phone,
-                "phone_verified": True,
-                "sms_consent": True,
+                "activated_phone": None,
+                "phone_verified": False,
+                "sms_consent": False,
                 "email_consent": True,
-                "consent_at": iso(consent_at),
+                "consent_at": iso(start),
                 "activated_at": iso(start),
                 "membership_starts_at": iso(start),
                 "membership_ends_at": iso(end),
@@ -223,6 +141,7 @@ def verify_otp(payload: PromoOtpVerifyIn, authorization: Optional[str] = Header(
 
     return {
         "ok": True,
+        "activated_email": user.get("email"),
         "membership_starts_at": iso(start),
         "membership_ends_at": iso(end),
         "duration_days": duration_days,
