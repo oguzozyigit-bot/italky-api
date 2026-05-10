@@ -1,6 +1,7 @@
 -- Corporate promo code system for italkyAI
 -- Apply in Supabase SQL Editor before using the admin corporate promo UI.
 -- This intentionally uses corporate_promo_codes so the old promo_codes/QR/jeton schema is not disturbed.
+-- Current activation flow is Google account e-mail + e-mail consent. Phone/SMS OTP is deprecated.
 
 create extension if not exists pgcrypto;
 
@@ -42,6 +43,8 @@ create index if not exists corporate_promo_codes_status_idx on public.corporate_
 create index if not exists corporate_promo_codes_activated_at_idx on public.corporate_promo_codes(activated_at);
 create index if not exists corporate_promo_codes_membership_ends_idx on public.corporate_promo_codes(membership_ends_at);
 
+-- Deprecated: kept only for existing environments that may already have created it.
+-- The current code no longer reads from or writes to promo_phone_otps.
 create table if not exists public.promo_phone_otps (
   id uuid primary key default gen_random_uuid(),
   code text not null,
