@@ -12,6 +12,7 @@ from app.routers.admin import _get_supabase, _require_admin, _safe_data
 
 router = APIRouter(prefix="/api/admin/corporate-promos", tags=["Corporate Promos"])
 
+CORPORATE_PROMO_TABLE = "corporate_promo_codes"
 FORBIDDEN_LETTER_PAIRS = {"AK", "FG", "FB", "GS"}
 LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 DIGITS = "0123456789"
@@ -124,12 +125,11 @@ async def generate_corporate_promos(payload: CorporatePromoGenerateIn, ctx: Dict
         })
 
     try:
-        # Insert in chunks so large corporate orders do not create one huge request body.
         inserted = 0
         samples = []
         for start in range(0, len(rows), 500):
             chunk = rows[start:start + 500]
-            res = sb.table("promo_codes").insert(chunk).execute()
+            res = sb.table(CORPORATE_PROMO_TABLE).insert(chunk).execute()
             data = _safe_data(res) or []
             inserted += len(data) if isinstance(data, list) else len(chunk)
             if len(samples) < 20:
@@ -149,7 +149,7 @@ async def corporate_promo_report(
 ):
     sb = _get_supabase()
     try:
-        q = sb.table("promo_codes").select("*").order("created_at", desc=True).limit(5000)
+        q = sb.table(CORPORATE_PROMO_TABLE).select("*").order("created_at", desc=True).limit(5000)
         if company:
             q = q.ilike("company_name", f"%{company.strip()}%")
         if status:
@@ -197,7 +197,7 @@ async def update_corporate_promo_status(payload: CorporatePromoStatusIn, ctx: Di
         raise HTTPException(status_code=400, detail="INVALID_CODE")
     status = _normalize_status(payload.status)
     try:
-        res = sb.table("promo_codes").update({"status": status}).eq("code", code).execute()
+        res = sb.table(CORPORATE_PROMO_TABLE).update({"status": status}).eq("code", code).execute()
         return {"ok": True, "result": _safe_data(res)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"CORPORATE_PROMO_STATUS_FAILED: {e}")
