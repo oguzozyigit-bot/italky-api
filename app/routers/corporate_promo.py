@@ -129,9 +129,16 @@ def activate_corporate_promo(payload: CorporatePromoActivateIn, authorization: O
             "package_started_at": iso(start),
             "package_ends_at": iso(end),
             "selected_package_code": code,
-            "app_access_mode": "premium",
             "promo_used_at": iso(start),
             "promo_code_used": code,
+            "membership_status": "active",
+            "membership_source": "corporate_promo",
+            "membership_product_id": code,
+            "membership_started_at": iso(start),
+            "membership_ends_at": iso(end),
+            "membership_last_checked_at": iso(start),
+            "app_access_mode": "premium",
+            "plan": "premium",
         }
         supabase.table("profiles").update(profile_patch).eq("id", user["id"]).execute()
     except HTTPException:
