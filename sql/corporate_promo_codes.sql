@@ -65,6 +65,26 @@ alter table public.profiles add column if not exists selected_package_code text 
 alter table public.profiles add column if not exists app_access_mode text null;
 alter table public.profiles add column if not exists promo_used_at timestamptz null;
 alter table public.profiles add column if not exists promo_code_used text null;
+alter table public.profiles add column if not exists membership_status text null;
+alter table public.profiles add column if not exists membership_source text null;
+alter table public.profiles add column if not exists membership_product_id text null;
+alter table public.profiles add column if not exists membership_started_at timestamptz null;
+alter table public.profiles add column if not exists membership_ends_at timestamptz null;
+alter table public.profiles add column if not exists membership_last_checked_at timestamptz null;
+alter table public.profiles add column if not exists plan text null;
+
+-- Backfill existing corporate promo users so access-state opens home without asking for a code again.
+update public.profiles
+set
+  membership_status = 'active',
+  membership_source = coalesce(membership_source, 'corporate_promo'),
+  membership_started_at = coalesce(membership_started_at, package_started_at),
+  membership_ends_at = coalesce(membership_ends_at, package_ends_at),
+  membership_last_checked_at = now(),
+  app_access_mode = 'premium',
+  plan = 'premium'
+where package_active = true
+  and package_ends_at > now();
 
 -- Optional RLS hardening. Service-role backend endpoints are expected to write these tables.
 alter table public.corporate_promo_codes enable row level security;
