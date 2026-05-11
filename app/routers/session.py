@@ -130,6 +130,12 @@ def _is_reklamsiz_product(product_id: str) -> bool:
     )
 
 
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return _clean_lower(value) in {"1", "true", "yes", "active", "premium"}
+
+
 @router.get("/access-state")
 def get_access_state(authorization: str | None = Header(default=None)):
     user_id = get_current_user_id(authorization)
@@ -138,6 +144,7 @@ def get_access_state(authorization: str | None = Header(default=None)):
         supabase.table("profiles")
         .select(
             "id,tokens,role,"
+            "package_active,package_started_at,package_ends_at,selected_package_code,"
             "membership_status,membership_source,membership_product_id,"
             "membership_started_at,membership_ends_at,membership_last_checked_at"
         )
@@ -155,18 +162,28 @@ def get_access_state(authorization: str | None = Header(default=None)):
     membership_source = _clean_lower(row.get("membership_source"))
     role = _clean_lower(row.get("role"))
 
-    membership_started_at = row.get("membership_started_at")
-    membership_ends_at = row.get("membership_ends_at")
+    package_active = _is_truthy(row.get("package_active"))
+    package_started_at = row.get("package_started_at")
+    package_ends_at = row.get("package_ends_at")
+    selected_package_code = row.get("selected_package_code")
+
+    membership_started_at = row.get("membership_started_at") or package_started_at
+    membership_ends_at = row.get("membership_ends_at") or package_ends_at
     membership_last_checked_at = row.get("membership_last_checked_at")
 
     membership_date_valid = _is_future(membership_ends_at)
+    package_date_valid = _is_future(package_ends_at)
     membership_status_active = membership_status == "active"
+    package_access_active = bool(package_active and package_date_valid)
 
     is_admin = _is_admin_role(role)
     is_reklamsiz = _is_reklamsiz_product(membership_product_id)
+    is_corporate_promo = membership_source == "corporate_promo" or bool(selected_package_code)
 
     has_active_membership = bool(
         is_admin
+        or package_access_active
+        or _is_future(row.get("membership_ends_at"))
         or (
             membership_status_active
             and membership_date_valid
@@ -175,12 +192,13 @@ def get_access_state(authorization: str | None = Header(default=None)):
 
     subscription_active = bool(
         has_active_membership
-        and is_reklamsiz
+        and (is_reklamsiz or is_corporate_promo)
     )
 
     ads_disabled = bool(
         is_admin
         or subscription_active
+        or has_active_membership
     )
 
     access_open = bool(has_active_membership)
@@ -190,6 +208,8 @@ def get_access_state(authorization: str | None = Header(default=None)):
         tokens = int(row.get("tokens") or 0)
     except Exception:
         tokens = 0
+
+    package_code = selected_package_code or membership_product_id
 
     return {
         "ok": True,
@@ -215,10 +235,10 @@ def get_access_state(authorization: str | None = Header(default=None)):
 
         # Frontend uyum alanları
         "package_active": has_active_membership,
-        "package_code": membership_product_id,
-        "selected_package_code": membership_product_id,
-        "package_started_at": membership_started_at,
-        "package_ends_at": membership_ends_at,
+        "package_code": package_code,
+        "selected_package_code": package_code,
+        "package_started_at": package_started_at or membership_started_at,
+        "package_ends_at": package_ends_at or membership_ends_at,
 
         "subscription_active": subscription_active,
         "subscription_product_id": membership_product_id,
@@ -244,6 +264,8 @@ def get_access_state(authorization: str | None = Header(default=None)):
         # Debug/izleme
         "membership_date_valid": membership_date_valid,
         "membership_status_active": membership_status_active,
+        "package_date_valid": package_date_valid,
+        "package_access_active": package_access_active,
         "is_reklamsiz_product": is_reklamsiz,
         "server_time": _utc_now().isoformat(),
     }
