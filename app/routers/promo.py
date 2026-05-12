@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from supabase import Client, create_client
 
 router = APIRouter(prefix="/api/promo", tags=["promo"])
@@ -25,7 +25,8 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 class PromoRedeemRequest(BaseModel):
     source: Literal["manual", "nfc"] = "manual"
-    user_id: str = Field(..., min_length=1)
+    # Backward-compatible only. The server never trusts this value for ownership.
+    user_id: Optional[str] = None
     code: Optional[str] = None
     uid: Optional[str] = None
 
@@ -47,6 +48,13 @@ class PromoRedeemResponse(BaseModel):
 # HELPERS
 # =========================================================
 
+def promo_log(label: str, data: dict | None = None) -> None:
+    try:
+        print(f"[Promo] {label} {data or {}}")
+    except Exception:
+        pass
+
+
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -55,11 +63,18 @@ def iso_now() -> str:
     return now_utc().isoformat()
 
 
+def clean(value: object) -> str:
+    return str(value or "").strip()
+
+
 def parse_dt(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except Exception:
         return None
 
@@ -81,9 +96,38 @@ def add_months_safe(dt: datetime, months: int) -> datetime:
     return dt.replace(year=year, month=month, day=day)
 
 
-def require_auth(auth_header: Optional[str]) -> None:
+def require_auth_user_id(auth_header: Optional[str]) -> str:
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="MISSING_AUTH")
+
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="MISSING_AUTH")
+
+    try:
+        user_res = supabase.auth.get_user(token)
+        user = getattr(user_res, "user", None)
+        user_id = clean(getattr(user, "id", "")) if user else ""
+    except Exception as exc:
+        promo_log("auth invalid", {"message": str(exc)})
+        raise HTTPException(status_code=401, detail="INVALID_AUTH")
+
+    if not user_id:
+        raise HTTPException(status_code=401, detail="INVALID_AUTH")
+
+    return user_id
+
+
+def resolve_redeem_user_id(payload_user_id: Optional[str], auth_header: Optional[str]) -> str:
+    auth_user_id = require_auth_user_id(auth_header)
+    requested_user_id = clean(payload_user_id)
+    if requested_user_id and requested_user_id != auth_user_id:
+        promo_log("user id mismatch", {
+            "auth_user_id": auth_user_id,
+            "payload_user_id": requested_user_id,
+        })
+        raise HTTPException(status_code=403, detail="user_id_mismatch")
+    return auth_user_id
 
 
 def get_profile(user_id: str) -> dict:
@@ -254,7 +298,8 @@ def mark_code_used(code_rec: dict, user_id: str) -> None:
         "is_used": True,
         "used_by": user_id,
         "used_at": iso_now(),
-        "bound_user_id": user_id
+        "bound_user_id": user_id,
+        "activated_by": user_id,
     }).eq("id", code_rec["id"]).execute()
 
     if getattr(upd, "data", None) is None and getattr(upd, "error", None):
@@ -298,11 +343,7 @@ def log_redemption(
         raise HTTPException(status_code=500, detail="PROMO_LOG_FAILED")
 
 
-def build_success_message(
-    grant_type: str,
-    membership_months: int,
-    tokens_loaded: int,
-) -> str:
+def build_success_message(grant_type: str, membership_months: int, tokens_loaded: int) -> str:
     parts: list[str] = []
 
     if grant_type in ("membership", "bundle") and membership_months > 0:
@@ -320,14 +361,14 @@ def build_success_message(
 
 @router.post("/redeem", response_model=PromoRedeemResponse)
 def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Header(None)):
-    require_auth(authorization)
+    redeem_user_id = resolve_redeem_user_id(payload.user_id, authorization)
 
-    profile_before = get_profile(payload.user_id)
+    profile_before = get_profile(redeem_user_id)
     validate_user_eligibility(profile_before)
 
     code_rec = get_code_record(payload.source, payload.code, payload.uid)
     campaign = get_campaign(code_rec["campaign_id"])
-    validate_code_and_campaign(code_rec, campaign, payload.user_id)
+    validate_code_and_campaign(code_rec, campaign, redeem_user_id)
 
     membership_months = int(campaign.get("membership_months") or 0)
     package_code = str(campaign.get("package_code") or "member").strip() or "member"
@@ -344,21 +385,21 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
             str(code_rec.get("code_value") or "").strip()
         )
 
-    profile_mid = get_profile(payload.user_id)
+    profile_mid = get_profile(redeem_user_id)
 
     if grant_type in ("tokens", "bundle"):
         tokens_loaded, _ = apply_tokens(profile_mid, campaign)
 
-    mark_code_used(code_rec, payload.user_id)
+    mark_code_used(code_rec, redeem_user_id)
 
-    profile_after = get_profile_after(payload.user_id)
+    profile_after = get_profile_after(redeem_user_id)
 
     log_redemption(
         code_rec=code_rec,
         campaign=campaign,
         profile_before=profile_before,
         profile_after=profile_after,
-        user_id=payload.user_id,
+        user_id=redeem_user_id,
         source=payload.source,
         membership_months=membership_months,
         granted_tokens=tokens_loaded,
