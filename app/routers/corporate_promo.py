@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+import re
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
-router = APIRouter(prefix="/api/promo/corporate", tags=["Corporate Promo Activation"])
+router = APIRouter(prefix="/api/promo/corporate", tags=["Activation Codes"])
 
-CORPORATE_PROMO_TABLE = "corporate_promo_codes"
+ACTIVATION_CODES_TABLE = "activation_codes"
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
@@ -20,9 +22,16 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
-class CorporatePromoActivateIn(BaseModel):
-    code: str = Field(..., min_length=8, max_length=8)
-    email_consent: bool = False
+class ActivationCodeActivateIn(BaseModel):
+    code: str = Field(..., min_length=1, max_length=128)
+    device_id: Optional[str] = Field(default=None, max_length=160)
+    user_agent: Optional[str] = Field(default=None, max_length=600)
+
+
+class ActivationCodeCheckIn(BaseModel):
+    code: str = Field(..., min_length=1, max_length=128)
+    active_session_key: str = Field(..., min_length=8, max_length=160)
+    device_id: Optional[str] = Field(default=None, max_length=160)
 
 
 def now_utc() -> datetime:
@@ -50,106 +59,141 @@ def safe_data(res: Any):
 
 
 def normalize_code(value: str) -> str:
-    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())[:8]
+    raw = str(value or "").strip().upper()
+    return re.sub(r"[\s-]+", "", raw)
 
 
-def require_user(authorization: Optional[str]) -> Dict[str, str]:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="AUTH_REQUIRED")
-    token = authorization.split(" ", 1)[1].strip()
-    try:
-        res = supabase.auth.get_user(token)
-        user = getattr(res, "user", None) or (res.get("user") if isinstance(res, dict) else None)
-        user_id = (getattr(user, "id", None) if user else None) or (user.get("id") if isinstance(user, dict) and user else None)
-        email = (getattr(user, "email", None) if user else None) or (user.get("email") if isinstance(user, dict) and user else None)
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"AUTH_INVALID: {e}")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="AUTH_REQUIRED")
-    return {"id": str(user_id), "email": str(email or "")}
+def public_error(detail: str, status_code: int = 400):
+    raise HTTPException(status_code=status_code, detail=detail)
 
 
-def get_active_code(code: str) -> dict:
-    res = supabase.table(CORPORATE_PROMO_TABLE).select("*").eq("code", code).limit(1).execute()
+def fetch_code_row(code: str) -> Optional[dict]:
+    res = supabase.table(ACTIVATION_CODES_TABLE).select("*").eq("code", code).limit(1).execute()
     rows = safe_data(res) or []
-    if not rows:
-        raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
-    row = rows[0]
-    if row.get("status") != "active" or row.get("activated_at"):
-        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
-    valid_until = parse_dt(row.get("valid_until"))
-    if valid_until and valid_until < now_utc():
-        try:
-            supabase.table(CORPORATE_PROMO_TABLE).update({"status": "expired"}).eq("id", row["id"]).execute()
-        except Exception:
-            pass
-        raise HTTPException(status_code=400, detail="PROMO_EXPIRED")
-    return row
+    return rows[0] if rows else None
+
+
+def validate_code_row(row: Optional[dict]) -> Optional[str]:
+    if not row:
+        return "CODE_NOT_FOUND"
+    if row.get("is_active") is not True:
+        return "CODE_INACTIVE"
+
+    now = now_utc()
+    starts_at = parse_dt(row.get("starts_at"))
+    expires_at = parse_dt(row.get("expires_at"))
+    if starts_at and starts_at > now:
+        return "CODE_NOT_STARTED"
+    if expires_at and expires_at < now:
+        return "CODE_EXPIRED"
+    return None
+
+
+def normalize_device_id(device_id: Optional[str]) -> str:
+    cleaned = str(device_id or "").strip()
+    return cleaned[:160] if cleaned else str(uuid.uuid4())
 
 
 @router.post("/activate")
-def activate_corporate_promo(payload: CorporatePromoActivateIn, authorization: Optional[str] = Header(None)):
-    user = require_user(authorization)
+def activate_code(payload: ActivationCodeActivateIn, user_agent: Optional[str] = Header(default=None)):
     code = normalize_code(payload.code)
-    if not payload.email_consent:
-        raise HTTPException(status_code=400, detail="CONSENT_REQUIRED")
+    if not code:
+        public_error("CODE_INVALID")
 
-    code_row = get_active_code(code)
-    start = now_utc()
-    duration_days = int(code_row.get("duration_days") or 0)
-    if duration_days <= 0:
-        raise HTTPException(status_code=400, detail="PROMO_DURATION_INVALID")
-    end = start + timedelta(days=duration_days)
+    try:
+        row = fetch_code_row(code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"ACTIVATION_LOOKUP_FAILED: {e}")
+
+    invalid_reason = validate_code_row(row)
+    if invalid_reason:
+        public_error(invalid_reason, status_code=404 if invalid_reason == "CODE_NOT_FOUND" else 400)
+
+    assert row is not None
+    session_key = str(uuid.uuid4())
+    device_id = normalize_device_id(payload.device_id)
+    request_user_agent = str(payload.user_agent or user_agent or "")[:600]
+    stamp = iso(now_utc())
+
+    patch = {
+        "active_session_key": session_key,
+        "last_device_id": device_id,
+        "last_user_agent": request_user_agent,
+        "activated_at": stamp,
+        "last_seen_at": stamp,
+        "updated_at": stamp,
+    }
 
     try:
         updated = (
-            supabase.table(CORPORATE_PROMO_TABLE)
-            .update({
-                "status": "activated",
-                "activated_by": user["id"],
-                "activated_email": user.get("email"),
-                "activated_phone": None,
-                "phone_verified": False,
-                "sms_consent": False,
-                "email_consent": True,
-                "consent_at": iso(start),
-                "activated_at": iso(start),
-                "membership_starts_at": iso(start),
-                "membership_ends_at": iso(end),
-            })
-            .eq("id", code_row["id"])
-            .eq("status", "active")
+            supabase.table(ACTIVATION_CODES_TABLE)
+            .update(patch)
+            .eq("id", row["id"])
+            .eq("code", code)
             .execute()
         )
         if not safe_data(updated):
-            raise HTTPException(status_code=409, detail="PROMO_ALREADY_USED")
-
-        profile_patch = {
-            "package_active": True,
-            "package_started_at": iso(start),
-            "package_ends_at": iso(end),
-            "selected_package_code": code,
-            "promo_used_at": iso(start),
-            "promo_code_used": code,
-            "membership_status": "active",
-            "membership_source": "corporate_promo",
-            "membership_product_id": code,
-            "membership_started_at": iso(start),
-            "membership_ends_at": iso(end),
-            "membership_last_checked_at": iso(start),
-            "app_access_mode": "premium",
-            "plan": "premium",
-        }
-        supabase.table("profiles").update(profile_patch).eq("id", user["id"]).execute()
+            public_error("CODE_UPDATE_FAILED", status_code=409)
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PROMO_ACTIVATION_FAILED: {e}")
+        raise HTTPException(status_code=500, detail=f"ACTIVATION_UPDATE_FAILED: {e}")
 
     return {
         "ok": True,
-        "activated_email": user.get("email"),
-        "membership_starts_at": iso(start),
-        "membership_ends_at": iso(end),
-        "duration_days": duration_days,
+        "access": True,
+        "code": code,
+        "active_session_key": session_key,
+        "expires_at": row.get("expires_at"),
     }
+
+
+@router.get("/status")
+def check_code_session_get(
+    code: str = Query(...),
+    active_session_key: str = Query(...),
+    device_id: Optional[str] = Query(default=None),
+):
+    return check_code_session_core(code=code, active_session_key=active_session_key, device_id=device_id)
+
+
+@router.post("/check")
+def check_code_session_post(payload: ActivationCodeCheckIn):
+    return check_code_session_core(
+        code=payload.code,
+        active_session_key=payload.active_session_key,
+        device_id=payload.device_id,
+    )
+
+
+def check_code_session_core(code: str, active_session_key: str, device_id: Optional[str] = None):
+    normalized_code = normalize_code(code)
+    session_key = str(active_session_key or "").strip()
+    if not normalized_code or not session_key:
+        public_error("SESSION_INVALID")
+
+    try:
+        row = fetch_code_row(normalized_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SESSION_LOOKUP_FAILED: {e}")
+
+    invalid_reason = validate_code_row(row)
+    if invalid_reason:
+        return {"ok": True, "active": False, "reason": invalid_reason.lower()}
+
+    assert row is not None
+    current_key = str(row.get("active_session_key") or "").strip()
+    if not current_key or current_key != session_key:
+        return {"ok": True, "active": False, "reason": "session_replaced"}
+
+    stamp = iso(now_utc())
+    patch = {"last_seen_at": stamp, "updated_at": stamp}
+    if device_id:
+        patch["last_device_id"] = normalize_device_id(device_id)
+
+    try:
+        supabase.table(ACTIVATION_CODES_TABLE).update(patch).eq("id", row["id"]).execute()
+    except Exception:
+        pass
+
+    return {"ok": True, "active": True}
