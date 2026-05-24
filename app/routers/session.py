@@ -179,6 +179,7 @@ def get_access_state(authorization: str | None = Header(default=None)):
     is_admin = _is_admin_role(role)
     is_reklamsiz = _is_reklamsiz_product(membership_product_id)
     is_corporate_promo = membership_source == "corporate_promo" or bool(selected_package_code)
+    is_ios_iap = membership_source == "ios_iap"
 
     has_active_membership = bool(
         is_admin
@@ -188,11 +189,12 @@ def get_access_state(authorization: str | None = Header(default=None)):
             membership_status_active
             and membership_date_valid
         )
+        or (is_ios_iap and membership_status_active)
     )
 
     subscription_active = bool(
         has_active_membership
-        and (is_reklamsiz or is_corporate_promo)
+        and (is_reklamsiz or is_corporate_promo or is_ios_iap)
     )
 
     ads_disabled = bool(
