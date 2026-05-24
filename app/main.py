@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.routers.auth import router as auth_router
 from app.routers.session import router as session_router
+from app.routers.ios_iap import router as ios_iap_router
 from app.routers.license import router as license_router
 from app.routers.delete_account import router as delete_account_router
 from app.routers.italkyai_chat import router as italkyai_chat_router
@@ -137,6 +138,7 @@ if has_push_admin and push_admin_router:
     app.include_router(push_admin_router)
 
 app.include_router(session_router)
+app.include_router(ios_iap_router)
 app.include_router(license_router)
 app.include_router(delete_account_router)
 
