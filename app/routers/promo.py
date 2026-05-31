@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
@@ -118,18 +118,20 @@ def get_profile(user_id: str) -> dict:
     return rows[0]
 
 
-def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> dict:
+def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> Optional[dict]:
     if source == "manual":
         final_code = str(code or "").strip().upper()
         if not final_code:
             raise HTTPException(status_code=400, detail="CODE_REQUIRED")
-        res = supabase.table("promo_codes").select(
-            "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id"
-        ).eq("code_value", final_code).eq("delivery_type", "manual").limit(1).execute()
+        try:
+            res = supabase.table("promo_codes").select(
+                "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id"
+            ).eq("code_value", final_code).eq("delivery_type", "manual").limit(1).execute()
+        except Exception as exc:
+            promo_log("campaign promo lookup failed; simple fallback will be tried", {"message": str(exc)})
+            return None
         rows = res.data or []
-        if not rows:
-            raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
-        return rows[0]
+        return rows[0] if rows else None
 
     if source == "nfc":
         final_uid = str(uid or "").strip()
@@ -144,6 +146,28 @@ def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> dic
         return rows[0]
 
     raise HTTPException(status_code=400, detail="INVALID_SOURCE")
+
+
+def get_simple_code_record(source: str, code: Optional[str]) -> dict:
+    if source != "manual":
+        raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
+
+    final_code = str(code or "").strip().upper()
+    if not final_code:
+        raise HTTPException(status_code=400, detail="CODE_REQUIRED")
+
+    try:
+        res = supabase.table("promo_codes").select(
+            "id, code, duration_days, status, used_by, used_at, expires_at"
+        ).eq("code", final_code).limit(1).execute()
+    except Exception as exc:
+        promo_log("simple promo lookup failed", {"message": str(exc)})
+        raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
+
+    rows = res.data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
+    return rows[0]
 
 
 def get_campaign(campaign_id: str) -> dict:
@@ -208,6 +232,32 @@ def validate_code_and_campaign(code_rec: dict, campaign: dict, user_id: str) -> 
         raise HTTPException(status_code=400, detail="PROMO_GLOBAL_LIMIT_REACHED")
 
 
+def validate_simple_code(code_rec: dict, user_id: str) -> int:
+    status = str(code_rec.get("status") or "").strip().lower()
+    used_by = str(code_rec.get("used_by") or "").strip()
+
+    if status == "used" or used_by or code_rec.get("used_at"):
+        if used_by and used_by == user_id:
+            raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED_BY_USER")
+        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+
+    if status not in {"active", "aktif"}:
+        raise HTTPException(status_code=400, detail="PROMO_NOT_ACTIVE")
+
+    expires_at = parse_dt(code_rec.get("expires_at"))
+    if expires_at and expires_at <= now_utc():
+        raise HTTPException(status_code=400, detail="PROMO_EXPIRED")
+
+    try:
+        duration_days = int(code_rec.get("duration_days") or 0)
+    except Exception:
+        duration_days = 0
+    if duration_days <= 0:
+        raise HTTPException(status_code=400, detail="PROMO_NOT_ACTIVE")
+
+    return duration_days
+
+
 def apply_membership(profile: dict, campaign: dict, promo_code: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
     months = int(campaign.get("membership_months") or 0)
     package_code = str(campaign.get("package_code") or "member").strip() or "member"
@@ -228,6 +278,31 @@ def apply_membership(profile: dict, campaign: dict, promo_code: str) -> tuple[Op
     if getattr(upd, "data", None) is None and getattr(upd, "error", None):
         raise HTTPException(status_code=500, detail="PROFILE_UPDATE_FAILED")
     return package_code, new_start.isoformat(), new_end.isoformat()
+
+
+def apply_simple_membership(profile: dict, promo_code: str, duration_days: int) -> tuple[str, str, str]:
+    current = now_utc()
+    new_end = current + timedelta(days=duration_days)
+    package_code = "promo_code"
+    payload = {
+        "package_active": True,
+        "selected_package_code": package_code,
+        "package_started_at": current.isoformat(),
+        "package_ends_at": new_end.isoformat(),
+        "promo_used_at": current.isoformat(),
+        "promo_code_used": promo_code,
+        "membership_status": "active",
+        "membership_source": "promo_code",
+        "membership_product_id": package_code,
+        "membership_started_at": current.isoformat(),
+        "membership_ends_at": new_end.isoformat(),
+        "membership_last_checked_at": current.isoformat(),
+        "plan": package_code,
+    }
+    upd = supabase.table("profiles").update(payload).eq("id", profile["id"]).execute()
+    if getattr(upd, "data", None) is None and getattr(upd, "error", None):
+        raise HTTPException(status_code=500, detail="PROFILE_UPDATE_FAILED")
+    return package_code, current.isoformat(), new_end.isoformat()
 
 
 def apply_tokens(profile: dict, campaign: dict) -> tuple[int, int]:
@@ -256,6 +331,16 @@ def mark_code_used(code_rec: dict, user_id: str) -> None:
         payload.pop("activated_by", None)
         upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).execute()
 
+    if getattr(upd, "data", None) is None and getattr(upd, "error", None):
+        raise HTTPException(status_code=500, detail="PROMO_MARK_USED_FAILED")
+
+
+def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
+    upd = supabase.table("promo_codes").update({
+        "status": "used",
+        "used_by": user_id,
+        "used_at": iso_now(),
+    }).eq("id", code_rec["id"]).execute()
     if getattr(upd, "data", None) is None and getattr(upd, "error", None):
         raise HTTPException(status_code=500, detail="PROMO_MARK_USED_FAILED")
 
@@ -295,6 +380,30 @@ def build_success_message(grant_type: str, membership_months: int, tokens_loaded
     return " ve ".join(parts) if parts else "Promosyon başarıyla uygulandı."
 
 
+def redeem_simple_promo(payload: PromoRedeemRequest, redeem_user_id: str, profile_before: dict) -> PromoRedeemResponse:
+    simple_code = get_simple_code_record(payload.source, payload.code)
+    duration_days = validate_simple_code(simple_code, redeem_user_id)
+    package_code, membership_started_at, membership_ends_at = apply_simple_membership(
+        profile_before,
+        str(simple_code.get("code") or payload.code or "").strip().upper(),
+        duration_days,
+    )
+    mark_simple_code_used(simple_code, redeem_user_id)
+    profile_after = get_profile_after(redeem_user_id)
+
+    return PromoRedeemResponse(
+        ok=True,
+        grant_type="membership",
+        membership_months=0,
+        package_code=package_code,
+        membership_started_at=membership_started_at,
+        membership_ends_at=membership_ends_at,
+        tokens_loaded=0,
+        tokens_after=int(profile_after.get("tokens") or 0),
+        message=f"{duration_days} günlük üyelik tanımlandı",
+    )
+
+
 @router.post("/redeem", response_model=PromoRedeemResponse)
 def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Header(None)):
     redeem_user_id = resolve_redeem_user_id(payload.user_id, authorization)
@@ -303,6 +412,9 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
     validate_user_eligibility(profile_before)
 
     code_rec = get_code_record(payload.source, payload.code, payload.uid)
+    if not code_rec:
+        return redeem_simple_promo(payload, redeem_user_id, profile_before)
+
     campaign = get_campaign(code_rec["campaign_id"])
     validate_code_and_campaign(code_rec, campaign, redeem_user_id)
 
