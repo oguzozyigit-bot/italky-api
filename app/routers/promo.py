@@ -267,12 +267,21 @@ def apply_membership(profile: dict, campaign: dict, promo_code: str) -> tuple[Op
     current = now_utc()
     new_start = current
     new_end = add_months_safe(new_start, months)
+    current_iso = current.isoformat()
     payload = {
+        "package_active": True,
         "selected_package_code": package_code,
         "package_started_at": new_start.isoformat(),
         "package_ends_at": new_end.isoformat(),
-        "promo_used_at": iso_now(),
+        "promo_used_at": current_iso,
         "promo_code_used": promo_code,
+        "membership_status": "active",
+        "membership_source": "promo_code",
+        "membership_product_id": package_code,
+        "membership_started_at": new_start.isoformat(),
+        "membership_ends_at": new_end.isoformat(),
+        "membership_last_checked_at": current_iso,
+        "plan": package_code,
     }
     upd = supabase.table("profiles").update(payload).eq("id", profile["id"]).execute()
     if getattr(upd, "data", None) is None and getattr(upd, "error", None):
