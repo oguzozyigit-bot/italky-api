@@ -125,7 +125,7 @@ def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> Opt
             raise HTTPException(status_code=400, detail="CODE_REQUIRED")
         try:
             res = supabase.table("promo_codes").select(
-                "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id"
+                "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id, marketplace"
             ).eq("code_value", final_code).eq("delivery_type", "manual").limit(1).execute()
         except Exception as exc:
             promo_log("campaign promo lookup failed; simple fallback will be tried", {"message": str(exc)})
@@ -138,7 +138,7 @@ def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> Opt
         if not final_uid:
             raise HTTPException(status_code=400, detail="UID_REQUIRED")
         res = supabase.table("promo_codes").select(
-            "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id"
+            "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id, marketplace"
         ).eq("delivery_type", "nfc").eq("nfc_uid", final_uid).limit(1).execute()
         rows = res.data or []
         if not rows:
@@ -158,7 +158,7 @@ def get_simple_code_record(source: str, code: Optional[str]) -> dict:
 
     try:
         res = supabase.table("promo_codes").select(
-            "id, code, duration_days, status, used_by, used_at, expires_at"
+            "id, code, duration_days, status, used_by, used_at, expires_at, marketplace"
         ).eq("code", final_code).limit(1).execute()
     except Exception as exc:
         promo_log("simple promo lookup failed", {"message": str(exc)})
@@ -329,14 +329,22 @@ def apply_tokens(profile: dict, campaign: dict) -> tuple[int, int]:
     return token_amount, next_tokens
 
 
-def mark_code_used(code_rec: dict, user_id: str) -> None:
+def code_used_payload(code_rec: dict, user_id: str) -> dict:
     payload = {
         "is_used": True,
         "used_by": user_id,
         "used_at": iso_now(),
+        "activated_at": iso_now(),
         "bound_user_id": user_id,
         "activated_by": user_id,
     }
+    if str(code_rec.get("marketplace") or "").strip().lower() == "trendyol":
+        payload["invoice_status"] = "handled_by_trendyol"
+    return payload
+
+
+def mark_code_used(code_rec: dict, user_id: str) -> None:
+    payload = code_used_payload(code_rec, user_id)
     try:
         upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).execute()
     except Exception as exc:
@@ -349,11 +357,15 @@ def mark_code_used(code_rec: dict, user_id: str) -> None:
 
 
 def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
-    upd = supabase.table("promo_codes").update({
+    payload = {
         "status": "used",
         "used_by": user_id,
         "used_at": iso_now(),
-    }).eq("id", code_rec["id"]).execute()
+        "activated_at": iso_now(),
+    }
+    if str(code_rec.get("marketplace") or "").strip().lower() == "trendyol":
+        payload["invoice_status"] = "handled_by_trendyol"
+    upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).execute()
     if getattr(upd, "data", None) is None and getattr(upd, "error", None):
         raise HTTPException(status_code=500, detail="PROMO_MARK_USED_FAILED")
 
