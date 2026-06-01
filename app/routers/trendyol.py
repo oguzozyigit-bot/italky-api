@@ -11,6 +11,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from app.routers.admin import _get_supabase, _safe_data
 
 router = APIRouter(prefix="/api/trendyol", tags=["Trendyol"])
+mp_router = APIRouter(prefix="/api/mp", tags=["Marketplace"])
 
 SKIPPED_PACKAGE_STATUSES = {
     "cancelled",
@@ -431,13 +432,23 @@ def processPendingTrendyolJobs(limit: int = 20) -> dict[str, Any]:
     return {"ok": True, "processed": len(results), "results": results}
 
 
-@router.post("/webhook")
-async def trendyol_webhook(request: Request, x_api_key: Optional[str] = Header(default=None)):
-    require_internal_key(x_api_key)
+async def enqueue_order_hook(request: Request) -> dict[str, bool]:
     body = await request.json()
     sb = _get_supabase()
     upsert_delivery_job(sb, body, status="pending")
     return {"ok": True}
+
+
+@router.post("/webhook")
+async def trendyol_webhook(request: Request, x_api_key: Optional[str] = Header(default=None)):
+    require_internal_key(x_api_key)
+    return await enqueue_order_hook(request)
+
+
+@mp_router.post("/order-hook")
+async def marketplace_order_hook(request: Request, x_api_key: Optional[str] = Header(default=None)):
+    require_internal_key(x_api_key)
+    return await enqueue_order_hook(request)
 
 
 @router.post("/process-jobs")
