@@ -21,6 +21,7 @@ SKIPPED_PACKAGE_STATUSES = {
 }
 DEFAULT_DELIVERY_SUFFIX = "alternative-delivery"
 DEFAULT_BASE_URL = "https://api.trendyol.com/sapigw"
+DEFAULT_ANDROID_DOWNLOAD_URL = "https://italky.ai/indir"
 
 
 def utc_now() -> datetime:
@@ -45,6 +46,10 @@ def seller_id() -> str:
 
 def delivery_suffix() -> str:
     return clean(os.getenv("TRENDYOL_DIGITAL_DELIVERY_SUFFIX")) or DEFAULT_DELIVERY_SUFFIX
+
+
+def android_download_url() -> str:
+    return clean(os.getenv("ANDROID_DOWNLOAD_URL")) or DEFAULT_ANDROID_DOWNLOAD_URL
 
 
 def base_url() -> str:
@@ -122,6 +127,11 @@ def trendyolRequest(path: str, opts: Optional[dict[str, Any]] = None) -> dict[st
         )
 
     return {"status_code": response.status_code, "data": data}
+
+
+def format_trendyol_digital_code(codes: list[str]) -> str:
+    code_text = " | ".join(f"{idx}) {code}" for idx, code in enumerate(codes, start=1)) if len(codes) > 1 else codes[0]
+    return f"Uygulamayı İndir: {android_download_url()}  Kodu Gir: {code_text}"
 
 
 def deliverTrendyolDigitalCode(payload: dict[str, Any]) -> dict[str, Any]:
@@ -309,7 +319,7 @@ def processTrendyolPackage(payload: dict[str, Any]) -> dict[str, Any]:
     if not matched_lines:
         return {"ok": True, "status": "skipped", "reason": "NO_MATCHING_SKU", "package_id": package_id}
 
-    digital_code = " | ".join(f"{idx}) {code}" for idx, code in enumerate(reserved_codes, start=1)) if len(reserved_codes) > 1 else reserved_codes[0]
+    digital_code = format_trendyol_digital_code(reserved_codes)
     if len(digital_code) > 120:
         update_reserved_rows(
             sb,
