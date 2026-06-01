@@ -205,11 +205,15 @@ def validate_user_eligibility(profile: dict) -> None:
         raise HTTPException(status_code=400, detail="PROMO_NOT_ALLOWED_WHILE_MEMBERSHIP_ACTIVE")
 
 
+def validate_code_unused(code_rec: dict) -> None:
+    if bool(code_rec.get("is_used", False)):
+        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+
+
 def validate_code_and_campaign(code_rec: dict, campaign: dict, user_id: str) -> None:
     if not bool(code_rec.get("is_active", False)):
         raise HTTPException(status_code=400, detail="PROMO_INACTIVE")
-    if bool(code_rec.get("is_used", False)):
-        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+    validate_code_unused(code_rec)
     bound_user_id = str(code_rec.get("bound_user_id") or "").strip()
     if bound_user_id and bound_user_id != user_id:
         raise HTTPException(status_code=400, detail="PROMO_ACCOUNT_MISMATCH")
@@ -418,11 +422,14 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
     redeem_user_id = resolve_redeem_user_id(payload.user_id, authorization)
 
     profile_before = get_profile(redeem_user_id)
-    validate_user_eligibility(profile_before)
 
     code_rec = get_code_record(payload.source, payload.code, payload.uid)
     if not code_rec:
+        validate_user_eligibility(profile_before)
         return redeem_simple_promo(payload, redeem_user_id, profile_before)
+
+    validate_code_unused(code_rec)
+    validate_user_eligibility(profile_before)
 
     campaign = get_campaign(code_rec["campaign_id"])
     validate_code_and_campaign(code_rec, campaign, redeem_user_id)
