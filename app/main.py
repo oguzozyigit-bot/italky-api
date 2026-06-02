@@ -1,72 +1,192 @@
+from __future__ import annotations
+
+import os
+from typing import List
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.sessions import SessionMiddleware
-import os
+from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
+
 from app.routers.auth import router as auth_router
-from app.routers.content import router as content_router
-from app.routers.progress import router as progress_router
-from app.routers.ai import router as ai_router
-from app.routers.stt import router as stt_router
-from app.routers.tts import router as tts_router
-from app.routers.admin import router as admin_router
-from app.routers.account import router as account_router
 from app.routers.session import router as session_router
-from app.routers.translator import router as translator_router
-from app.routers.support import router as support_router
-from app.routers.conversation import router as conversation_router
-from app.routers.paytr import router as paytr_router
+from app.routers.ios_iap import router as ios_iap_router
+from app.routers.license import router as license_router
+from app.routers.delete_account import router as delete_account_router
+from app.routers.italkyai_chat import router as italkyai_chat_router
+from app.routers.italkyai_voice import router as italkyai_voice_router
+from app.routers.push_token import router as push_token_router
+from app.routers.whatsapp_bridge import router as whatsapp_bridge_router
+# ROUTER IMPORTS
+from app.routers.ui_translate import router as ui_translate_router
+from app.routers.wallet import router as wallet_router
 from app.routers.promo import router as promo_router
+from app.routers.corporate_promo import router as corporate_promo_router
+from app.routers.corporate_promo_admin import router as corporate_promo_admin_router
+from app.routers.site_translate import router as site_translate_router
+from app.routers.meeting import router as meeting_router
+from app.routers.trendyol import mp_router as marketplace_router
+from app.routers.trendyol import router as trendyol_router
+
+# CORE ROUTERS
+from app.routers.chat_ai import router as chat_ai_router
+from app.routers.translate_ai import router as translate_ai_router
+from app.routers.command_parse import router as command_parse_router
+from app.routers.admin import router as admin_router
+from app.routers.f2f_ws import router as f2f_ws_router
+from app.routers.tts import router as tts_router
+from app.routers.voice_enroll import router as voice_enroll_router
+
+# BILLING ROUTERS
 from app.routers.billing_google import router as billing_google_router
 from app.routers.google_play_entitlement import router as google_play_entitlement_router
-from app.routers.trendyol import router as trendyol_router
-from app.routers.adapty import router as adapty_router
+from app.routers.usage_billing import router as usage_billing_router
 
-app = FastAPI(title="italky AI API", version="0.1.0")
+# OPTIONAL ROUTERS
+try:
+    from app.routers.exam_pro import router as exam_pro_router
+    has_exam_pro = True
+except Exception:
+    exam_pro_router = None
+    has_exam_pro = False
 
-# Session middleware for OAuth state
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=os.getenv("SESSION_SECRET", "dev-session-secret-change-in-prod"),
-    same_site="lax",
-    https_only=False,  # Render handles HTTPS termination
-    max_age=3600,
+try:
+    from app.routers.level_test import router as level_test_router
+    has_level_test = True
+except Exception:
+    level_test_router = None
+    has_level_test = False
+
+try:
+    from app.routers.ocr import router as ocr_router
+    has_ocr = True
+except Exception:
+    ocr_router = None
+    has_ocr = False
+
+try:
+    from app.routers.offline import router as offline_router
+    has_offline = True
+except Exception:
+    offline_router = None
+    has_offline = False
+
+try:
+    from app.routers.push_admin import router as push_admin_router
+    has_push_admin = True
+except Exception:
+    push_admin_router = None
+    has_push_admin = False
+
+APP_VERSION = os.getenv("APP_VERSION", "italky-api-v3.3").strip()
+
+app = FastAPI(
+    title="italky Academy API",
+    version=APP_VERSION,
+    description="Backend service for italky Academy",
+    redirect_slashes=False,
 )
 
-# CORS middleware
+# ===============================
+# STATIC
+# ===============================
+os.makedirs("static", exist_ok=True)
+app.mount("/assets", StaticFiles(directory="static"), name="assets")
+
+# ===============================
+# CORS
+# ===============================
+ALLOWED_ORIGINS: List[str] = [
+    "https://italky.ai",
+    "https://www.italky.ai",
+    "https://italky-web.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify your domain
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=None,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
 )
 
-# Include routers
-app.include_router(auth_router)
-app.include_router(content_router)
-app.include_router(progress_router)
-app.include_router(ai_router)
-app.include_router(stt_router)
-app.include_router(tts_router)
-app.include_router(admin_router)
-app.include_router(account_router)
-app.include_router(session_router)
-app.include_router(translator_router)
-app.include_router(support_router)
-app.include_router(conversation_router)
-app.include_router(paytr_router)
+# ===============================
+# ROUTERS
+# ===============================
+app.include_router(translate_ai_router, prefix="/api")
+app.include_router(command_parse_router, prefix="/api")
+app.include_router(tts_router, prefix="/api")
+app.include_router(f2f_ws_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
+app.include_router(corporate_promo_admin_router)
+app.include_router(voice_enroll_router, prefix="/api")
+app.include_router(chat_ai_router, prefix="/api")
+app.include_router(ui_translate_router, prefix="/api")
+app.include_router(meeting_router)
+app.include_router(push_token_router)
+
+app.include_router(italkyai_chat_router)
+app.include_router(italkyai_voice_router)
+app.include_router(wallet_router)
 app.include_router(promo_router)
+app.include_router(corporate_promo_router)
+app.include_router(site_translate_router)
+app.include_router(whatsapp_bridge_router)
+app.include_router(trendyol_router)
+app.include_router(marketplace_router)
+if has_push_admin and push_admin_router:
+    app.include_router(push_admin_router)
+
+app.include_router(session_router)
+app.include_router(ios_iap_router)
+app.include_router(license_router)
+app.include_router(delete_account_router)
+
+# AUTH
+app.include_router(auth_router)
+
+# BILLING
 app.include_router(google_play_entitlement_router)
 app.include_router(billing_google_router)
-app.include_router(trendyol_router)
-app.include_router(adapty_router)
+app.include_router(usage_billing_router)
 
+# OPTIONAL
+if has_offline and offline_router:
+    app.include_router(offline_router, prefix="/api")
 
+if has_level_test and level_test_router:
+    app.include_router(level_test_router, prefix="/api")
+
+if has_exam_pro and exam_pro_router:
+    app.include_router(exam_pro_router, prefix="/api")
+
+if has_ocr and ocr_router:
+    app.include_router(ocr_router, prefix="/api")
+
+# ===============================
+# HEALTH
+# ===============================
 @app.get("/")
-async def root():
-    return {"message": "italky AI API", "version": "0.1.0"}
+def root():
+    return {
+        "status": "online",
+        "service": "italky-academy-api",
+        "version": APP_VERSION,
+    }
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
+@app.get("/api/healthz")
+def api_healthz():
+    return {"status": "ok"}
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
