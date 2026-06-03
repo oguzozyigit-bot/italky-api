@@ -136,7 +136,7 @@ def _order_id(req: GoogleInAppConfirmReq, verification: dict[str, Any] | None = 
 def _get_inapp_purchase_owner(purchase_token: str) -> dict[str, Any] | None:
     res = (
         supabase.table("google_play_inapp_purchases")
-        .select("id,user_id,email,product_id,purchase_token,order_id")
+        .select("*")
         .eq("purchase_token", purchase_token)
         .limit(1)
         .execute()
@@ -168,7 +168,19 @@ def _write_inapp_purchase(
         "raw_payload": verification,
         "created_at": _iso(_now()),
     }
-    ins = supabase.table("google_play_inapp_purchases").insert(payload).execute()
+    try:
+        ins = supabase.table("google_play_inapp_purchases").insert(payload).execute()
+    except Exception:
+        minimal_payload = {
+            "user_id": user_id,
+            "email": email,
+            "product_id": product_id,
+            "purchase_token": purchase_token,
+            "order_id": order_id,
+            "days_added": days,
+            "created_at": _iso(_now()),
+        }
+        ins = supabase.table("google_play_inapp_purchases").insert(minimal_payload).execute()
     _assert_mutation_ok(ins, "google_play_inapp_purchase_insert_failed")
 
 
