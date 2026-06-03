@@ -39,6 +39,7 @@ from app.routers.voice_enroll import router as voice_enroll_router
 
 # BILLING ROUTERS
 from app.routers.billing_google import router as billing_google_router
+from app.routers.billing_google_inapp import router as billing_google_inapp_router
 from app.routers.google_play_entitlement import router as google_play_entitlement_router
 from app.routers.usage_billing import router as usage_billing_router
 
@@ -153,6 +154,7 @@ app.include_router(auth_router)
 # BILLING
 app.include_router(google_play_entitlement_router)
 app.include_router(billing_google_router)
+app.include_router(billing_google_inapp_router)
 app.include_router(usage_billing_router)
 
 # OPTIONAL
