@@ -31,6 +31,7 @@ class PromoRedeemResponse(BaseModel):
     reason: Optional[str] = None
     grant_type: Optional[str] = None
     membership_months: int = 0
+    membership_days: int = 0
     package_code: Optional[str] = None
     membership_started_at: Optional[str] = None
     membership_ends_at: Optional[str] = None
@@ -56,6 +57,13 @@ def iso_now() -> str:
 
 def clean(value: object) -> str:
     return str(value or "").strip()
+
+
+def safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except Exception:
+        return default
 
 
 def parse_dt(value: Optional[str]) -> Optional[datetime]:
@@ -176,7 +184,7 @@ def get_simple_code_record(source: str, code: Optional[str]) -> dict:
 def get_campaign(campaign_id: str) -> dict:
     res = supabase.table("promo_campaigns").select(
         "id, code, name, description, is_active, starts_at, ends_at, grant_type, "
-        "membership_months, token_amount, package_code, stack_mode, per_user_limit, max_total_redemptions"
+        "membership_months, membership_days, token_amount, package_code, stack_mode, per_user_limit, max_total_redemptions"
     ).eq("id", campaign_id).limit(1).execute()
     rows = res.data or []
     if not rows:
@@ -197,12 +205,16 @@ def count_total_redemptions(campaign_id: str) -> int:
 def active_base_date(profile: dict) -> datetime:
     current = now_utc()
     dates = [
-        parse_dt(profile.get("package_ends_at")),
         parse_dt(profile.get("membership_ends_at")),
+        parse_dt(profile.get("package_ends_at")),
         parse_dt(profile.get("trial_ends_at")),
+        current,
     ]
-    active_dates = [dt for dt in dates if dt and dt > current]
-    return max(active_dates) if active_dates else current
+    return max(dt for dt in dates if dt)
+
+
+def coalesce_started_at(profile: dict, key: str, current: datetime) -> datetime:
+    return parse_dt(profile.get(key)) or current
 
 
 def current_membership_start(profile: dict) -> datetime:
@@ -268,76 +280,146 @@ def validate_simple_code(code_rec: dict, user_id: str) -> int:
     if expires_at and expires_at <= now_utc():
         raise HTTPException(status_code=400, detail="PROMO_EXPIRED")
 
-    try:
-        duration_days = int(code_rec.get("duration_days") or 0)
-    except Exception:
-        duration_days = 0
+    duration_days = safe_int(code_rec.get("duration_days"), 0)
     if duration_days <= 0:
         raise HTTPException(status_code=400, detail="PROMO_NOT_ACTIVE")
 
     return duration_days
 
 
-def apply_membership(profile: dict, campaign: dict, promo_code: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    months = int(campaign.get("membership_months") or 0)
+def assert_mutation_ok(result: object, detail: str) -> None:
+    if getattr(result, "error", None):
+        raise HTTPException(status_code=500, detail=detail)
+    data = getattr(result, "data", None)
+    if data is None:
+        raise HTTPException(status_code=500, detail=detail)
+
+
+def write_access_duration_event(
+    *,
+    user_id: str,
+    email: Optional[str],
+    source_ref: str,
+    product_id: str,
+    days_added: int,
+    previous_ends_at: datetime,
+    new_ends_at: datetime,
+    metadata: dict,
+) -> None:
+    payload = {
+        "user_id": user_id,
+        "email": email,
+        "source": "promo_code",
+        "source_ref": source_ref,
+        "product_id": product_id,
+        "days_added": days_added,
+        "previous_ends_at": previous_ends_at.isoformat(),
+        "new_ends_at": new_ends_at.isoformat(),
+        "metadata": metadata,
+    }
+    try:
+        ins = supabase.table("access_duration_events").insert(payload).execute()
+        assert_mutation_ok(ins, "ACCESS_DURATION_EVENT_FAILED")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        promo_log("access duration event failed", {"message": str(exc)})
+        raise HTTPException(status_code=500, detail="ACCESS_DURATION_EVENT_FAILED")
+
+
+def apply_membership(profile: dict, campaign: dict, promo_code: str) -> tuple[Optional[str], Optional[str], Optional[str], int, int, Optional[datetime], Optional[datetime]]:
+    membership_days = safe_int(campaign.get("membership_days"), 0)
+    months = safe_int(campaign.get("membership_months"), 0)
     package_code = str(campaign.get("package_code") or "member").strip() or "member"
-    if months <= 0:
-        return profile.get("selected_package_code"), profile.get("package_started_at"), profile.get("package_ends_at")
+    if membership_days <= 0 and months <= 0:
+        return profile.get("selected_package_code"), profile.get("package_started_at"), profile.get("package_ends_at"), 0, 0, None, None
 
     current = now_utc()
     base = active_base_date(profile)
-    new_start = current_membership_start(profile)
-    new_end = add_months_safe(base, months)
+    if membership_days > 0:
+        new_end = base + timedelta(days=membership_days)
+        days_added = membership_days
+    else:
+        new_end = add_months_safe(base, months)
+        days_added = max(1, (new_end - base).days)
+
+    package_started_at = coalesce_started_at(profile, "package_started_at", current)
+    membership_started_at = coalesce_started_at(profile, "membership_started_at", current)
     current_iso = current.isoformat()
     payload = {
         "package_active": True,
         "selected_package_code": package_code,
-        "package_started_at": new_start.isoformat(),
+        "package_started_at": package_started_at.isoformat(),
         "package_ends_at": new_end.isoformat(),
         "promo_used_at": current_iso,
         "promo_code_used": promo_code,
         "membership_status": "active",
         "membership_source": "promo_code",
-        "membership_product_id": package_code,
-        "membership_started_at": new_start.isoformat(),
+        "membership_product_id": promo_code,
+        "membership_started_at": membership_started_at.isoformat(),
         "membership_ends_at": new_end.isoformat(),
         "membership_last_checked_at": current_iso,
         "plan": "member",
         "app_access_mode": "member",
     }
     upd = supabase.table("profiles").update(payload).eq("id", profile["id"]).execute()
-    if getattr(upd, "data", None) is None and getattr(upd, "error", None):
-        raise HTTPException(status_code=500, detail="PROFILE_UPDATE_FAILED")
-    return package_code, new_start.isoformat(), new_end.isoformat()
+    assert_mutation_ok(upd, "PROFILE_UPDATE_FAILED")
+
+    write_access_duration_event(
+        user_id=profile["id"],
+        email=profile.get("email"),
+        source_ref=promo_code,
+        product_id=package_code,
+        days_added=days_added,
+        previous_ends_at=base,
+        new_ends_at=new_end,
+        metadata={
+            "campaign_id": campaign.get("id"),
+            "code_value": promo_code,
+            "membership_days": membership_days,
+            "membership_months": months,
+        },
+    )
+    return package_code, membership_started_at.isoformat(), new_end.isoformat(), membership_days, months, base, new_end
 
 
 def apply_simple_membership(profile: dict, promo_code: str, duration_days: int) -> tuple[str, str, str]:
     current = now_utc()
     base = active_base_date(profile)
-    new_start = current_membership_start(profile)
     new_end = base + timedelta(days=duration_days)
     package_code = "promo_code"
+    package_started_at = coalesce_started_at(profile, "package_started_at", current)
+    membership_started_at = coalesce_started_at(profile, "membership_started_at", current)
     current_iso = current.isoformat()
     payload = {
         "package_active": True,
         "selected_package_code": package_code,
-        "package_started_at": new_start.isoformat(),
+        "package_started_at": package_started_at.isoformat(),
         "package_ends_at": new_end.isoformat(),
         "promo_used_at": current_iso,
         "promo_code_used": promo_code,
         "membership_status": "active",
         "membership_source": "promo_code",
-        "membership_product_id": package_code,
-        "membership_started_at": new_start.isoformat(),
+        "membership_product_id": promo_code,
+        "membership_started_at": membership_started_at.isoformat(),
         "membership_ends_at": new_end.isoformat(),
         "membership_last_checked_at": current_iso,
         "plan": "member",
         "app_access_mode": "member",
     }
     upd = supabase.table("profiles").update(payload).eq("id", profile["id"]).execute()
-    if getattr(upd, "data", None) is None and getattr(upd, "error", None):
-        raise HTTPException(status_code=500, detail="PROFILE_UPDATE_FAILED")
-    return package_code, new_start.isoformat(), new_end.isoformat()
+    assert_mutation_ok(upd, "PROFILE_UPDATE_FAILED")
+    write_access_duration_event(
+        user_id=profile["id"],
+        email=profile.get("email"),
+        source_ref=promo_code,
+        product_id=package_code,
+        days_added=duration_days,
+        previous_ends_at=base,
+        new_ends_at=new_end,
+        metadata={"campaign_id": None, "code_value": promo_code, "membership_days": duration_days},
+    )
+    return package_code, membership_started_at.isoformat(), new_end.isoformat()
 
 
 def apply_tokens(profile: dict, campaign: dict) -> tuple[int, int]:
@@ -346,8 +428,7 @@ def apply_tokens(profile: dict, campaign: dict) -> tuple[int, int]:
     next_tokens = current_tokens + token_amount
     if token_amount > 0:
         upd = supabase.table("profiles").update({"tokens": next_tokens}).eq("id", profile["id"]).execute()
-        if getattr(upd, "data", None) is None and getattr(upd, "error", None):
-            raise HTTPException(status_code=500, detail="PROFILE_TOKENS_UPDATE_FAILED")
+        assert_mutation_ok(upd, "PROFILE_TOKENS_UPDATE_FAILED")
     return token_amount, next_tokens
 
 
@@ -368,14 +449,15 @@ def code_used_payload(code_rec: dict, user_id: str) -> dict:
 def mark_code_used(code_rec: dict, user_id: str) -> None:
     payload = code_used_payload(code_rec, user_id)
     try:
-        upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).execute()
+        upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).eq("is_used", False).execute()
     except Exception as exc:
         promo_log("activated_by update retry without optional column", {"message": str(exc), "promo_code_id": code_rec.get("id")})
         payload.pop("activated_by", None)
-        upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).execute()
+        upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).eq("is_used", False).execute()
 
-    if getattr(upd, "data", None) is None and getattr(upd, "error", None):
-        raise HTTPException(status_code=500, detail="PROMO_MARK_USED_FAILED")
+    assert_mutation_ok(upd, "PROMO_MARK_USED_FAILED")
+    if not (getattr(upd, "data", None) or []):
+        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
 
 
 def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
@@ -387,9 +469,10 @@ def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
     }
     if str(code_rec.get("marketplace") or "").strip().lower() == "trendyol":
         payload["invoice_status"] = "handled_by_trendyol"
-    upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).execute()
-    if getattr(upd, "data", None) is None and getattr(upd, "error", None):
-        raise HTTPException(status_code=500, detail="PROMO_MARK_USED_FAILED")
+    upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).eq("status", str(code_rec.get("status") or "")).execute()
+    assert_mutation_ok(upd, "PROMO_MARK_USED_FAILED")
+    if not (getattr(upd, "data", None) or []):
+        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
 
 
 def get_profile_after(user_id: str) -> dict:
@@ -414,13 +497,12 @@ def log_redemption(code_rec: dict, campaign: dict, profile_before: dict, profile
         "after_tokens": int(profile_after.get("tokens") or 0),
         "created_at": iso_now(),
     }).execute()
-    if getattr(ins, "data", None) is None and getattr(ins, "error", None):
-        raise HTTPException(status_code=500, detail="PROMO_LOG_FAILED")
+    assert_mutation_ok(ins, "PROMO_LOG_FAILED")
 
 
-def build_success_message(grant_type: str, membership_months: int, tokens_loaded: int) -> str:
+def build_success_message(grant_type: str, membership_months: int, membership_days: int, tokens_loaded: int) -> str:
     parts: list[str] = []
-    if grant_type in ("membership", "bundle") and membership_months > 0:
+    if grant_type in ("membership", "bundle") and (membership_days > 0 or membership_months > 0):
         parts.append("kullanım süreniz uzatıldı")
     if grant_type in ("tokens", "bundle") and tokens_loaded > 0:
         parts.append(f"{tokens_loaded} jeton yüklendi")
@@ -430,9 +512,10 @@ def build_success_message(grant_type: str, membership_months: int, tokens_loaded
 def redeem_simple_promo(payload: PromoRedeemRequest, redeem_user_id: str, profile_before: dict) -> PromoRedeemResponse:
     simple_code = get_simple_code_record(payload.source, payload.code)
     duration_days = validate_simple_code(simple_code, redeem_user_id)
+    code_value = str(simple_code.get("code") or payload.code or "").strip().upper()
     package_code, membership_started_at, membership_ends_at = apply_simple_membership(
         profile_before,
-        str(simple_code.get("code") or payload.code or "").strip().upper(),
+        code_value,
         duration_days,
     )
     mark_simple_code_used(simple_code, redeem_user_id)
@@ -442,6 +525,7 @@ def redeem_simple_promo(payload: PromoRedeemRequest, redeem_user_id: str, profil
         ok=True,
         grant_type="membership",
         membership_months=0,
+        membership_days=duration_days,
         package_code=package_code,
         membership_started_at=membership_started_at,
         membership_ends_at=membership_ends_at,
@@ -468,19 +552,21 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
     campaign = get_campaign(code_rec["campaign_id"])
     validate_code_and_campaign(code_rec, campaign, redeem_user_id)
 
-    membership_months = int(campaign.get("membership_months") or 0)
+    membership_months = safe_int(campaign.get("membership_months"), 0)
+    membership_days = safe_int(campaign.get("membership_days"), 0)
     package_code = str(campaign.get("package_code") or "member").strip() or "member"
     grant_type = str(campaign.get("grant_type") or "").strip()
+    code_value = str(code_rec.get("code_value") or "").strip()
 
     membership_started_at = None
     membership_ends_at = None
     tokens_loaded = 0
 
     if grant_type in ("membership", "bundle"):
-        package_code, membership_started_at, membership_ends_at = apply_membership(
+        package_code, membership_started_at, membership_ends_at, membership_days, membership_months, _, _ = apply_membership(
             profile_before,
             campaign,
-            str(code_rec.get("code_value") or "").strip()
+            code_value,
         )
 
     profile_mid = get_profile(redeem_user_id)
@@ -506,10 +592,11 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
         ok=True,
         grant_type=grant_type,
         membership_months=membership_months,
+        membership_days=membership_days,
         package_code=package_code,
         membership_started_at=membership_started_at,
         membership_ends_at=membership_ends_at,
         tokens_loaded=tokens_loaded,
         tokens_after=int(profile_after.get("tokens") or 0),
-        message=build_success_message(grant_type, membership_months, tokens_loaded),
+        message=build_success_message(grant_type, membership_months, membership_days, tokens_loaded),
     )
