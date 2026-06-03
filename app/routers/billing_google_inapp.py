@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import requests
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -13,7 +14,7 @@ from app.routers.billing_google import (
     _clean,
     _clean_lower,
     _get_purchase_owner,
-    _google_get,
+    _google_access_token,
     _insert_purchase_log,
     _iso,
     _now,
@@ -113,13 +114,50 @@ def _assert_mutation_ok(result: object, detail: str) -> None:
         raise HTTPException(status_code=500, detail=detail)
 
 
+def _google_get_inapp(url: str) -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {_google_access_token()}"}
+    try:
+        response = requests.get(url, headers=headers, timeout=12)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "google_play_request_failed", "message": str(exc)},
+        ) from exc
+
+    if response.status_code == 404:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "google_play_purchase_not_found", "google_status": 404},
+        )
+
+    if not response.ok:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "google_play_verification_failed",
+                "google_status": response.status_code,
+                "google_body": response.text[:600],
+            },
+        )
+
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"error": "google_play_invalid_json", "message": str(exc)},
+        ) from exc
+
+    return data or {}
+
+
 def _verify_inapp_product(product_id: str, purchase_token: str) -> dict[str, Any]:
     url = (
         "https://androidpublisher.googleapis.com/androidpublisher/v3/"
         f"applications/{PACKAGE_NAME}/purchases/products/"
         f"{product_id}/tokens/{purchase_token}"
     )
-    data = _google_get(url)
+    data = _google_get_inapp(url)
     purchase_state = int(data.get("purchaseState", 1))
     if purchase_state != 0:
         raise HTTPException(
