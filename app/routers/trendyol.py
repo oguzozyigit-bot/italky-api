@@ -523,6 +523,18 @@ def send_trendyol_digital_code_sms(phone: str, digital_code: str, dry_run: bool)
     return {"to": phone, "sent": False, "enabled": False, "dry_run": dry_run, "reason": "TRENDYOL_ADEL_SMS_USED"}
 
 
+def contains_text(value: Any, needle: str) -> bool:
+    if isinstance(value, dict):
+        return any(contains_text(item, needle) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_text(item, needle) for item in value)
+    return needle.lower() in clean(value).lower()
+
+
+def digital_good_already_exists(detail: Any) -> bool:
+    return contains_text(detail, "digital.good.already.exist") or contains_text(detail, "digital good already exist")
+
+
 def build_alternative_delivery_payload(digital_code: str) -> dict[str, Any]:
     mode = alternative_delivery_contact_mode()
     if mode == "phone":
@@ -558,6 +570,16 @@ def send_alternative_delivery(package_id: int, digital_code: str, dry_run: bool)
             "response": delivery.get("response"),
         }
     except HTTPException as exc:
+        if digital_good_already_exists(exc.detail):
+            return {
+                "status": "already_sent",
+                "sent": True,
+                "sent_at": iso_now(),
+                "dry_run": False,
+                "reason": "ADEL_ALREADY_SENT",
+                "detail": exc.detail,
+                "payload": planned_payload,
+            }
         return {
             "status": "failed",
             "sent": False,
@@ -748,13 +770,14 @@ def adel_already_sent(processed_reason: Optional[str], existing_automation: dict
         if isinstance(existing_automation.get("alternative_delivery"), dict)
         else {}
     )
-    return bool(alternative_delivery.get("sent") is True or clean(alternative_delivery.get("status")).lower() == "sent")
+    status = clean(alternative_delivery.get("status")).lower()
+    return bool(alternative_delivery.get("sent") is True or status in {"sent", "already_sent"})
 
 
 def code_status_from(processed_reason: Optional[str], adel_result: dict[str, Any], reserved_codes: list[str]) -> str:
     if processed_reason == "CODE_ALREADY_USED":
         return "used"
-    if adel_result.get("sent") or clean(adel_result.get("status")).lower() == "sent":
+    if adel_result.get("sent") or clean(adel_result.get("status")).lower() in {"sent", "already_sent"}:
         return "sent"
     if reserved_codes:
         return "reserved"
@@ -1149,7 +1172,7 @@ def status_from_automation_result(result: dict[str, Any]) -> str:
         return "delivered"
     if manual_deliver.get("status") == "scheduled":
         return "manual_deliver_scheduled"
-    if alternative_delivery.get("sent") or clean(alternative_delivery.get("status")).lower() == "sent":
+    if alternative_delivery.get("sent") or clean(alternative_delivery.get("status")).lower() in {"sent", "already_sent"}:
         return "sent"
     return "failed"
 
