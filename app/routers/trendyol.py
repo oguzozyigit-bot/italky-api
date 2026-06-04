@@ -69,7 +69,7 @@ def support_url() -> str:
 
 
 def alternative_delivery_contact_mode() -> str:
-    mode = clean(os.getenv("TRENDYOL_DELIVERY_CONTACT_MODE")).lower() or "link"
+    mode = clean(os.getenv("TRENDYOL_DELIVERY_CONTACT_MODE")).lower() or "phone"
     if mode not in {"link", "phone"}:
         raise HTTPException(status_code=400, detail="TRENDYOL_DELIVERY_CONTACT_MODE_INVALID")
     return mode
@@ -601,6 +601,26 @@ def select_automatable_line(sb: Any, pkg: dict[str, Any], dry_run: bool) -> tupl
     raise HTTPException(status_code=400, detail="NO_SUPPORTED_TRENDYOL_SKU")
 
 
+def already_processed_reason(reserved_rows: list[dict[str, Any]], existing_automation: dict[str, Any]) -> Optional[str]:
+    for row in reserved_rows:
+        if row.get("is_used") is True:
+            return "CODE_ALREADY_USED"
+
+    for row in reserved_rows:
+        status = clean(row.get("delivery_status")).lower()
+        if status in {"delivered", "sent"} or row.get("delivered_at"):
+            return "ADEL_ALREADY_SENT"
+
+    alternative_delivery = (
+        existing_automation.get("alternative_delivery")
+        if isinstance(existing_automation.get("alternative_delivery"), dict)
+        else {}
+    )
+    if alternative_delivery.get("sent") is True:
+        return "ADEL_ALREADY_SENT"
+    return None
+
+
 def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual_deliver: bool = False) -> dict[str, Any]:
     sb = _get_supabase()
     package_id = package_id_from(pkg)
@@ -632,11 +652,22 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
     contact = customer_contact_from(pkg)
     email_result = send_trendyol_digital_code_email(contact["email"], digital_code, dry_run)
     sms_result = send_trendyol_digital_code_sms(contact["phone"], digital_code, dry_run)
-    adel_result = send_alternative_delivery(package_id, digital_code, dry_run)
-    manual_deliver = manual_deliver_package(package_id, dry_run) if attempt_manual_deliver else {
+    reserved_rows = get_reserved_rows(sb, reserved_codes) if not dry_run and reserved_codes else []
+    processed_reason = already_processed_reason(reserved_rows, existing_automation) if not dry_run else None
+    if processed_reason:
+        adel_result = {
+            "sent": False,
+            "skipped": True,
+            "dry_run": False,
+            "reason": processed_reason,
+            "message": "Existing Trendyol code/order is already processed; ADEL resend skipped.",
+        }
+    else:
+        adel_result = send_alternative_delivery(package_id, digital_code, dry_run)
+    manual_deliver = manual_deliver_package(package_id, dry_run) if attempt_manual_deliver and not processed_reason else {
         "attempted": False,
-        "status": "not_required_now",
-        "reason": "ADEL_SMS_FLOW_ADVANCES_WITHOUT_MANUAL_DELIVER_IN_TEST",
+        "status": "already_processed" if processed_reason else "not_required_now",
+        "reason": processed_reason or "ADEL_SMS_FLOW_ADVANCES_WITHOUT_MANUAL_DELIVER_IN_TEST",
     }
 
     automation = {
@@ -650,6 +681,8 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         "reserved_codes": reserved_codes,
         "digital_code": digital_code if reserved_codes else None,
         "customer_contact": contact,
+        "already_processed": bool(processed_reason),
+        "already_processed_reason": processed_reason,
         "email": email_result,
         "sms": sms_result,
         "alternative_delivery": adel_result,
@@ -662,8 +695,9 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
     if not dry_run:
         job_payload = dict(pkg)
         job_payload["automation"] = automation
-        upsert_delivery_job(sb, job_payload, status="delivered" if adel_result.get("sent") else "failed")
-        if reserved_codes:
+        job_status = "delivered" if adel_result.get("sent") or processed_reason else "failed"
+        upsert_delivery_job(sb, job_payload, status=job_status)
+        if reserved_codes and not processed_reason:
             update_reserved_rows(
                 sb,
                 reserved_codes,
@@ -713,7 +747,10 @@ def get_reserved_rows(sb: Any, codes: list[str]) -> list[dict[str, Any]]:
     for code in codes:
         res = (
             sb.table("promo_codes")
-            .select("id, code_value, delivery_attempt_count")
+            .select(
+                "id, code_value, is_used, delivery_status, delivered_at, "
+                "delivery_attempt_count, delivery_error"
+            )
             .eq("code_value", code)
             .limit(1)
             .execute()
