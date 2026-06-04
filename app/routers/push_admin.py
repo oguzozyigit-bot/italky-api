@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -35,6 +36,13 @@ class PushSendReq(BaseModel):
     body: str
     push_type: str = "general"
     target_url: str = "/pages/home.html"
+
+
+class ExpiryReminderReq(BaseModel):
+    hours_left: int = Field(default=12, ge=1, le=72)
+    title: str = "italkyAI süreniz dolmak üzere"
+    body: str = "Kullanım süreniz yakında sona eriyor. Size özel gün satın alma fırsatlarını kaçırmayın."
+    target_url: str = "/pages/upgrade_pack.html"
 
 
 def _get_bearer(auth_header: str | None) -> str:
@@ -112,6 +120,19 @@ def _firebase_access_token() -> str:
         raise HTTPException(status_code=500, detail=f"firebase_auth_failed: {e}")
 
 
+def _parse_dt(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
 def _select_tokens_for_single(user_id: str) -> List[Dict[str, Any]]:
     res = (
         supabase.table("profiles")
@@ -143,6 +164,43 @@ def _select_tokens_for_all() -> List[Dict[str, Any]]:
             continue
         seen.add(token)
         out.append(row)
+
+    return out
+
+
+def _select_membership_expiry_targets(hours_left: int) -> List[Dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    max_end = now + timedelta(hours=hours_left)
+
+    res = (
+        supabase.table("profiles")
+        .select("id,email,fcm_token,package_active,package_ends_at,membership_status,membership_ends_at,plan,app_access_mode")
+        .neq("fcm_token", "")
+        .execute()
+    )
+    rows = getattr(res, "data", None) or []
+
+    out = []
+    seen_tokens = set()
+    for row in rows:
+        token = str(row.get("fcm_token") or "").strip()
+        if not token or token in seen_tokens:
+            continue
+
+        package_end = _parse_dt(row.get("package_ends_at"))
+        membership_end = _parse_dt(row.get("membership_ends_at"))
+        end_at = membership_end or package_end
+        if not end_at:
+            continue
+
+        if end_at <= now or end_at > max_end:
+            continue
+
+        if not bool(row.get("package_active")) and str(row.get("membership_status") or "").lower() != "active":
+            continue
+
+        seen_tokens.add(token)
+        out.append({**row, "expires_at": end_at.isoformat()})
 
     return out
 
@@ -207,6 +265,55 @@ def _send_fcm_message(
     }
 
 
+def _send_to_targets(targets: List[Dict[str, Any]], title: str, body: str, push_type: str, target_url: str) -> Dict[str, Any]:
+    if not targets:
+        return {
+            "ok": False,
+            "detail": "no_target_tokens_found",
+            "sent": 0,
+            "failed": 0,
+            "results": [],
+        }
+
+    access_token = _firebase_access_token()
+
+    results = []
+    sent = 0
+    failed = 0
+
+    for row in targets:
+        fcm_token = str(row.get("fcm_token") or "").strip()
+        result = _send_fcm_message(
+            access_token=access_token,
+            device_token=fcm_token,
+            title=title,
+            body=body,
+            push_type=push_type,
+            target_url=target_url,
+        )
+        results.append(
+            {
+                "user_id": row.get("id"),
+                "email": row.get("email"),
+                "expires_at": row.get("expires_at"),
+                "ok": result["ok"],
+                "status_code": result["status_code"],
+                "response": result["response"],
+            }
+        )
+        if result["ok"]:
+            sent += 1
+        else:
+            failed += 1
+
+    return {
+        "ok": sent > 0,
+        "sent": sent,
+        "failed": failed,
+        "results": results,
+    }
+
+
 @router.post("/send")
 def admin_push_send(
     req: PushSendReq,
@@ -238,49 +345,28 @@ def admin_push_send(
     else:
         targets = _select_tokens_for_all()
 
-    if not targets:
-        return {
-            "ok": False,
-            "detail": "no_target_tokens_found",
-            "sent": 0,
-            "failed": 0,
-            "results": [],
-        }
+    result = _send_to_targets(targets, title, body, push_type, target_url)
+    result["target_mode"] = target_mode
+    return result
 
-    access_token = _firebase_access_token()
 
-    results = []
-    sent = 0
-    failed = 0
+@router.post("/membership-expiry-reminders")
+def admin_membership_expiry_reminders(
+    req: ExpiryReminderReq,
+    authorization: str | None = Header(default=None),
+):
+    token = _get_bearer(authorization)
+    current_user = _get_current_user(token)
+    _require_admin(current_user["id"])
 
-    for row in targets:
-        fcm_token = str(row.get("fcm_token") or "").strip()
-        result = _send_fcm_message(
-            access_token=access_token,
-            device_token=fcm_token,
-            title=title,
-            body=body,
-            push_type=push_type,
-            target_url=target_url,
-        )
-        results.append(
-            {
-                "user_id": row.get("id"),
-                "email": row.get("email"),
-                "ok": result["ok"],
-                "status_code": result["status_code"],
-                "response": result["response"],
-            }
-        )
-        if result["ok"]:
-            sent += 1
-        else:
-            failed += 1
-
-    return {
-        "ok": sent > 0,
-        "target_mode": target_mode,
-        "sent": sent,
-        "failed": failed,
-        "results": results,
-    }
+    targets = _select_membership_expiry_targets(req.hours_left)
+    result = _send_to_targets(
+        targets=targets,
+        title=str(req.title or "italkyAI süreniz dolmak üzere").strip(),
+        body=str(req.body or "Kullanım süreniz yakında sona eriyor. Size özel gün satın alma fırsatlarını kaçırmayın.").strip(),
+        push_type="membership",
+        target_url=str(req.target_url or "/pages/upgrade_pack.html").strip() or "/pages/upgrade_pack.html",
+    )
+    result["hours_left"] = req.hours_left
+    result["target_count"] = len(targets)
+    return result
