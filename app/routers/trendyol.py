@@ -3,7 +3,8 @@ from __future__ import annotations
 import base64
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+import random
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -25,7 +26,10 @@ SKIPPED_PACKAGE_STATUSES = {
 DEFAULT_DELIVERY_SUFFIX = "alternative-delivery"
 DEFAULT_BASE_URL = "https://api.trendyol.com/sapigw"
 DEFAULT_ANDROID_DOWNLOAD_URL = "https://italky.ai/indir"
-MANUAL_DELIVER_DELAY_HOURS = 6
+CODE_LETTERS = "ABCDEFGHJKLMNPRSTUVYZ"
+CODE_DIGITS = "23456789"
+FORBIDDEN_CODE_PREFIXES = {"GS", "FB", "FG"}
+FORBIDDEN_CODE_NUMBERS = {"1903", "1905", "1907"}
 
 
 def utc_now() -> datetime:
@@ -75,9 +79,7 @@ def require_debug_key(key: Optional[str], x_internal_key: Optional[str]) -> None
 
 def safe_error(exc: Exception) -> str:
     text = str(exc or "").strip()
-    api_key = clean(os.getenv("TRENDYOL_API_KEY"))
-    api_secret = clean(os.getenv("TRENDYOL_API_SECRET"))
-    for secret in (api_key, api_secret):
+    for secret in (clean(os.getenv("TRENDYOL_API_KEY")), clean(os.getenv("TRENDYOL_API_SECRET"))):
         if secret:
             text = text.replace(secret, "***")
     return text[:1000]
@@ -85,7 +87,7 @@ def safe_error(exc: Exception) -> str:
 
 def log_credential_presence() -> None:
     logger.info(
-        "trendyol debug credentials sellerId=%s apiKey=%s apiSecret=%s enabled=%s",
+        "trendyol credentials sellerId=%s apiKey=%s apiSecret=%s enabled=%s",
         bool(seller_id()),
         bool(clean(os.getenv("TRENDYOL_API_KEY"))),
         bool(clean(os.getenv("TRENDYOL_API_SECRET"))),
@@ -140,40 +142,61 @@ def trendyolRequest(path: str, opts: Optional[dict[str, Any]] = None) -> dict[st
     if response.status_code < 200 or response.status_code >= 300:
         raise HTTPException(
             status_code=502,
-            detail={
-                "reason": "TRENDYOL_HTTP_ERROR",
-                "status_code": response.status_code,
-                "response": data,
-            },
+            detail={"reason": "TRENDYOL_HTTP_ERROR", "status_code": response.status_code, "response": data},
         )
-
     return {"status_code": response.status_code, "data": data}
 
 
-def response_preview(data: Any) -> dict[str, Any]:
-    packages = extract_packages(data)
-    first = packages[0] if packages else {}
-    return {
-        "top_level_type": type(data).__name__,
-        "top_level_keys": list(data.keys())[:30] if isinstance(data, dict) else [],
-        "package_count": len(packages),
-        "first_package_keys": list(first.keys())[:30] if isinstance(first, dict) else [],
-        "first_orderNumber_exists": bool(clean(first.get("orderNumber"))) if isinstance(first, dict) else False,
-        "first_package_id_exists": bool(package_id_from(first)) if isinstance(first, dict) else False,
-    }
+def get_value(obj: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in obj and obj.get(key) is not None:
+            return obj.get(key)
+    return None
 
 
-def debug_trendyol_order_request(params: dict[str, str]) -> dict[str, Any]:
-    query = "&".join(f"{name}={quote(value)}" for name, value in params.items() if clean(value))
-    path = f"/integration/order/sellers/{seller_id()}/orders"
-    if query:
-        path = f"{path}?{query}"
+def normalize_package(raw: dict[str, Any]) -> dict[str, Any]:
+    pkg = raw.get("pkg") if isinstance(raw.get("pkg"), dict) else raw
+    if isinstance(pkg.get("package"), dict):
+        pkg = pkg["package"]
+    if isinstance(pkg.get("shipmentPackage"), dict):
+        pkg = pkg["shipmentPackage"]
+    return pkg
 
-    logger.info("trendyol debug request path=%s", path.split("?")[0])
-    response = trendyolRequest(path, {"method": "GET"})
-    logger.info("trendyol debug response code=%s", response.get("status_code"))
-    logger.info("trendyol debug response preview=%s", response_preview(response.get("data")))
-    return response
+
+def package_id_from(pkg: dict[str, Any]) -> Optional[int]:
+    value = get_value(pkg, "id", "shipmentPackageId", "packageId")
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def order_number_from(pkg: dict[str, Any]) -> str:
+    return clean(get_value(pkg, "orderNumber", "order_number", "orderNo", "orderId"))
+
+
+def package_status_from(pkg: dict[str, Any]) -> str:
+    return clean(get_value(pkg, "status", "shipmentPackageStatus", "packageStatus"))
+
+
+def line_quantity(line: dict[str, Any]) -> int:
+    try:
+        return max(1, int(get_value(line, "quantity", "amount") or 1))
+    except Exception:
+        return 1
+
+
+def line_id_from(line: dict[str, Any]) -> int:
+    value = get_value(line, "lineId", "id", "orderLineId")
+    try:
+        return int(value)
+    except Exception:
+        return 0
+
+
+def package_lines(pkg: dict[str, Any]) -> list[dict[str, Any]]:
+    lines = pkg.get("lines") or pkg.get("items") or []
+    return [line for line in lines if isinstance(line, dict)] if isinstance(lines, list) else []
 
 
 def extract_packages(data: Any) -> list[dict[str, Any]]:
@@ -181,7 +204,6 @@ def extract_packages(data: Any) -> list[dict[str, Any]]:
         return [item for item in data if isinstance(item, dict)]
     if not isinstance(data, dict):
         return []
-
     for key in ("content", "shipmentPackages", "orders"):
         value = data.get(key)
         if isinstance(value, list):
@@ -224,7 +246,6 @@ def summarize_order_response(data: Any) -> dict[str, Any]:
     shipment_address = pkg.get("shipmentAddress") if isinstance(pkg.get("shipmentAddress"), dict) else {}
     invoice_address = pkg.get("invoiceAddress") if isinstance(pkg.get("invoiceAddress"), dict) else {}
     lines = pkg.get("lines") if isinstance(pkg.get("lines"), list) else []
-
     return {
         "customerEmail_exists": has_value(pkg.get("customerEmail")),
         "customerFirstName_exists": has_value(pkg.get("customerFirstName")),
@@ -246,17 +267,38 @@ def summarize_order_response(data: Any) -> dict[str, Any]:
 
 
 def debug_error_response(error: str, detail: Any, stage: str) -> dict[str, Any]:
+    return {"ok": False, "error": error, "detail": detail if isinstance(detail, str) else str(detail), "stage": stage}
+
+
+def response_preview(data: Any) -> dict[str, Any]:
+    packages = extract_packages(data)
+    first = packages[0] if packages else {}
     return {
-        "ok": False,
-        "error": error,
-        "detail": detail if isinstance(detail, str) else str(detail),
-        "stage": stage,
+        "top_level_type": type(data).__name__,
+        "top_level_keys": list(data.keys())[:30] if isinstance(data, dict) else [],
+        "package_count": len(packages),
+        "first_package_keys": list(first.keys())[:30] if isinstance(first, dict) else [],
+        "first_orderNumber_exists": bool(clean(first.get("orderNumber"))) if isinstance(first, dict) else False,
+        "first_package_id_exists": bool(package_id_from(first)) if isinstance(first, dict) else False,
     }
+
+
+def debug_trendyol_order_request(params: dict[str, str]) -> dict[str, Any]:
+    query = "&".join(f"{name}={quote(value)}" for name, value in params.items() if clean(value))
+    path = f"/integration/order/sellers/{seller_id()}/orders"
+    if query:
+        path = f"{path}?{query}"
+
+    logger.info("trendyol request path=%s", path.split("?")[0])
+    response = trendyolRequest(path, {"method": "GET"})
+    logger.info("trendyol response code=%s", response.get("status_code"))
+    logger.info("trendyol response preview=%s", response_preview(response.get("data")))
+    return response
 
 
 def format_trendyol_digital_code(codes: list[str]) -> str:
     code_text = " | ".join(f"{idx}) {code}" for idx, code in enumerate(codes, start=1)) if len(codes) > 1 else codes[0]
-    return f"Uygulamayı İndir: {android_download_url()}  Kodu Gir: {code_text}"
+    return f"Uygulamayi Indir: {android_download_url()}  Kodu Gir: {code_text}"
 
 
 def resolve_days_from_stock_code(stock_code: object = "", barcode: object = "") -> Optional[int]:
@@ -275,11 +317,6 @@ def resolve_days_from_stock_code(stock_code: object = "", barcode: object = "") 
     return None
 
 
-def package_lines(pkg: dict[str, Any]) -> list[dict[str, Any]]:
-    lines = pkg.get("lines") or pkg.get("items") or []
-    return [line for line in lines if isinstance(line, dict)] if isinstance(lines, list) else []
-
-
 def customer_contact_from(pkg: dict[str, Any]) -> dict[str, Any]:
     shipment_address = pkg.get("shipmentAddress") if isinstance(pkg.get("shipmentAddress"), dict) else {}
     invoice_address = pkg.get("invoiceAddress") if isinstance(pkg.get("invoiceAddress"), dict) else {}
@@ -295,316 +332,6 @@ def customer_contact_from(pkg: dict[str, Any]) -> dict[str, Any]:
         "customerEmail_exists": bool(email),
         "phone_exists": bool(phone),
     }
-
-
-def delivery_job_for(sb: Any, order_number: str, package_id: int) -> Optional[dict[str, Any]]:
-    res = (
-        sb.table("marketplace_delivery_jobs")
-        .select("*")
-        .eq("marketplace", "trendyol")
-        .eq("order_number", order_number)
-        .eq("package_id", package_id)
-        .limit(1)
-        .execute()
-    )
-    rows = _safe_data(res) or []
-    return rows[0] if rows else None
-
-
-def automation_from_job(job: Optional[dict[str, Any]]) -> dict[str, Any]:
-    if not job:
-        return {}
-    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
-    automation = payload.get("automation") if isinstance(payload.get("automation"), dict) else {}
-    return automation
-
-
-def send_trendyol_digital_code_email(email: str, digital_code: str, dry_run: bool) -> dict[str, Any]:
-    enabled = env_bool("TRENDYOL_EMAIL_ENABLED")
-    result = {"to": email, "sent": False, "enabled": enabled, "dry_run": dry_run}
-    if not email:
-        result["reason"] = "EMAIL_MISSING"
-        return result
-    if dry_run:
-        result["reason"] = "DRY_RUN"
-        return result
-    if not enabled:
-        result["reason"] = "EMAIL_STUB_ONLY"
-        logger.info("trendyol email stub to_exists=%s code_length=%s", bool(email), len(digital_code))
-        return result
-
-    result["reason"] = "EMAIL_PROVIDER_NOT_CONFIGURED"
-    logger.info("trendyol email provider enabled but send implementation is not configured")
-    return result
-
-
-def send_trendyol_digital_code_sms(phone: str, digital_code: str, dry_run: bool) -> dict[str, Any]:
-    enabled = env_bool("TRENDYOL_SMS_ENABLED")
-    result = {"to": phone, "sent": False, "enabled": enabled, "dry_run": dry_run}
-    if not phone:
-        result["reason"] = "PHONE_MISSING"
-        return result
-    if dry_run:
-        result["reason"] = "DRY_RUN"
-        return result
-    if not enabled:
-        result["reason"] = "SMS_STUB_ONLY"
-        logger.info("trendyol sms stub phone_exists=%s code_length=%s", bool(phone), len(digital_code))
-        return result
-
-    result["reason"] = "SMS_PROVIDER_NOT_CONFIGURED"
-    logger.info("trendyol sms provider enabled but send implementation is not configured")
-    return result
-
-
-def send_alternative_delivery(package_id: int, digital_code: str, dry_run: bool) -> dict[str, Any]:
-    if dry_run:
-        return {"sent": False, "dry_run": True, "reason": "DRY_RUN"}
-    try:
-        delivery = deliverTrendyolDigitalCode({"packageId": package_id, "digitalCode": digital_code})
-        return {"sent": True, "dry_run": False, "payload": delivery.get("payload"), "response": delivery.get("response")}
-    except HTTPException as exc:
-        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": exc.detail}
-    except Exception as exc:
-        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": safe_error(exc)}
-
-
-def manual_deliver_package(package_id: int, dry_run: bool) -> dict[str, Any]:
-    if dry_run:
-        return {"attempted": False, "dry_run": True, "reason": "DRY_RUN"}
-    path = f"/integration/order/sellers/{seller_id()}/shipment-packages/{package_id}/manual-deliver"
-    try:
-        response = trendyolRequest(path, {"method": "PUT", "body": {}})
-        return {"attempted": True, "success": True, "response": response}
-    except HTTPException as exc:
-        return {"attempted": True, "success": False, "detail": exc.detail}
-    except Exception as exc:
-        return {"attempted": True, "success": False, "detail": safe_error(exc)}
-
-
-def schedule_manual_deliver(existing_automation: dict[str, Any], dry_run: bool) -> dict[str, Any]:
-    existing = existing_automation.get("manual_deliver") if isinstance(existing_automation.get("manual_deliver"), dict) else {}
-    if existing.get("status") in {"scheduled", "success"}:
-        return existing
-    not_before = (utc_now() + timedelta(hours=MANUAL_DELIVER_DELAY_HOURS)).isoformat()
-    return {
-        "status": "would_schedule" if dry_run else "scheduled",
-        "not_before": not_before,
-        "delay_hours": MANUAL_DELIVER_DELAY_HOURS,
-        "reason": "ADEL_SHIPPED_SIX_HOUR_RULE",
-    }
-
-
-def log_automation_step(summary: dict[str, Any]) -> None:
-    logger.info(
-        "trendyol automation orderNumber=%s shipmentPackageId=%s stockCode=%s barcode=%s resolved_days=%s "
-        "generated_code=%s customerEmail_exists=%s phone_exists=%s email_sent=%s sms_sent=%s "
-        "alternative_delivery_sent=%s manual_deliver_status=%s",
-        summary.get("orderNumber"),
-        summary.get("shipmentPackageId"),
-        summary.get("stockCode"),
-        summary.get("barcode"),
-        summary.get("resolved_days"),
-        summary.get("generated_code"),
-        summary.get("customerEmail_exists"),
-        summary.get("phone_exists"),
-        summary.get("email_sent"),
-        summary.get("sms_sent"),
-        summary.get("alternative_delivery_sent"),
-        summary.get("manual_deliver_status"),
-    )
-
-
-def reserve_or_create_trendyol_code(
-    sb: Any,
-    pkg: dict[str, Any],
-    line: dict[str, Any],
-    mapping: dict[str, Any],
-    dry_run: bool,
-    existing_automation: dict[str, Any],
-) -> list[str]:
-    existing_codes = existing_automation.get("reserved_codes")
-    if isinstance(existing_codes, list) and existing_codes:
-        return [clean(code) for code in existing_codes if clean(code)]
-    if dry_run:
-        return []
-
-    codes: list[str] = []
-    for quantity_index in range(1, line_quantity(line) + 1):
-        codes.append(reserve_code(sb, mapping, pkg, line, quantity_index))
-    return codes
-
-
-def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual_deliver: bool = False) -> dict[str, Any]:
-    sb = _get_supabase()
-    package_id = package_id_from(pkg)
-    order_number = order_number_from(pkg)
-    if not package_id:
-        raise HTTPException(status_code=400, detail="PACKAGE_ID_REQUIRED")
-    if not order_number:
-        raise HTTPException(status_code=400, detail="ORDER_NUMBER_REQUIRED")
-
-    lines = package_lines(pkg)
-    matched_line: Optional[dict[str, Any]] = None
-    matched_mapping: Optional[dict[str, Any]] = None
-    resolved_days: Optional[int] = None
-    for line in lines:
-        stock_code = clean(get_value(line, "merchantSku", "stockCode", "stock_code"))
-        barcode = clean(line.get("barcode"))
-        days = resolve_days_from_stock_code(stock_code, barcode)
-        if not days:
-            continue
-        mapping = get_mapping_for_line(sb, line) if not dry_run else {"dry_run": True}
-        matched_line = line
-        matched_mapping = mapping
-        resolved_days = days
-        break
-
-    if not matched_line or not resolved_days:
-        return {"ok": False, "error": "NO_SUPPORTED_TRENDYOL_SKU", "stage": "resolve_sku"}
-    if not matched_mapping:
-        return {"ok": False, "error": "SKU_MAPPING_NOT_FOUND", "stage": "resolve_mapping", "resolved_days": resolved_days}
-
-    stock_code = clean(get_value(matched_line, "merchantSku", "stockCode", "stock_code"))
-    barcode = clean(matched_line.get("barcode"))
-    business_unit = clean(matched_line.get("businessUnit"))
-    if business_unit and business_unit != "Digital Goods":
-        raise HTTPException(status_code=400, detail="LINE_IS_NOT_DIGITAL_GOODS")
-
-    existing_job = delivery_job_for(sb, order_number, package_id) if not dry_run else None
-    existing_automation = automation_from_job(existing_job)
-    reserved_codes = reserve_or_create_trendyol_code(sb, pkg, matched_line, matched_mapping, dry_run, existing_automation)
-    digital_code = format_trendyol_digital_code(reserved_codes) if reserved_codes else "DRY_RUN_CODE_PLACEHOLDER"
-    contact = customer_contact_from(pkg)
-    email_result = send_trendyol_digital_code_email(contact["email"], digital_code, dry_run)
-    sms_result = send_trendyol_digital_code_sms(contact["phone"], digital_code, dry_run)
-    adel_result = send_alternative_delivery(package_id, digital_code, dry_run)
-    manual_deliver = manual_deliver_package(package_id, dry_run) if attempt_manual_deliver else schedule_manual_deliver(existing_automation, dry_run)
-
-    automation = {
-        "dry_run": dry_run,
-        "orderNumber": order_number,
-        "shipmentPackageId": package_id,
-        "stockCode": stock_code,
-        "barcode": barcode,
-        "businessUnit": business_unit,
-        "resolved_days": resolved_days,
-        "reserved_codes": reserved_codes,
-        "digital_code": digital_code if reserved_codes else None,
-        "customer_contact": contact,
-        "email": email_result,
-        "sms": sms_result,
-        "alternative_delivery": adel_result,
-        "manual_deliver": manual_deliver,
-        "shipmentPackageStatus": package_status_from(pkg),
-        "cargoProviderName": clean(pkg.get("cargoProviderName")),
-        "updated_at": iso_now(),
-    }
-
-    if not dry_run:
-        job_payload = dict(pkg)
-        job_payload["automation"] = automation
-        upsert_delivery_job(sb, job_payload, status="manual_deliver_scheduled")
-        if reserved_codes:
-            update_reserved_rows(
-                sb,
-                reserved_codes,
-                {
-                    "delivery_status": "delivered" if adel_result.get("sent") else "failed",
-                    "delivered_at": iso_now() if adel_result.get("sent") else None,
-                    "delivery_payload": {
-                        "email": email_result,
-                        "sms": sms_result,
-                        "alternative_delivery": adel_result.get("payload"),
-                        "manual_deliver": manual_deliver,
-                    },
-                    "delivery_response": adel_result.get("response"),
-                    "delivery_error": None if adel_result.get("sent") else clean(adel_result.get("reason") or adel_result.get("detail")),
-                },
-                increment_attempts=True,
-            )
-
-    log_automation_step({
-        "orderNumber": order_number,
-        "shipmentPackageId": package_id,
-        "stockCode": stock_code,
-        "barcode": barcode,
-        "resolved_days": resolved_days,
-        "generated_code": bool(reserved_codes),
-        "customerEmail_exists": contact["customerEmail_exists"],
-        "phone_exists": contact["phone_exists"],
-        "email_sent": email_result.get("sent"),
-        "sms_sent": sms_result.get("sent"),
-        "alternative_delivery_sent": adel_result.get("sent"),
-        "manual_deliver_status": manual_deliver.get("status") or manual_deliver.get("success") or manual_deliver.get("reason"),
-    })
-
-    return {"ok": True, "automation": automation}
-
-
-def deliverTrendyolDigitalCode(payload: dict[str, Any]) -> dict[str, Any]:
-    package_id = clean(payload.get("packageId"))
-    digital_code = clean(payload.get("digitalCode"))
-    if not package_id:
-        raise HTTPException(status_code=400, detail="PACKAGE_ID_REQUIRED")
-    if len(digital_code) < 6 or len(digital_code) > 120:
-        raise HTTPException(status_code=400, detail="DIGITAL_CODE_LENGTH_INVALID")
-
-    body = {
-        "isPhoneNumber": True,
-        "trackingInfo": clean(os.getenv("TRENDYOL_DELIVERY_PHONE")),
-        "params": {"digitalCode": digital_code},
-    }
-    path = f"/integration/order/sellers/{seller_id()}/shipment-packages/{package_id}/{delivery_suffix()}"
-    response = trendyolRequest(path, {"method": "PUT", "body": body})
-    return {"payload": body, "response": response}
-
-
-def get_value(obj: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in obj and obj.get(key) is not None:
-            return obj.get(key)
-    return None
-
-
-def normalize_package(raw: dict[str, Any]) -> dict[str, Any]:
-    pkg = raw.get("pkg") if isinstance(raw.get("pkg"), dict) else raw
-    if isinstance(pkg.get("package"), dict):
-        pkg = pkg["package"]
-    if isinstance(pkg.get("shipmentPackage"), dict):
-        pkg = pkg["shipmentPackage"]
-    return pkg
-
-
-def package_id_from(pkg: dict[str, Any]) -> Optional[int]:
-    value = get_value(pkg, "id", "shipmentPackageId", "packageId")
-    try:
-        return int(value)
-    except Exception:
-        return None
-
-
-def order_number_from(pkg: dict[str, Any]) -> str:
-    return clean(get_value(pkg, "orderNumber", "order_number", "orderNo", "orderId"))
-
-
-def package_status_from(pkg: dict[str, Any]) -> str:
-    return clean(get_value(pkg, "status", "shipmentPackageStatus", "packageStatus"))
-
-
-def line_quantity(line: dict[str, Any]) -> int:
-    try:
-        return max(1, int(get_value(line, "quantity", "amount") or 1))
-    except Exception:
-        return 1
-
-
-def line_id_from(line: dict[str, Any]) -> Optional[int]:
-    value = get_value(line, "lineId", "id", "orderLineId")
-    try:
-        return int(value)
-    except Exception:
-        return None
 
 
 def get_mapping_for_line(sb: Any, line: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -637,29 +364,312 @@ def get_mapping_for_line(sb: Any, line: dict[str, Any]) -> Optional[dict[str, An
         rows = _safe_data(res) or []
         if rows:
             return rows[0]
-
     return None
 
 
-def reserve_code(sb: Any, mapping: dict[str, Any], pkg: dict[str, Any], line: dict[str, Any], quantity_index: int) -> str:
+def validate_campaign(sb: Any, campaign_id: object) -> None:
+    if not clean(campaign_id):
+        raise HTTPException(status_code=400, detail="CAMPAIGN_NOT_FOUND")
+    res = sb.table("promo_campaigns").select("id").eq("id", campaign_id).limit(1).execute()
+    rows = _safe_data(res) or []
+    if not rows:
+        raise HTTPException(status_code=400, detail="CAMPAIGN_NOT_FOUND")
+
+
+def is_valid_generated_code(code: str) -> bool:
+    value = clean(code).upper()
+    if len(value) != 6:
+        return False
+    prefix = value[:2]
+    number = value[2:]
+    if prefix in FORBIDDEN_CODE_PREFIXES or number in FORBIDDEN_CODE_NUMBERS:
+        return False
+    return prefix.isalpha() and number.isdigit()
+
+
+def generate_trendyol_activation_code() -> str:
+    for _ in range(500):
+        prefix = f"{random.choice(CODE_LETTERS)}{random.choice(CODE_LETTERS)}"
+        number = "".join(random.choice(CODE_DIGITS) for _ in range(4))
+        code = f"{prefix}{number}"
+        if is_valid_generated_code(code):
+            return code
+    raise HTTPException(status_code=500, detail="CODE_GENERATION_FAILED")
+
+
+def code_exists(sb: Any, code_value: str) -> bool:
+    res = sb.table("promo_codes").select("id").eq("code_value", code_value).limit(1).execute()
+    return bool(_safe_data(res) or [])
+
+
+def existing_trendyol_code(
+    sb: Any,
+    order_number: str,
+    package_id: int,
+    line_id: int,
+    quantity_index: int,
+) -> Optional[dict[str, Any]]:
+    res = (
+        sb.table("promo_codes")
+        .select("*")
+        .eq("marketplace", "trendyol")
+        .eq("marketplace_order_number", order_number)
+        .eq("marketplace_package_id", package_id)
+        .eq("marketplace_line_id", line_id)
+        .eq("marketplace_quantity_index", quantity_index)
+        .limit(1)
+        .execute()
+    )
+    rows = _safe_data(res) or []
+    return rows[0] if rows else None
+
+
+def create_or_get_trendyol_activation_code(
+    sb: Any,
+    mapping: dict[str, Any],
+    pkg: dict[str, Any],
+    line: dict[str, Any],
+    quantity_index: int,
+) -> str:
+    order_number = order_number_from(pkg)
+    package_id = package_id_from(pkg)
+    line_id = line_id_from(line)
+    if not order_number or not package_id:
+        raise HTTPException(status_code=400, detail="ORDER_PACKAGE_REQUIRED")
+
+    existing = existing_trendyol_code(sb, order_number, package_id, line_id, quantity_index)
+    if existing and clean(existing.get("code_value")):
+        return clean(existing.get("code_value")).upper()
+
+    campaign_id = mapping.get("campaign_id")
+    validate_campaign(sb, campaign_id)
+    barcode = clean(line.get("barcode") or mapping.get("barcode"))
+
+    for _ in range(50):
+        code_value = generate_trendyol_activation_code()
+        if code_exists(sb, code_value):
+            continue
+        body = {
+            "campaign_id": campaign_id,
+            "code_value": code_value,
+            "delivery_type": "manual",
+            "is_active": True,
+            "is_used": False,
+            "marketplace": "trendyol",
+            "delivery_status": "reserved",
+            "reserved_at": iso_now(),
+            "marketplace_order_number": order_number,
+            "marketplace_package_id": package_id,
+            "marketplace_line_id": line_id,
+            "marketplace_quantity_index": quantity_index,
+            "marketplace_barcode": barcode,
+        }
+        try:
+            sb.table("promo_codes").insert(body).execute()
+            return code_value
+        except Exception as exc:
+            again = existing_trendyol_code(sb, order_number, package_id, line_id, quantity_index)
+            if again and clean(again.get("code_value")):
+                return clean(again.get("code_value")).upper()
+            if code_exists(sb, code_value):
+                continue
+            raise HTTPException(status_code=500, detail=f"CODE_GENERATION_FAILED: {safe_error(exc)}")
+
+    raise HTTPException(status_code=500, detail="CODE_GENERATION_FAILED")
+
+
+def delivery_job_for(sb: Any, order_number: str, package_id: int) -> Optional[dict[str, Any]]:
+    res = (
+        sb.table("marketplace_delivery_jobs")
+        .select("*")
+        .eq("marketplace", "trendyol")
+        .eq("order_number", order_number)
+        .eq("package_id", package_id)
+        .limit(1)
+        .execute()
+    )
+    rows = _safe_data(res) or []
+    return rows[0] if rows else None
+
+
+def automation_from_job(job: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not job:
+        return {}
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    automation = payload.get("automation") if isinstance(payload.get("automation"), dict) else {}
+    return automation
+
+
+def send_trendyol_digital_code_email(email: str, digital_code: str, dry_run: bool) -> dict[str, Any]:
+    return {"to": email, "sent": False, "enabled": False, "dry_run": dry_run, "reason": "EXTERNAL_EMAIL_DISABLED"}
+
+
+def send_trendyol_digital_code_sms(phone: str, digital_code: str, dry_run: bool) -> dict[str, Any]:
+    return {"to": phone, "sent": False, "enabled": False, "dry_run": dry_run, "reason": "TRENDYOL_ADEL_SMS_USED"}
+
+
+def send_alternative_delivery(package_id: int, digital_code: str, dry_run: bool) -> dict[str, Any]:
+    if dry_run:
+        return {"sent": False, "dry_run": True, "reason": "DRY_RUN"}
+    try:
+        delivery = deliverTrendyolDigitalCode({"packageId": package_id, "digitalCode": digital_code})
+        return {"sent": True, "dry_run": False, "payload": delivery.get("payload"), "response": delivery.get("response")}
+    except HTTPException as exc:
+        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": exc.detail}
+    except Exception as exc:
+        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": safe_error(exc)}
+
+
+def manual_deliver_package(package_id: int, dry_run: bool) -> dict[str, Any]:
+    if dry_run:
+        return {"attempted": False, "dry_run": True, "reason": "DRY_RUN"}
+    path = f"/integration/order/sellers/{seller_id()}/shipment-packages/{package_id}/manual-deliver"
+    try:
+        response = trendyolRequest(path, {"method": "PUT", "body": {}})
+        return {"attempted": True, "success": True, "response": response}
+    except HTTPException as exc:
+        return {"attempted": True, "success": False, "detail": exc.detail}
+    except Exception as exc:
+        return {"attempted": True, "success": False, "detail": safe_error(exc)}
+
+
+def log_automation_step(summary: dict[str, Any]) -> None:
+    logger.info(
+        "trendyol automation orderNumber=%s shipmentPackageId=%s stockCode=%s barcode=%s resolved_days=%s "
+        "generated_code=%s customerEmail_exists=%s phone_exists=%s email_sent=%s sms_sent=%s "
+        "alternative_delivery_sent=%s manual_deliver_status=%s",
+        summary.get("orderNumber"),
+        summary.get("shipmentPackageId"),
+        summary.get("stockCode"),
+        summary.get("barcode"),
+        summary.get("resolved_days"),
+        summary.get("generated_code"),
+        summary.get("customerEmail_exists"),
+        summary.get("phone_exists"),
+        summary.get("email_sent"),
+        summary.get("sms_sent"),
+        summary.get("alternative_delivery_sent"),
+        summary.get("manual_deliver_status"),
+    )
+
+
+def select_automatable_line(sb: Any, pkg: dict[str, Any], dry_run: bool) -> tuple[dict[str, Any], Optional[dict[str, Any]], int]:
+    for line in package_lines(pkg):
+        stock_code = clean(get_value(line, "merchantSku", "stockCode", "stock_code"))
+        barcode = clean(line.get("barcode"))
+        days = resolve_days_from_stock_code(stock_code, barcode)
+        if not days:
+            continue
+        mapping = get_mapping_for_line(sb, line) if not dry_run else {"dry_run": True}
+        return line, mapping, days
+    raise HTTPException(status_code=400, detail="NO_SUPPORTED_TRENDYOL_SKU")
+
+
+def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual_deliver: bool = False) -> dict[str, Any]:
+    sb = _get_supabase()
     package_id = package_id_from(pkg)
     order_number = order_number_from(pkg)
-    line_id = line_id_from(line)
-    args = {
-        "p_campaign_id": mapping.get("campaign_id"),
-        "p_delivery_type": clean(mapping.get("delivery_type") or "manual"),
-        "p_order_number": order_number,
-        "p_package_id": package_id,
-        "p_line_id": line_id,
-        "p_quantity_index": quantity_index,
-        "p_barcode": clean(line.get("barcode") or mapping.get("barcode")),
+    if not package_id:
+        raise HTTPException(status_code=400, detail="PACKAGE_ID_REQUIRED")
+    if not order_number:
+        raise HTTPException(status_code=400, detail="ORDER_NUMBER_REQUIRED")
+
+    line, mapping, resolved_days = select_automatable_line(sb, pkg, dry_run)
+    stock_code = clean(get_value(line, "merchantSku", "stockCode", "stock_code"))
+    barcode = clean(line.get("barcode"))
+    business_unit = clean(line.get("businessUnit"))
+    if business_unit and business_unit != "Digital Goods":
+        raise HTTPException(status_code=400, detail="LINE_IS_NOT_DIGITAL_GOODS")
+    if not dry_run and not mapping:
+        raise HTTPException(status_code=400, detail="SKU_MAPPING_NOT_FOUND")
+
+    existing_job = delivery_job_for(sb, order_number, package_id) if not dry_run else None
+    existing_automation = automation_from_job(existing_job)
+    reserved_codes = existing_automation.get("reserved_codes") if isinstance(existing_automation.get("reserved_codes"), list) else []
+    reserved_codes = [clean(code).upper() for code in reserved_codes if clean(code)]
+
+    if not dry_run and not reserved_codes:
+        for quantity_index in range(1, line_quantity(line) + 1):
+            reserved_codes.append(create_or_get_trendyol_activation_code(sb, mapping or {}, pkg, line, quantity_index))
+
+    digital_code = format_trendyol_digital_code(reserved_codes) if reserved_codes else "DRY_RUN_CODE_PLACEHOLDER"
+    contact = customer_contact_from(pkg)
+    email_result = send_trendyol_digital_code_email(contact["email"], digital_code, dry_run)
+    sms_result = send_trendyol_digital_code_sms(contact["phone"], digital_code, dry_run)
+    adel_result = send_alternative_delivery(package_id, digital_code, dry_run)
+    manual_deliver = manual_deliver_package(package_id, dry_run) if attempt_manual_deliver else {
+        "attempted": False,
+        "status": "not_required_now",
+        "reason": "ADEL_SMS_FLOW_ADVANCES_WITHOUT_MANUAL_DELIVER_IN_TEST",
     }
-    res = sb.rpc("reserve_trendyol_promo_code", args).execute()
-    data = _safe_data(res)
-    code = clean(data[0] if isinstance(data, list) and data else data)
-    if not code:
-        raise HTTPException(status_code=500, detail="PROMO_CODE_RESERVATION_FAILED")
-    return code
+
+    automation = {
+        "dry_run": dry_run,
+        "orderNumber": order_number,
+        "shipmentPackageId": package_id,
+        "stockCode": stock_code,
+        "barcode": barcode,
+        "businessUnit": business_unit,
+        "resolved_days": resolved_days,
+        "reserved_codes": reserved_codes,
+        "digital_code": digital_code if reserved_codes else None,
+        "customer_contact": contact,
+        "email": email_result,
+        "sms": sms_result,
+        "alternative_delivery": adel_result,
+        "manual_deliver": manual_deliver,
+        "shipmentPackageStatus": package_status_from(pkg),
+        "cargoProviderName": clean(pkg.get("cargoProviderName")),
+        "updated_at": iso_now(),
+    }
+
+    if not dry_run:
+        job_payload = dict(pkg)
+        job_payload["automation"] = automation
+        upsert_delivery_job(sb, job_payload, status="delivered" if adel_result.get("sent") else "failed")
+        if reserved_codes:
+            update_reserved_rows(
+                sb,
+                reserved_codes,
+                {
+                    "delivery_status": "delivered" if adel_result.get("sent") else "failed",
+                    "delivered_at": iso_now() if adel_result.get("sent") else None,
+                    "delivery_payload": {"alternative_delivery": adel_result.get("payload"), "manual_deliver": manual_deliver},
+                    "delivery_response": adel_result.get("response"),
+                    "delivery_error": None if adel_result.get("sent") else clean(adel_result.get("reason") or adel_result.get("detail")),
+                },
+                increment_attempts=True,
+            )
+
+    log_automation_step({
+        "orderNumber": order_number,
+        "shipmentPackageId": package_id,
+        "stockCode": stock_code,
+        "barcode": barcode,
+        "resolved_days": resolved_days,
+        "generated_code": bool(reserved_codes),
+        "customerEmail_exists": contact["customerEmail_exists"],
+        "phone_exists": contact["phone_exists"],
+        "email_sent": email_result.get("sent"),
+        "sms_sent": sms_result.get("sent"),
+        "alternative_delivery_sent": adel_result.get("sent"),
+        "manual_deliver_status": manual_deliver.get("status") or manual_deliver.get("success") or manual_deliver.get("reason"),
+    })
+    return {"ok": True, "automation": automation}
+
+
+def deliverTrendyolDigitalCode(payload: dict[str, Any]) -> dict[str, Any]:
+    package_id = clean(payload.get("packageId"))
+    digital_code = clean(payload.get("digitalCode"))
+    if not package_id:
+        raise HTTPException(status_code=400, detail="PACKAGE_ID_REQUIRED")
+    if len(digital_code) < 6 or len(digital_code) > 120:
+        raise HTTPException(status_code=400, detail="DIGITAL_CODE_LENGTH_INVALID")
+
+    body = {"isPhoneNumber": False, "params": {"digitalCode": digital_code}}
+    path = f"/integration/order/sellers/{seller_id()}/shipment-packages/{package_id}/{delivery_suffix()}"
+    response = trendyolRequest(path, {"method": "PUT", "body": body})
+    return {"payload": body, "response": response}
 
 
 def get_reserved_rows(sb: Any, codes: list[str]) -> list[dict[str, Any]]:
@@ -690,73 +700,11 @@ def update_reserved_rows(sb: Any, codes: list[str], payload: dict[str, Any], inc
 
 
 def processTrendyolPackage(payload: dict[str, Any]) -> dict[str, Any]:
-    sb = _get_supabase()
     pkg = normalize_package(payload)
-    package_id = package_id_from(pkg)
-    order_number = order_number_from(pkg)
-    if not package_id:
-        raise HTTPException(status_code=400, detail="PACKAGE_ID_REQUIRED")
-    if not order_number:
-        raise HTTPException(status_code=400, detail="ORDER_NUMBER_REQUIRED")
-
     status = package_status_from(pkg)
     if status.lower() in SKIPPED_PACKAGE_STATUSES:
-        return {"ok": True, "status": "skipped", "reason": "PACKAGE_STATUS_SKIPPED", "package_id": package_id}
-
-    lines = pkg.get("lines") or pkg.get("items") or []
-    if not isinstance(lines, list):
-        lines = []
-
-    reserved_codes: list[str] = []
-    matched_lines = 0
-    for line in lines:
-        if not isinstance(line, dict):
-            continue
-        mapping = get_mapping_for_line(sb, line)
-        if not mapping:
-            continue
-
-        business_unit = clean(line.get("businessUnit"))
-        if business_unit and business_unit != "Digital Goods":
-            raise HTTPException(status_code=400, detail="LINE_IS_NOT_DIGITAL_GOODS")
-
-        matched_lines += 1
-        for quantity_index in range(1, line_quantity(line) + 1):
-            reserved_codes.append(reserve_code(sb, mapping, pkg, line, quantity_index))
-
-    if not matched_lines:
-        return {"ok": True, "status": "skipped", "reason": "NO_MATCHING_SKU", "package_id": package_id}
-
-    digital_code = format_trendyol_digital_code(reserved_codes)
-    if len(digital_code) > 120:
-        update_reserved_rows(
-            sb,
-            reserved_codes,
-            {"delivery_status": "failed", "delivery_error": "DIGITAL_CODE_LENGTH_INVALID", "delivery_payload": {"digitalCode": digital_code}},
-            increment_attempts=False,
-        )
-        raise HTTPException(status_code=400, detail="DIGITAL_CODE_LENGTH_INVALID")
-
-    delivery = deliverTrendyolDigitalCode({"packageId": package_id, "digitalCode": digital_code})
-    update_reserved_rows(
-        sb,
-        reserved_codes,
-        {
-            "delivery_status": "delivered",
-            "delivered_at": iso_now(),
-            "delivery_payload": delivery["payload"],
-            "delivery_response": delivery["response"],
-            "delivery_error": None,
-        },
-        increment_attempts=True,
-    )
-    return {
-        "ok": True,
-        "status": "delivered",
-        "package_id": package_id,
-        "order_number": order_number,
-        "delivered_count": len(reserved_codes),
-    }
+        return {"ok": True, "status": "skipped", "reason": "PACKAGE_STATUS_SKIPPED", "package_id": package_id_from(pkg)}
+    return automate_trendyol_package(pkg, dry_run=False)
 
 
 def job_key_from_payload(payload: dict[str, Any]) -> tuple[str, Optional[int]]:
@@ -836,8 +784,8 @@ def processPendingTrendyolJobs(limit: int = 20) -> dict[str, Any]:
         try:
             update_job(job, {"status": "processing"})
             result = processTrendyolPackage({"pkg": job.get("payload") or {}})
-            status = "delivered" if result.get("status") == "delivered" else "skipped"
-            update_job(job, {"status": status, "last_error": None})
+            status = "delivered" if result.get("ok") else "failed"
+            update_job(job, {"status": status, "last_error": None if result.get("ok") else str(result)[:1000]})
             results.append({"id": job.get("id"), "ok": True, "status": status, "result": result})
         except HTTPException as exc:
             detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
@@ -971,12 +919,7 @@ def debug_order(
     try:
         response = debug_trendyol_order_request({"orderNumber": order_number})
         raw = response.get("data") or {}
-        return {
-            "ok": True,
-            "query": {"orderNumber": order_number, "shipmentPackageId": ""},
-            "summary": summarize_order_response(raw),
-            "raw": raw,
-        }
+        return {"ok": True, "query": {"orderNumber": order_number, "shipmentPackageId": ""}, "summary": summarize_order_response(raw), "raw": raw}
     except HTTPException as exc:
         if exc.status_code == 403:
             raise
@@ -1001,12 +944,7 @@ def debug_package(
     try:
         response = debug_trendyol_order_request({"shipmentPackageIds": package_id})
         raw = response.get("data") or {}
-        return {
-            "ok": True,
-            "query": {"orderNumber": "", "shipmentPackageId": package_id},
-            "summary": summarize_order_response(raw),
-            "raw": raw,
-        }
+        return {"ok": True, "query": {"orderNumber": "", "shipmentPackageId": package_id}, "summary": summarize_order_response(raw), "raw": raw}
     except HTTPException as exc:
         if exc.status_code == 403:
             raise
