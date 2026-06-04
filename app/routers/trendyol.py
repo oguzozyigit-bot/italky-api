@@ -4,7 +4,7 @@ import base64
 import logging
 import os
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -542,31 +542,140 @@ def send_alternative_delivery(package_id: int, digital_code: str, dry_run: bool)
         planned_payload = build_alternative_delivery_payload(digital_code)
     except HTTPException as exc:
         if dry_run:
-            return {"sent": False, "dry_run": True, "reason": exc.detail}
+            return {"status": "pending", "sent": False, "dry_run": True, "reason": exc.detail}
         raise
 
     if dry_run:
-        return {"sent": False, "dry_run": True, "reason": "DRY_RUN", "payload": planned_payload}
+        return {"status": "pending", "sent": False, "dry_run": True, "reason": "DRY_RUN", "payload": planned_payload}
     try:
         delivery = deliverTrendyolDigitalCode({"packageId": package_id, "digitalCode": digital_code})
-        return {"sent": True, "dry_run": False, "payload": delivery.get("payload"), "response": delivery.get("response")}
+        return {
+            "status": "sent",
+            "sent": True,
+            "sent_at": iso_now(),
+            "dry_run": False,
+            "payload": delivery.get("payload"),
+            "response": delivery.get("response"),
+        }
     except HTTPException as exc:
-        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": exc.detail, "payload": planned_payload}
+        return {
+            "status": "failed",
+            "sent": False,
+            "dry_run": False,
+            "reason": "TRENDYOL_ADEL_FAILED",
+            "detail": exc.detail,
+            "payload": planned_payload,
+        }
     except Exception as exc:
-        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": safe_error(exc), "payload": planned_payload}
+        return {
+            "status": "failed",
+            "sent": False,
+            "dry_run": False,
+            "reason": "TRENDYOL_ADEL_FAILED",
+            "detail": safe_error(exc),
+            "payload": planned_payload,
+        }
 
 
-def manual_deliver_package(package_id: int, dry_run: bool) -> dict[str, Any]:
+def manual_deliver_too_early(detail: Any) -> bool:
+    text = str(detail or "").lower()
+    markers = ("saat", "hour", "early", "erken", "dolmadan", "bekle", "wait")
+    return any(marker in text for marker in markers)
+
+
+def schedule_manual_deliver(existing_manual: Optional[dict[str, Any]] = None, reason: Any = None) -> dict[str, Any]:
+    existing_manual = existing_manual if isinstance(existing_manual, dict) else {}
+    try:
+        attempt_count = int(existing_manual.get("attempt_count") or 0)
+    except Exception:
+        attempt_count = 0
+    return {
+        "status": "scheduled",
+        "scheduled_at": existing_manual.get("scheduled_at") or iso_now(),
+        "deliver_after": existing_manual.get("deliver_after") or (utc_now() + timedelta(hours=6)).isoformat(),
+        "attempt_count": attempt_count,
+        "last_attempt_at": existing_manual.get("last_attempt_at"),
+        "last_response": existing_manual.get("last_response"),
+        "reason": reason,
+    }
+
+
+def manual_deliver_package(
+    package_id: int,
+    dry_run: bool,
+    existing_manual: Optional[dict[str, Any]] = None,
+    cargo_tracking_number: str = "",
+) -> dict[str, Any]:
+    existing_manual = existing_manual if isinstance(existing_manual, dict) else {}
+    try:
+        attempt_count = int(existing_manual.get("attempt_count") or 0) + 1
+    except Exception:
+        attempt_count = 1
+
     if dry_run:
-        return {"attempted": False, "dry_run": True, "reason": "DRY_RUN"}
+        return {"status": "pending", "attempted": False, "dry_run": True, "reason": "DRY_RUN", "attempt_count": 0}
+
     path = f"/integration/order/sellers/{seller_id()}/shipment-packages/{package_id}/manual-deliver"
     try:
         response = trendyolRequest(path, {"method": "PUT", "body": {}})
-        return {"attempted": True, "success": True, "response": response}
+        return {
+            "status": "delivered",
+            "attempted": True,
+            "success": True,
+            "attempt_count": attempt_count,
+            "last_attempt_at": iso_now(),
+            "last_response": response,
+            "delivered_at": iso_now(),
+        }
     except HTTPException as exc:
-        return {"attempted": True, "success": False, "detail": exc.detail}
+        if manual_deliver_too_early(exc.detail):
+            scheduled = schedule_manual_deliver(existing_manual, reason=exc.detail)
+            scheduled.update({"attempted": True, "success": False, "attempt_count": attempt_count, "last_attempt_at": iso_now()})
+            return scheduled
+        if cargo_tracking_number:
+            fallback_path = f"/integration/order/sellers/{seller_id()}/manual-deliver/{quote(cargo_tracking_number)}"
+            try:
+                response = trendyolRequest(fallback_path, {"method": "PUT", "body": {}})
+                return {
+                    "status": "delivered",
+                    "attempted": True,
+                    "success": True,
+                    "attempt_count": attempt_count,
+                    "last_attempt_at": iso_now(),
+                    "last_response": response,
+                    "delivered_at": iso_now(),
+                    "fallback": "cargoTrackingNumber",
+                }
+            except HTTPException as fallback_exc:
+                if manual_deliver_too_early(fallback_exc.detail):
+                    scheduled = schedule_manual_deliver(existing_manual, reason=fallback_exc.detail)
+                    scheduled.update({"attempted": True, "success": False, "attempt_count": attempt_count, "last_attempt_at": iso_now()})
+                    return scheduled
+                return {
+                    "status": "failed",
+                    "attempted": True,
+                    "success": False,
+                    "attempt_count": attempt_count,
+                    "last_attempt_at": iso_now(),
+                    "last_response": fallback_exc.detail,
+                }
+        return {
+            "status": "failed",
+            "attempted": True,
+            "success": False,
+            "attempt_count": attempt_count,
+            "last_attempt_at": iso_now(),
+            "last_response": exc.detail,
+        }
     except Exception as exc:
-        return {"attempted": True, "success": False, "detail": safe_error(exc)}
+        return {
+            "status": "failed",
+            "attempted": True,
+            "success": False,
+            "attempt_count": attempt_count,
+            "last_attempt_at": iso_now(),
+            "last_response": safe_error(exc),
+        }
 
 
 def log_automation_step(summary: dict[str, Any]) -> None:
@@ -621,6 +730,37 @@ def already_processed_reason(reserved_rows: list[dict[str, Any]], existing_autom
     return None
 
 
+def existing_manual_deliver(existing_automation: dict[str, Any]) -> dict[str, Any]:
+    manual_deliver = existing_automation.get("manual_deliver")
+    return manual_deliver if isinstance(manual_deliver, dict) else {}
+
+
+def manual_deliver_already_done(manual_deliver: dict[str, Any]) -> bool:
+    status = clean(manual_deliver.get("status")).lower()
+    return bool(status == "delivered" or manual_deliver.get("success") is True or manual_deliver.get("delivered_at"))
+
+
+def adel_already_sent(processed_reason: Optional[str], existing_automation: dict[str, Any]) -> bool:
+    if processed_reason in {"CODE_ALREADY_USED", "ADEL_ALREADY_SENT"}:
+        return True
+    alternative_delivery = (
+        existing_automation.get("alternative_delivery")
+        if isinstance(existing_automation.get("alternative_delivery"), dict)
+        else {}
+    )
+    return bool(alternative_delivery.get("sent") is True or clean(alternative_delivery.get("status")).lower() == "sent")
+
+
+def code_status_from(processed_reason: Optional[str], adel_result: dict[str, Any], reserved_codes: list[str]) -> str:
+    if processed_reason == "CODE_ALREADY_USED":
+        return "used"
+    if adel_result.get("sent") or clean(adel_result.get("status")).lower() == "sent":
+        return "sent"
+    if reserved_codes:
+        return "reserved"
+    return "pending"
+
+
 def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual_deliver: bool = False) -> dict[str, Any]:
     sb = _get_supabase()
     package_id = package_id_from(pkg)
@@ -654,8 +794,16 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
     sms_result = send_trendyol_digital_code_sms(contact["phone"], digital_code, dry_run)
     reserved_rows = get_reserved_rows(sb, reserved_codes) if not dry_run and reserved_codes else []
     processed_reason = already_processed_reason(reserved_rows, existing_automation) if not dry_run else None
+    existing_manual = existing_manual_deliver(existing_automation)
     if processed_reason:
+        existing_adel = (
+            existing_automation.get("alternative_delivery")
+            if isinstance(existing_automation.get("alternative_delivery"), dict)
+            else {}
+        )
         adel_result = {
+            **existing_adel,
+            "status": "sent",
             "sent": False,
             "skipped": True,
             "dry_run": False,
@@ -664,11 +812,22 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         }
     else:
         adel_result = send_alternative_delivery(package_id, digital_code, dry_run)
-    manual_deliver = manual_deliver_package(package_id, dry_run) if attempt_manual_deliver and not processed_reason else {
-        "attempted": False,
-        "status": "already_processed" if processed_reason else "not_required_now",
-        "reason": processed_reason or "ADEL_SMS_FLOW_ADVANCES_WITHOUT_MANUAL_DELIVER_IN_TEST",
-    }
+
+    if manual_deliver_already_done(existing_manual):
+        manual_deliver = {**existing_manual, "status": "skipped_already_delivered", "attempted": False}
+    elif not (adel_result.get("sent") or adel_already_sent(processed_reason, existing_automation)):
+        manual_deliver = {
+            "attempted": False,
+            "status": "pending",
+            "reason": "ADEL_REQUIRED_BEFORE_MANUAL_DELIVER",
+        }
+    else:
+        manual_deliver = manual_deliver_package(
+            package_id,
+            dry_run,
+            existing_manual=existing_manual,
+            cargo_tracking_number=clean(pkg.get("cargoTrackingNumber")),
+        )
 
     automation = {
         "dry_run": dry_run,
@@ -679,6 +838,8 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         "businessUnit": business_unit,
         "resolved_days": resolved_days,
         "reserved_codes": reserved_codes,
+        "code": reserved_codes[0] if len(reserved_codes) == 1 else reserved_codes,
+        "code_status": code_status_from(processed_reason, adel_result, reserved_codes),
         "digital_code": digital_code if reserved_codes else None,
         "customer_contact": contact,
         "already_processed": bool(processed_reason),
@@ -695,15 +856,24 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
     if not dry_run:
         job_payload = dict(pkg)
         job_payload["automation"] = automation
-        job_status = "delivered" if adel_result.get("sent") or processed_reason else "failed"
+        if manual_deliver.get("status") in {"delivered", "skipped_already_delivered"}:
+            job_status = "delivered"
+        elif manual_deliver.get("status") == "scheduled":
+            job_status = "manual_deliver_scheduled"
+        elif adel_result.get("sent") or adel_already_sent(processed_reason, existing_automation):
+            job_status = "sent"
+        else:
+            job_status = "failed"
         upsert_delivery_job(sb, job_payload, status=job_status)
         if reserved_codes and not processed_reason:
             update_reserved_rows(
                 sb,
                 reserved_codes,
                 {
-                    "delivery_status": "delivered" if adel_result.get("sent") else "failed",
-                    "delivered_at": iso_now() if adel_result.get("sent") else None,
+                    "delivery_status": "delivered"
+                    if manual_deliver.get("status") == "delivered"
+                    else ("sent" if adel_result.get("sent") else "failed"),
+                    "delivered_at": manual_deliver.get("delivered_at") if manual_deliver.get("status") == "delivered" else None,
                     "delivery_payload": {"alternative_delivery": adel_result.get("payload"), "manual_deliver": manual_deliver},
                     "delivery_response": adel_result.get("response"),
                     "delivery_error": None if adel_result.get("sent") else clean(adel_result.get("reason") or adel_result.get("detail")),
@@ -850,6 +1020,140 @@ def update_job(job: dict[str, Any], payload: dict[str, Any], increment_attempts:
     sb.table("marketplace_delivery_jobs").update(update_payload).eq("id", job["id"]).execute()
 
 
+def parse_datetime(value: Any) -> Optional[datetime]:
+    text = clean(value)
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def manual_deliver_due(manual_deliver: dict[str, Any]) -> bool:
+    deliver_after = parse_datetime(manual_deliver.get("deliver_after"))
+    return deliver_after is None or deliver_after <= utc_now()
+
+
+def fetch_manual_deliver_jobs(limit: int = 20) -> list[dict[str, Any]]:
+    sb = _get_supabase()
+    res = (
+        sb.table("marketplace_delivery_jobs")
+        .select("*")
+        .eq("marketplace", "trendyol")
+        .eq("status", "manual_deliver_scheduled")
+        .order("updated_at")
+        .limit(limit)
+        .execute()
+    )
+    jobs = _safe_data(res) or []
+    due_jobs: list[dict[str, Any]] = []
+    for job in jobs:
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        automation = payload.get("automation") if isinstance(payload.get("automation"), dict) else {}
+        manual_deliver = existing_manual_deliver(automation)
+        if manual_deliver_due(manual_deliver):
+            due_jobs.append(job)
+    return due_jobs
+
+
+def process_manual_deliver_job(job: dict[str, Any]) -> dict[str, Any]:
+    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+    automation = payload.get("automation") if isinstance(payload.get("automation"), dict) else {}
+    package_id = package_id_from(payload)
+    if not package_id:
+        raise HTTPException(status_code=400, detail="PACKAGE_ID_REQUIRED")
+
+    manual_before = existing_manual_deliver(automation)
+    if manual_deliver_already_done(manual_before):
+        manual_after = {**manual_before, "status": "skipped_already_delivered", "attempted": False}
+        automation["manual_deliver"] = manual_after
+        payload["automation"] = automation
+        update_job(job, {"status": "delivered", "payload": payload, "last_error": None})
+        return {"ok": True, "status": "skipped_already_delivered", "manual_deliver": manual_after}
+
+    if not manual_deliver_due(manual_before):
+        return {"ok": True, "status": "scheduled", "manual_deliver": manual_before}
+
+    update_job(job, {"status": "processing_manual_deliver"})
+    manual_after = manual_deliver_package(
+        package_id,
+        dry_run=False,
+        existing_manual=manual_before,
+        cargo_tracking_number=clean(payload.get("cargoTrackingNumber")),
+    )
+    automation["manual_deliver"] = manual_after
+    automation["updated_at"] = iso_now()
+    payload["automation"] = automation
+
+    if manual_after.get("status") == "delivered":
+        status = "delivered"
+        last_error = None
+        reserved_codes = automation.get("reserved_codes") if isinstance(automation.get("reserved_codes"), list) else []
+        reserved_codes = [clean(code).upper() for code in reserved_codes if clean(code)]
+        if reserved_codes:
+            update_reserved_rows(
+                _get_supabase(),
+                reserved_codes,
+                {
+                    "delivery_status": "delivered",
+                    "delivered_at": manual_after.get("delivered_at") or iso_now(),
+                    "delivery_response": manual_after.get("last_response"),
+                    "delivery_error": None,
+                },
+                increment_attempts=False,
+            )
+    elif manual_after.get("status") == "scheduled":
+        status = "manual_deliver_scheduled"
+        last_error = None
+    else:
+        status = "manual_deliver_failed"
+        last_error = clean(manual_after.get("last_response") or manual_after.get("reason"))
+
+    update_job(job, {"status": status, "payload": payload, "last_error": last_error}, increment_attempts=status == "manual_deliver_failed")
+    return {"ok": status != "manual_deliver_failed", "status": status, "manual_deliver": manual_after}
+
+
+def process_manual_deliver_jobs(limit: int = 20) -> dict[str, Any]:
+    jobs = fetch_manual_deliver_jobs(limit)
+    results: list[dict[str, Any]] = []
+    for job in jobs:
+        try:
+            result = process_manual_deliver_job(job)
+            results.append({"id": job.get("id"), **result})
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            update_job(job, {"status": "manual_deliver_failed", "last_error": detail[:1000]}, increment_attempts=True)
+            results.append({"id": job.get("id"), "ok": False, "error": detail[:1000]})
+        except Exception as exc:
+            err = safe_error(exc)
+            update_job(job, {"status": "manual_deliver_failed", "last_error": err}, increment_attempts=True)
+            results.append({"id": job.get("id"), "ok": False, "error": err})
+    return {"ok": True, "processed": len(results), "results": results}
+
+
+def status_from_automation_result(result: dict[str, Any]) -> str:
+    automation = result.get("automation") if isinstance(result.get("automation"), dict) else {}
+    manual_deliver = automation.get("manual_deliver") if isinstance(automation.get("manual_deliver"), dict) else {}
+    alternative_delivery = (
+        automation.get("alternative_delivery")
+        if isinstance(automation.get("alternative_delivery"), dict)
+        else {}
+    )
+    if manual_deliver.get("status") in {"delivered", "skipped_already_delivered"}:
+        return "delivered"
+    if manual_deliver.get("status") == "scheduled":
+        return "manual_deliver_scheduled"
+    if alternative_delivery.get("sent") or clean(alternative_delivery.get("status")).lower() == "sent":
+        return "sent"
+    return "failed"
+
+
 def processPendingTrendyolJobs(limit: int = 20) -> dict[str, Any]:
     jobs = fetch_pending_jobs(limit)
     results: list[dict[str, Any]] = []
@@ -857,7 +1161,7 @@ def processPendingTrendyolJobs(limit: int = 20) -> dict[str, Any]:
         try:
             update_job(job, {"status": "processing"})
             result = processTrendyolPackage({"pkg": job.get("payload") or {}})
-            status = "delivered" if result.get("ok") else "failed"
+            status = status_from_automation_result(result) if result.get("ok") else "failed"
             update_job(job, {"status": status, "last_error": None if result.get("ok") else str(result)[:1000]})
             results.append({"id": job.get("id"), "ok": True, "status": status, "result": result})
         except HTTPException as exc:
@@ -896,6 +1200,14 @@ def process_jobs(x_api_key: Optional[str] = Header(default=None)):
     if not env_bool("TRENDYOL_ENABLED"):
         return {"ok": True, "skipped": "TRENDYOL_ENABLED=false"}
     return processPendingTrendyolJobs(limit=20)
+
+
+@router.post("/process-manual-deliver-jobs")
+def process_manual_deliver_jobs_endpoint(x_api_key: Optional[str] = Header(default=None)):
+    require_internal_key(x_api_key)
+    if not env_bool("TRENDYOL_ENABLED"):
+        return {"ok": True, "skipped": "TRENDYOL_ENABLED=false"}
+    return process_manual_deliver_jobs(limit=20)
 
 
 @router.post("/poll")
