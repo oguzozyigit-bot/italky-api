@@ -26,6 +26,7 @@ SKIPPED_PACKAGE_STATUSES = {
 DEFAULT_DELIVERY_SUFFIX = "alternative-delivery"
 DEFAULT_BASE_URL = "https://api.trendyol.com/sapigw"
 DEFAULT_ANDROID_DOWNLOAD_URL = "https://italky.ai/indir"
+DEFAULT_SUPPORT_URL = "https://italky.ai/destek"
 CODE_LETTERS = "ABCDEFGHJKLMNPRSTUVYZ"
 CODE_DIGITS = "23456789"
 FORBIDDEN_CODE_PREFIXES = {"GS", "FB", "FG"}
@@ -58,6 +59,20 @@ def delivery_suffix() -> str:
 
 def android_download_url() -> str:
     return clean(os.getenv("ANDROID_DOWNLOAD_URL")) or DEFAULT_ANDROID_DOWNLOAD_URL
+
+
+def support_url() -> str:
+    value = clean(os.getenv("TRENDYOL_DELIVERY_TRACKING_INFO")) or clean(os.getenv("TRENDYOL_SUPPORT_URL")) or DEFAULT_SUPPORT_URL
+    if value and not value.startswith(("http://", "https://")):
+        value = f"https://{value}"
+    return value
+
+
+def alternative_delivery_contact_mode() -> str:
+    mode = clean(os.getenv("TRENDYOL_DELIVERY_CONTACT_MODE")).lower() or "link"
+    if mode not in {"link", "phone"}:
+        raise HTTPException(status_code=400, detail="TRENDYOL_DELIVERY_CONTACT_MODE_INVALID")
+    return mode
 
 
 def base_url() -> str:
@@ -508,16 +523,37 @@ def send_trendyol_digital_code_sms(phone: str, digital_code: str, dry_run: bool)
     return {"to": phone, "sent": False, "enabled": False, "dry_run": dry_run, "reason": "TRENDYOL_ADEL_SMS_USED"}
 
 
+def build_alternative_delivery_payload(digital_code: str) -> dict[str, Any]:
+    mode = alternative_delivery_contact_mode()
+    if mode == "phone":
+        phone = clean(os.getenv("TRENDYOL_DELIVERY_PHONE"))
+        if not phone:
+            raise HTTPException(status_code=400, detail="TRENDYOL_DELIVERY_PHONE_REQUIRED")
+        return {"isPhoneNumber": True, "trackingInfo": phone, "params": {"digitalCode": digital_code}}
+
+    tracking_info = support_url()
+    if not tracking_info:
+        raise HTTPException(status_code=400, detail="TRENDYOL_DELIVERY_TRACKING_INFO_REQUIRED")
+    return {"isPhoneNumber": False, "trackingInfo": tracking_info, "params": {"digitalCode": digital_code}}
+
+
 def send_alternative_delivery(package_id: int, digital_code: str, dry_run: bool) -> dict[str, Any]:
+    try:
+        planned_payload = build_alternative_delivery_payload(digital_code)
+    except HTTPException as exc:
+        if dry_run:
+            return {"sent": False, "dry_run": True, "reason": exc.detail}
+        raise
+
     if dry_run:
-        return {"sent": False, "dry_run": True, "reason": "DRY_RUN"}
+        return {"sent": False, "dry_run": True, "reason": "DRY_RUN", "payload": planned_payload}
     try:
         delivery = deliverTrendyolDigitalCode({"packageId": package_id, "digitalCode": digital_code})
         return {"sent": True, "dry_run": False, "payload": delivery.get("payload"), "response": delivery.get("response")}
     except HTTPException as exc:
-        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": exc.detail}
+        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": exc.detail, "payload": planned_payload}
     except Exception as exc:
-        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": safe_error(exc)}
+        return {"sent": False, "dry_run": False, "reason": "TRENDYOL_ADEL_FAILED", "detail": safe_error(exc), "payload": planned_payload}
 
 
 def manual_deliver_package(package_id: int, dry_run: bool) -> dict[str, Any]:
@@ -666,7 +702,7 @@ def deliverTrendyolDigitalCode(payload: dict[str, Any]) -> dict[str, Any]:
     if len(digital_code) < 6 or len(digital_code) > 120:
         raise HTTPException(status_code=400, detail="DIGITAL_CODE_LENGTH_INVALID")
 
-    body = {"isPhoneNumber": False, "params": {"digitalCode": digital_code}}
+    body = build_alternative_delivery_payload(digital_code)
     path = f"/integration/order/sellers/{seller_id()}/shipment-packages/{package_id}/{delivery_suffix()}"
     response = trendyolRequest(path, {"method": "PUT", "body": body})
     return {"payload": body, "response": response}
