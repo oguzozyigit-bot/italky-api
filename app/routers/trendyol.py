@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import quote
 
 import requests
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -12,6 +14,7 @@ from app.routers.admin import _get_supabase, _safe_data
 
 router = APIRouter(prefix="/api/trendyol", tags=["Trendyol"])
 mp_router = APIRouter(prefix="/api/mp", tags=["Marketplace"])
+logger = logging.getLogger(__name__)
 
 SKIPPED_PACKAGE_STATUSES = {
     "cancelled",
@@ -62,6 +65,13 @@ def require_internal_key(x_api_key: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="UNAUTHORIZED")
 
 
+def require_debug_key(key: Optional[str], x_internal_key: Optional[str]) -> None:
+    expected = clean(os.getenv("TRENDYOL_DEBUG_KEY")) or clean(os.getenv("TRENDYOL_WEBHOOK_API_KEY"))
+    provided = clean(x_internal_key) or clean(key)
+    if not expected or provided != expected:
+        raise HTTPException(status_code=403, detail="FORBIDDEN")
+
+
 def safe_error(exc: Exception) -> str:
     text = str(exc or "").strip()
     api_key = clean(os.getenv("TRENDYOL_API_KEY"))
@@ -70,6 +80,16 @@ def safe_error(exc: Exception) -> str:
         if secret:
             text = text.replace(secret, "***")
     return text[:1000]
+
+
+def log_credential_presence() -> None:
+    logger.info(
+        "trendyol debug credentials sellerId=%s apiKey=%s apiSecret=%s enabled=%s",
+        bool(seller_id()),
+        bool(clean(os.getenv("TRENDYOL_API_KEY"))),
+        bool(clean(os.getenv("TRENDYOL_API_SECRET"))),
+        env_bool("TRENDYOL_ENABLED"),
+    )
 
 
 def trendyolHeaders() -> dict[str, str]:
@@ -127,6 +147,110 @@ def trendyolRequest(path: str, opts: Optional[dict[str, Any]] = None) -> dict[st
         )
 
     return {"status_code": response.status_code, "data": data}
+
+
+def response_preview(data: Any) -> dict[str, Any]:
+    packages = extract_packages(data)
+    first = packages[0] if packages else {}
+    return {
+        "top_level_type": type(data).__name__,
+        "top_level_keys": list(data.keys())[:30] if isinstance(data, dict) else [],
+        "package_count": len(packages),
+        "first_package_keys": list(first.keys())[:30] if isinstance(first, dict) else [],
+        "first_orderNumber_exists": bool(clean(first.get("orderNumber"))) if isinstance(first, dict) else False,
+        "first_package_id_exists": bool(package_id_from(first)) if isinstance(first, dict) else False,
+    }
+
+
+def debug_trendyol_order_request(params: dict[str, str]) -> dict[str, Any]:
+    query = "&".join(f"{name}={quote(value)}" for name, value in params.items() if clean(value))
+    path = f"/integration/order/sellers/{seller_id()}/orders"
+    if query:
+        path = f"{path}?{query}"
+
+    logger.info("trendyol debug request path=%s", path.split("?")[0])
+    response = trendyolRequest(path, {"method": "GET"})
+    logger.info("trendyol debug response code=%s", response.get("status_code"))
+    logger.info("trendyol debug response preview=%s", response_preview(response.get("data")))
+    return response
+
+
+def extract_packages(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if not isinstance(data, dict):
+        return []
+
+    for key in ("content", "shipmentPackages", "orders"):
+        value = data.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    if any(key in data for key in ("orderNumber", "id", "shipmentPackageId", "packageId")):
+        return [data]
+    return []
+
+
+def first_package(data: Any) -> dict[str, Any]:
+    packages = extract_packages(data)
+    return packages[0] if packages else {}
+
+
+def has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return True
+
+
+def collect_line_values(lines: list[Any], *keys: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        value = clean(get_value(line, *keys))
+        if value and value not in seen:
+            values.append(value)
+            seen.add(value)
+    return values
+
+
+def summarize_order_response(data: Any) -> dict[str, Any]:
+    pkg = first_package(data)
+    shipment_address = pkg.get("shipmentAddress") if isinstance(pkg.get("shipmentAddress"), dict) else {}
+    invoice_address = pkg.get("invoiceAddress") if isinstance(pkg.get("invoiceAddress"), dict) else {}
+    lines = pkg.get("lines") if isinstance(pkg.get("lines"), list) else []
+
+    return {
+        "customerEmail_exists": has_value(pkg.get("customerEmail")),
+        "customerFirstName_exists": has_value(pkg.get("customerFirstName")),
+        "customerLastName_exists": has_value(pkg.get("customerLastName")),
+        "shipmentAddress_exists": bool(shipment_address),
+        "shipmentAddress_phone_exists": has_value(shipment_address.get("phone")),
+        "invoiceAddress_exists": bool(invoice_address),
+        "invoiceAddress_phone_exists": has_value(invoice_address.get("phone")),
+        "line_count": len(lines),
+        "stock_codes": collect_line_values(lines, "stockCode", "stock_code", "merchantSku"),
+        "barcodes": collect_line_values(lines, "barcode"),
+        "business_units": collect_line_values(lines, "businessUnit"),
+        "shipmentPackageStatus": clean(get_value(pkg, "shipmentPackageStatus", "status", "packageStatus")),
+        "cargoProviderName": clean(pkg.get("cargoProviderName")),
+        "cargoTrackingNumber": clean(pkg.get("cargoTrackingNumber")),
+        "deliveryType": clean(pkg.get("deliveryType")),
+        "packageHistories_exists": isinstance(pkg.get("packageHistories"), list) and bool(pkg.get("packageHistories")),
+    }
+
+
+def debug_error_response(error: str, detail: Any, stage: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": error,
+        "detail": detail if isinstance(detail, str) else str(detail),
+        "stage": stage,
+    }
 
 
 def format_trendyol_digital_code(codes: list[str]) -> str:
@@ -494,6 +618,66 @@ def poll(x_api_key: Optional[str] = Header(default=None)):
 
     processed = processPendingTrendyolJobs(limit=20)
     return {"ok": True, "fetched": fetched, "processed": processed}
+
+
+@router.get("/debug/order")
+def debug_order(
+    orderNumber: Optional[str] = None,
+    key: Optional[str] = None,
+    x_internal_key: Optional[str] = Header(default=None, alias="X-Internal-Key"),
+):
+    require_debug_key(key, x_internal_key)
+    order_number = clean(orderNumber)
+    logger.info("trendyol debug/order called orderNumber_exists=%s shipmentPackageId_exists=%s", bool(order_number), False)
+    log_credential_presence()
+    if not order_number:
+        return debug_error_response("ORDER_NUMBER_REQUIRED", "orderNumber query parameter is required", "validate")
+
+    try:
+        response = debug_trendyol_order_request({"orderNumber": order_number})
+        raw = response.get("data") or {}
+        return {
+            "ok": True,
+            "query": {"orderNumber": order_number, "shipmentPackageId": ""},
+            "summary": summarize_order_response(raw),
+            "raw": raw,
+        }
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            raise
+        return debug_error_response("TRENDYOL_DEBUG_ORDER_FAILED", exc.detail, "trendyol_request")
+    except Exception as exc:
+        return debug_error_response("TRENDYOL_DEBUG_ORDER_FAILED", safe_error(exc), "unknown")
+
+
+@router.get("/debug/package")
+def debug_package(
+    shipmentPackageId: Optional[str] = None,
+    key: Optional[str] = None,
+    x_internal_key: Optional[str] = Header(default=None, alias="X-Internal-Key"),
+):
+    require_debug_key(key, x_internal_key)
+    package_id = clean(shipmentPackageId)
+    logger.info("trendyol debug/package called orderNumber_exists=%s shipmentPackageId_exists=%s", False, bool(package_id))
+    log_credential_presence()
+    if not package_id:
+        return debug_error_response("SHIPMENT_PACKAGE_ID_REQUIRED", "shipmentPackageId query parameter is required", "validate")
+
+    try:
+        response = debug_trendyol_order_request({"shipmentPackageIds": package_id})
+        raw = response.get("data") or {}
+        return {
+            "ok": True,
+            "query": {"orderNumber": "", "shipmentPackageId": package_id},
+            "summary": summarize_order_response(raw),
+            "raw": raw,
+        }
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            raise
+        return debug_error_response("TRENDYOL_DEBUG_PACKAGE_FAILED", exc.detail, "trendyol_request")
+    except Exception as exc:
+        return debug_error_response("TRENDYOL_DEBUG_PACKAGE_FAILED", safe_error(exc), "unknown")
 
 
 @router.get("/env-check")
