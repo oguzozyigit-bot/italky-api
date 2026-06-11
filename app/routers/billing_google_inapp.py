@@ -25,6 +25,12 @@ from app.routers.billing_google import (
     _update_purchase_log,
     supabase,
 )
+from app.services.store_purchases import (
+    find_store_purchase_by_android_token,
+    insert_purchase_audit_log,
+    insert_store_purchase,
+    normalize_purchase_token,
+)
 
 router = APIRouter(tags=["billing-google-inapp"])
 logger = logging.getLogger(__name__)
@@ -424,6 +430,7 @@ def _existing_response(user_id: str, product_id: str, purchase_token: str) -> di
         pass
     return {
         "ok": True,
+        "duplicate": True,
         "already_processed": True,
         "stage": "success",
         "product_id": product_id,
@@ -439,7 +446,7 @@ def _confirm(req: GoogleInAppConfirmReq, authorization: str | None, stage_ctx: d
 
     _stage(stage_ctx, "request_parsed")
     product_id = _clean_lower(_field(req, "product_id", "productId"))
-    purchase_token = _clean(_field(req, "purchase_token", "purchaseToken"))
+    purchase_token = normalize_purchase_token(_field(req, "purchase_token", "purchaseToken"))
     package_name = _clean(_field(req, "package_name", "packageName"))
     product_type = _clean_lower(_field(req, "product_type", "productType"))
 
@@ -479,6 +486,18 @@ def _confirm(req: GoogleInAppConfirmReq, authorization: str | None, stage_ctx: d
     existing_owner = _get_purchase_owner(purchase_token)
     if existing_owner:
         existing_user_id = _clean(existing_owner.get("user_id"))
+        if existing_user_id and existing_user_id != user_id:
+            raise HTTPException(status_code=409, detail="purchase_token_already_bound_to_other_user")
+        _stage(stage_ctx, "success")
+        return _existing_response(user_id, product_id, purchase_token)
+
+    _stage(stage_ctx, "store_purchase_duplicate_check")
+    try:
+        existing_store_purchase = find_store_purchase_by_android_token(supabase, purchase_token)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="store_purchase_lookup_failed") from exc
+    if existing_store_purchase:
+        existing_user_id = _clean(existing_store_purchase.get("user_id"))
         if existing_user_id and existing_user_id != user_id:
             raise HTTPException(status_code=409, detail="purchase_token_already_bound_to_other_user")
         _stage(stage_ctx, "success")
@@ -535,10 +554,48 @@ def _confirm(req: GoogleInAppConfirmReq, authorization: str | None, stage_ctx: d
     )
     _insert_purchase_log(user_id, user_email, product_id, days, purchase_token, "google_play_inapp")
 
+    _stage(stage_ctx, "store_purchase_insert_started")
+    try:
+        store_purchase = insert_store_purchase(
+            supabase,
+            user_id=user_id,
+            platform="android",
+            product_id=product_id,
+            purchase_token=purchase_token,
+            order_id=order_id,
+            purchase_time=_parse_dt(verification.get("purchaseTimeMillis")),
+            granted_days=days,
+            entitlement_start=base_date,
+            entitlement_end=new_end,
+            raw_payload=verification,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="store_purchase_insert_failed") from exc
+
+    insert_purchase_audit_log(
+        supabase,
+        purchase_id=(store_purchase or {}).get("id"),
+        user_id=user_id,
+        platform="android",
+        action="grant_days",
+        reason="google_play_inapp_confirm",
+        old_status=None,
+        new_status="active",
+        old_entitlement_end=base_date,
+        new_entitlement_end=new_end,
+        raw_payload={
+            "product_id": product_id,
+            "purchase_token": purchase_token,
+            "order_id": order_id,
+            "granted_days": days,
+        },
+    )
+
     _stage(stage_ctx, "success")
     fresh = _profile_or_404(user_id)
     return {
         "ok": True,
+        "duplicate": False,
         "already_processed": False,
         "stage": "success",
         "product_id": product_id,
