@@ -44,6 +44,7 @@ from app.routers.google_play_entitlement import router as google_play_entitlemen
 from app.routers.google_voided_purchases import router as google_voided_purchases_router
 from app.routers.store_purchase_admin import router as store_purchase_admin_router
 from app.routers.usage_billing import router as usage_billing_router
+from app.routers.apple_server_notifications import router as apple_server_notifications_router
 
 # OPTIONAL ROUTERS
 try:
@@ -159,6 +160,7 @@ app.include_router(billing_google_router)
 app.include_router(billing_google_inapp_router)
 app.include_router(store_purchase_admin_router)
 app.include_router(google_voided_purchases_router)
+app.include_router(apple_server_notifications_router)
 app.include_router(usage_billing_router)
 
 # OPTIONAL
