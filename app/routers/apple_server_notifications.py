@@ -7,7 +7,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Header, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 from app.routers.session import supabase
 from app.services.store_purchases import insert_purchase_audit_log, revoke_purchase_entitlement
@@ -50,10 +50,6 @@ def _expected_app_apple_id() -> str:
     return os.getenv("APPLE_APP_APPLE_ID", "").strip()
 
 
-def _shared_secret() -> str:
-    return os.getenv("APPLE_NOTIFICATION_SHARED_SECRET", "").strip()
-
-
 def _mask_id(value: str) -> str:
     clean = str(value or "").strip()
     if len(clean) <= 8:
@@ -89,19 +85,16 @@ def _validate_bundle_and_app(notification: dict[str, Any], transaction: dict[str
     expected_app_id = _expected_app_apple_id()
     if expected_app_id:
         app_apple_id = str(data.get("appAppleId") or "").strip()
-        if app_apple_id and app_apple_id != expected_app_id:
+        if not app_apple_id:
+            logger.warning("apple server notification app id missing expected=%s", expected_app_id)
+            raise HTTPException(status_code=403, detail="apple_app_apple_id_missing")
+        if app_apple_id != expected_app_id:
             logger.warning(
                 "apple server notification app id mismatch expected=%s got=%s",
                 expected_app_id,
                 app_apple_id,
             )
             raise HTTPException(status_code=403, detail="apple_app_apple_id_mismatch")
-
-
-def _validate_optional_shared_secret(x_apple_notification_secret: str | None) -> None:
-    expected = _shared_secret()
-    if expected and str(x_apple_notification_secret or "").strip() != expected:
-        raise HTTPException(status_code=403, detail="apple_notification_secret_mismatch")
 
 
 def _find_ios_purchase_by_transaction(transaction_id: str) -> dict[str, Any] | None:
@@ -203,10 +196,7 @@ def _apply_revocation_time(purchase_id: str, new_status: str, revocation_date: d
 def apple_server_notifications(
     body: dict[str, Any] | None = Body(default=None),
     debug: bool = Query(default=False),
-    x_apple_notification_secret: str | None = Header(default=None, alias="X-Apple-Notification-Secret"),
 ):
-    _validate_optional_shared_secret(x_apple_notification_secret)
-
     payload_body = body or {}
     signed_payload = str(payload_body.get("signedPayload") or "").strip()
     if not signed_payload:
