@@ -21,7 +21,7 @@ router = APIRouter(prefix="/api/cron/google", tags=["google-voided-purchases"])
 logger = logging.getLogger(__name__)
 
 GOOGLE_PLAY_SCOPE = "https://www.googleapis.com/auth/androidpublisher"
-MAX_WINDOW_HOURS = 24 * 30
+MAX_WINDOW_HOURS = 719
 DEFAULT_WINDOW_HOURS = 24
 MAX_RESULTS = 1000
 
@@ -39,6 +39,16 @@ def _require_cron_secret(x_cron_secret: str | None) -> None:
 
 def _package_name() -> str:
     return os.getenv("GOOGLE_PLAY_PACKAGE_NAME", "").strip()
+
+
+def _normalize_window_hours(hours: int | None) -> int:
+    try:
+        value = int(hours or 0)
+    except (TypeError, ValueError):
+        return DEFAULT_WINDOW_HOURS
+    if value <= 0:
+        return DEFAULT_WINDOW_HOURS
+    return min(value, MAX_WINDOW_HOURS)
 
 
 def _credential_source() -> tuple[str | None, str]:
@@ -223,11 +233,12 @@ def _fetch_voided_purchases(
 @router.get("/voided-purchases")
 def google_voided_purchases_cron(
     x_cron_secret: str | None = Header(default=None, alias="X-Cron-Secret"),
-    hours: int = Query(default=DEFAULT_WINDOW_HOURS, ge=1, le=MAX_WINDOW_HOURS),
+    hours: int = Query(default=DEFAULT_WINDOW_HOURS),
 ):
     _require_cron_secret(x_cron_secret)
 
     try:
+        window_hours = _normalize_window_hours(hours)
         package_name = _package_name()
         credential_value, credential_source = _credential_source()
         credential_path_exists = None
@@ -238,7 +249,7 @@ def google_voided_purchases_cron(
             package_name or "(missing)",
             credential_source,
             credential_path_exists,
-            hours,
+            window_hours,
         )
 
         if not package_name:
@@ -250,7 +261,7 @@ def google_voided_purchases_cron(
         if not access_token:
             return {"ok": False, "error": "google_auth_error", "message": "empty_access_token"}
 
-        voided_purchases, error = _fetch_voided_purchases(package_name, access_token, hours)
+        voided_purchases, error = _fetch_voided_purchases(package_name, access_token, window_hours)
         if error:
             return error
 
@@ -304,5 +315,5 @@ def google_voided_purchases_cron(
         "revoked": revoked,
         "skipped": skipped,
         "unmatched": unmatched,
-        "window_hours": hours,
+        "window_hours": window_hours,
     }
