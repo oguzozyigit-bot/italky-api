@@ -200,3 +200,153 @@ def compute_entitlement_window(
     start = max(dt for dt in candidates if dt is not None)
     end = start + timedelta(days=int(granted_days or 0))
     return start, end
+
+
+def _find_store_purchase_by_id(supabase: Any, purchase_id: str) -> dict[str, Any] | None:
+    clean_purchase_id = str(purchase_id or "").strip()
+    if not clean_purchase_id:
+        return None
+    result = (
+        supabase.table("store_purchases")
+        .select("*")
+        .eq("id", clean_purchase_id)
+        .limit(1)
+        .execute()
+    )
+    rows = _safe_data(result)
+    return rows[0] if rows else None
+
+
+def _profile_for_revoke(supabase: Any, user_id: str) -> dict[str, Any] | None:
+    result = (
+        supabase.table("profiles")
+        .select("id,package_active,package_ends_at,membership_status,membership_ends_at")
+        .eq("id", user_id)
+        .limit(1)
+        .execute()
+    )
+    rows = _safe_data(result)
+    return rows[0] if rows else None
+
+
+def _subtract_days_or_clamp(value: Any, days: int, now: datetime) -> datetime:
+    current = _parse_dt(value) or now
+    if days <= 0:
+        return current
+    updated = current - timedelta(days=days)
+    return max(updated, now)
+
+
+def revoke_purchase_entitlement(
+    supabase: Any,
+    purchase_id: str,
+    reason: str,
+    new_status: str,
+    raw_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    clean_status = str(new_status or "").strip().lower()
+    if clean_status not in {"refunded", "voided", "revoked", "cancelled"}:
+        return {"ok": False, "error": "invalid_revoke_status"}
+
+    purchase = _find_store_purchase_by_id(supabase, purchase_id)
+    if not purchase:
+        return {"ok": False, "error": "purchase_not_found"}
+
+    user_id = str(purchase.get("user_id") or "").strip()
+    platform = str(purchase.get("platform") or "").strip()
+    old_status = str(purchase.get("status") or "").strip().lower()
+    granted_days = int(purchase.get("granted_days") or 0)
+
+    if old_status != "active":
+        insert_purchase_audit_log(
+            supabase,
+            purchase_id=purchase.get("id"),
+            user_id=user_id,
+            platform=platform,
+            action="revoke_skipped_already_inactive",
+            reason=reason,
+            old_status=old_status,
+            new_status=old_status,
+            old_entitlement_end=purchase.get("entitlement_end"),
+            new_entitlement_end=purchase.get("entitlement_end"),
+            raw_payload=raw_payload or {},
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "already_inactive",
+            "purchase_id": purchase.get("id"),
+            "user_id": user_id,
+            "status": old_status,
+        }
+
+    profile = _profile_for_revoke(supabase, user_id)
+    if not profile:
+        return {"ok": False, "error": "profile_not_found", "purchase_id": purchase.get("id")}
+
+    now = datetime.now(timezone.utc)
+    old_membership_end = _parse_dt(profile.get("membership_ends_at"))
+    old_package_end = _parse_dt(profile.get("package_ends_at"))
+    old_entitlement_end = max(
+        [dt for dt in [old_membership_end, old_package_end, _parse_dt(purchase.get("entitlement_end"))] if dt],
+        default=None,
+    )
+
+    new_membership_end = _subtract_days_or_clamp(profile.get("membership_ends_at"), granted_days, now)
+    new_package_end = _subtract_days_or_clamp(profile.get("package_ends_at"), granted_days, now)
+    new_entitlement_end = max(new_membership_end, new_package_end)
+    should_deactivate = new_entitlement_end <= now
+
+    profile_update = {
+        "membership_ends_at": _iso(new_membership_end),
+        "package_ends_at": _iso(new_package_end),
+        "membership_last_checked_at": _iso(now),
+    }
+    if should_deactivate:
+        profile_update.update(
+            {
+                "package_active": False,
+                "membership_status": "inactive",
+            }
+        )
+    supabase.table("profiles").update(profile_update).eq("id", user_id).execute()
+
+    purchase_update = {
+        "status": clean_status,
+        "revoke_reason": reason,
+        "raw_payload": raw_payload or purchase.get("raw_payload") or {},
+        "updated_at": _iso(now),
+    }
+    if clean_status == "refunded":
+        purchase_update["refund_time"] = _iso(now)
+    else:
+        purchase_update["voided_time"] = _iso(now)
+    supabase.table("store_purchases").update(purchase_update).eq("id", purchase.get("id")).execute()
+
+    insert_purchase_audit_log(
+        supabase,
+        purchase_id=purchase.get("id"),
+        user_id=user_id,
+        platform=platform,
+        action="revoke_days",
+        reason=reason,
+        old_status=old_status,
+        new_status=clean_status,
+        old_entitlement_end=old_entitlement_end,
+        new_entitlement_end=new_entitlement_end,
+        raw_payload={
+            "purchase_id": purchase.get("id"),
+            "granted_days": granted_days,
+            "raw_payload": raw_payload or {},
+        },
+    )
+
+    return {
+        "ok": True,
+        "purchase_id": purchase.get("id"),
+        "user_id": user_id,
+        "old_entitlement_end": _iso(old_entitlement_end) if old_entitlement_end else None,
+        "new_entitlement_end": _iso(new_entitlement_end),
+        "revoked_days": max(0, granted_days),
+        "status": clean_status,
+    }
