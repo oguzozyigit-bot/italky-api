@@ -329,11 +329,17 @@ LANG_DISPLAY_NAMES = {
 
 SUPPORTED_GOOGLE_LANGS = {
     "tr", "en", "de", "fr", "it", "es",
+    "pt", "nl", "sv", "no", "da", "fi", "pl", "cs", "sk", "hu",
     "sq", "bs", "sr", "hr", "mk", "bg", "ro", "el",
+    "uk", "ru",
     "ab", "ce", "av", "os", "crh",
     "ku", "ckb",
     "ka", "az", "kk", "ky", "uz", "tk", "ug", "tt", "ba", "gag",
-    "he"
+    "he", "ar", "fa", "ur",
+    "hi", "bn", "id", "ms", "vi", "th", "zh", "ja", "ko", "fil",
+    "mr", "ta", "te", "gu", "kn",
+    "hy", "sl", "et", "lv", "lt",
+    "af", "sw",
 }
 
 SHORT_PHRASE_MAP: Dict[Tuple[str, str, str], str] = {
