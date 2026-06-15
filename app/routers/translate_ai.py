@@ -264,6 +264,7 @@ def validate_translation_output(
     source: str,
     target: str,
     strict_short: bool = False,
+    allow_short_cultural_equivalent: bool = False,
 ) -> Tuple[bool, str]:
     out = cleanup_translation_text(out_text)
 
@@ -273,7 +274,7 @@ def validate_translation_output(
     if contains_forbidden_meta_output(out):
         return False, "meta_output"
 
-    if strict_short or is_short_utterance(src_text):
+    if not allow_short_cultural_equivalent and (strict_short or is_short_utterance(src_text)):
         if probably_expanded_too_much(src_text, out, source, target):
             return False, "expanded_short_text"
 
@@ -773,15 +774,67 @@ def build_translation_response(
     }
 
 
+DEMO_CULTURAL_OVERRIDES = {
+    ("tr", "en", "sakla samanı gelir zamanı"): "Waste not, want not.",
+    ("tr", "en", "sakla samani gelir zamani"): "Waste not, want not.",
+    ("tr", "en", "sakla zamanı gelir zamanı"): "Waste not, want not.",
+    ("tr", "en", "sakla zamani gelir zamani"): "Waste not, want not.",
+}
+
+
+def normalize_demo_cultural_key(text: str) -> str:
+    replacements = str.maketrans({
+        "ç": "c",
+        "ğ": "g",
+        "ı": "i",
+        "i": "i",
+        "ö": "o",
+        "ş": "s",
+        "ü": "u",
+        "â": "a",
+        "î": "i",
+        "û": "u",
+    })
+    s = normalize_text(text).lower().replace("\u0307", "").translate(replacements)
+    s = re.sub(r"[^\w\s]", " ", s, flags=re.UNICODE)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def lookup_demo_cultural_override(text: str, source: str, target: str) -> str:
+    src = canonical(source)
+    dst = canonical(target)
+    keys = {
+        normalize_text(text).lower(),
+        normalize_demo_cultural_key(text),
+    }
+
+    for key in keys:
+        translated = DEMO_CULTURAL_OVERRIDES.get((src, dst, key), "")
+        if translated:
+            return translated
+    return ""
+
+
 def cultural_translation_prompt(text: str, source: str, target: str) -> str:
     return (
-        "You are a cultural conversation translator.\n"
+        "You are a cultural proverb and conversation translator.\n"
+        "Your job is not literal translation.\n"
         f"Translate the user's text from {lang_display(source)} ({source}) "
         f"to {lang_display(target)} ({target}).\n"
-        "Preserve the intended meaning, tone, idioms, proverbs, humor, and cultural context.\n"
-        "Do not translate idioms word-for-word.\n"
-        "Use a natural equivalent in the target language when possible.\n"
-        "Return only the translated sentence. No explanation.\n\n"
+        "If the source text contains a proverb, idiom, joke, sarcasm, cultural phrase, "
+        "or figurative expression, replace it with the closest natural equivalent in the target language.\n"
+        "If the text is a proverb or idiom, choose the natural proverb/idiom in the target language.\n"
+        "For Turkish \"Sakla samanı, gelir zamanı.\", translate to English as \"Waste not, want not.\"\n"
+        "Never translate it as \"Save the straw\" or \"Hide the straw\".\n"
+        "Return only the final translation.\n"
+        "Return only the translated phrase/sentence.\n"
+        "No explanation.\n\n"
+        "Examples:\n"
+        "Turkish → English:\n"
+        "\"Sakla samanı, gelir zamanı.\" => \"Waste not, want not.\"\n"
+        "\"Damlaya damlaya göl olur.\" => \"Every little bit helps.\"\n"
+        "\"Bir taşla iki kuş vurmak.\" => \"Kill two birds with one stone.\"\n\n"
         f"User text:\n{text}"
     )
 
@@ -812,7 +865,13 @@ def call_openai_cultural_translate(text: str, source: str, target: str) -> Optio
             temperature=0.25,
         )
         translated = cleanup_translation_text(completion.choices[0].message.content or "")
-        ok, _ = validate_translation_output(text, translated, source, target)
+        ok, _ = validate_translation_output(
+            text,
+            translated,
+            source,
+            target,
+            allow_short_cultural_equivalent=True,
+        )
         return translated if ok else None
     except Exception as e:
         print("[translate_ai] demo openai failed:", e)
@@ -830,7 +889,13 @@ def call_gemini_cultural_translate(text: str, source: str, target: str) -> Optio
         model = genai.GenerativeModel(GEMINI_MODEL)
         result = model.generate_content(cultural_translation_prompt(text, source, target))
         translated = cleanup_translation_text(getattr(result, "text", "") or "")
-        ok, _ = validate_translation_output(text, translated, source, target)
+        ok, _ = validate_translation_output(
+            text,
+            translated,
+            source,
+            target,
+            allow_short_cultural_equivalent=True,
+        )
         return translated if ok else None
     except Exception as e:
         print("[translate_ai] demo gemini failed:", e)
@@ -858,6 +923,17 @@ def demo_google_translate_fallback(text: str, source: str, target: str) -> Optio
 
 
 def translate_facetoface_demo_ai(text: str, source: str, target: str) -> Dict[str, Any]:
+    override_text = lookup_demo_cultural_override(text, source, target)
+    if override_text:
+        return build_translation_response(
+            override_text,
+            "demo_cultural_override",
+            True,
+            source,
+            target,
+            len(text),
+        )
+
     openai_text = call_openai_cultural_translate(text, source, target)
     if openai_text:
         return build_translation_response(openai_text, "openai", True, source, target, len(text))
