@@ -14,6 +14,10 @@ from supabase import Client, create_client
 router = APIRouter(tags=["translate_ai"])
 
 GOOGLE_TRANSLATE_API_KEY = os.getenv("GOOGLE_TRANSLATE_API_KEY", "").strip()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -27,9 +31,14 @@ class TranslateBody(BaseModel):
     text: str
     from_lang: str
     to_lang: str
+    source: Optional[str] = None
+    target: Optional[str] = None
     mode: Optional[str] = "normal"      # normal | cultural
     tone: Optional[str] = "neutral"     # neutral | happy | angry | sad | excited
     style: Optional[str] = "balanced"   # balanced | warm | clear | social
+    use_ai: Optional[bool] = False
+    cultural: Optional[bool] = False
+    surface: Optional[str] = None
     google_only: Optional[bool] = False  # True ise sadece Google denenir; başka sağlayıcıya düşmez.
 
     # Ataların Dili
@@ -74,6 +83,12 @@ def canonical_style(style: str) -> str:
 def lang_display(code: str) -> str:
     c = canonical(code)
     return LANG_DISPLAY_NAMES.get(c, c.upper())
+
+
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def safe_json_loads(raw: str) -> Dict[str, Any]:
@@ -721,6 +736,151 @@ def fast_translate_fallback(text: str, source: str, target: str) -> str:
 
 
 # =========================================================
+# FACE TO FACE DEMO AI PROVIDERS
+# =========================================================
+
+def is_facetoface_demo_ai_request(body: TranslateBody, mode: str) -> bool:
+    return (
+        str(body.surface or "").strip().lower() == "facetoface_demo"
+        and (
+            mode == "cultural"
+            or truthy(body.use_ai)
+            or truthy(body.cultural)
+        )
+    )
+
+
+def build_translation_response(
+    translated: str,
+    provider: str,
+    ai_used: bool,
+    source: str,
+    target: str,
+    chars_used: int,
+) -> Dict[str, Any]:
+    value = cleanup_translation_text(translated)
+    return {
+        "ok": True,
+        "translated": value,
+        "translation": value,
+        "text": value,
+        "provider": provider,
+        "ai_used": ai_used,
+        "charged": False,
+        "chars_used": chars_used,
+        "from_lang": source,
+        "to_lang": target,
+    }
+
+
+def cultural_translation_prompt(text: str, source: str, target: str) -> str:
+    return (
+        "You are a cultural conversation translator.\n"
+        f"Translate the user's text from {lang_display(source)} ({source}) "
+        f"to {lang_display(target)} ({target}).\n"
+        "Preserve the intended meaning, tone, idioms, proverbs, humor, and cultural context.\n"
+        "Do not translate idioms word-for-word.\n"
+        "Use a natural equivalent in the target language when possible.\n"
+        "Return only the translated sentence. No explanation.\n\n"
+        f"User text:\n{text}"
+    )
+
+
+def call_openai_cultural_translate(text: str, source: str, target: str) -> Optional[str]:
+    if not OPENAI_API_KEY:
+        return None
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        completion = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You translate conversation naturally across cultures. "
+                        "Return only the translation, with no label or explanation."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": cultural_translation_prompt(text, source, target),
+                },
+            ],
+            temperature=0.25,
+        )
+        translated = cleanup_translation_text(completion.choices[0].message.content or "")
+        ok, _ = validate_translation_output(text, translated, source, target)
+        return translated if ok else None
+    except Exception as e:
+        print("[translate_ai] demo openai failed:", e)
+        return None
+
+
+def call_gemini_cultural_translate(text: str, source: str, target: str) -> Optional[str]:
+    if not GEMINI_API_KEY:
+        return None
+
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        result = model.generate_content(cultural_translation_prompt(text, source, target))
+        translated = cleanup_translation_text(getattr(result, "text", "") or "")
+        ok, _ = validate_translation_output(text, translated, source, target)
+        return translated if ok else None
+    except Exception as e:
+        print("[translate_ai] demo gemini failed:", e)
+        return None
+
+
+def demo_google_translate_fallback(text: str, source: str, target: str) -> Optional[str]:
+    try:
+        translated = google_translate_official(text, source, target)
+        ok, _ = validate_translation_output(text, translated, source, target)
+        if translated and ok:
+            return translated
+    except Exception as e1:
+        print("[translate_ai] demo google official failed:", e1)
+
+    try:
+        translated = google_translate_free(text, source, target)
+        ok, _ = validate_translation_output(text, translated, source, target)
+        if translated and ok:
+            return translated
+    except Exception as e2:
+        print("[translate_ai] demo google free failed:", e2)
+
+    return None
+
+
+def translate_facetoface_demo_ai(text: str, source: str, target: str) -> Dict[str, Any]:
+    openai_text = call_openai_cultural_translate(text, source, target)
+    if openai_text:
+        return build_translation_response(openai_text, "openai", True, source, target, len(text))
+
+    gemini_text = call_gemini_cultural_translate(text, source, target)
+    if gemini_text:
+        return build_translation_response(gemini_text, "gemini", True, source, target, len(text))
+
+    google_text = demo_google_translate_fallback(text, source, target)
+    if google_text:
+        return build_translation_response(google_text, "google", False, source, target, len(text))
+
+    return {
+        "ok": False,
+        "error": "google_translate_failed",
+        "ai_used": False,
+        "charged": False,
+        "from_lang": source,
+        "to_lang": target,
+    }
+
+
+# =========================================================
 # SUPABASE / BILLING
 # =========================================================
 
@@ -834,8 +994,8 @@ def translate_ai(
     authorization: Optional[str] = Header(default=None),
 ):
     text = normalize_text(body.text)
-    source = canonical(body.from_lang)
-    target = canonical(body.to_lang)
+    source = canonical(body.from_lang or body.source)
+    target = canonical(body.to_lang or body.target)
     mode = str(body.mode or "normal").strip().lower()
     tone = canonical_tone(body.tone or "neutral")
     style = canonical_style(body.style or "balanced")
@@ -858,6 +1018,9 @@ def translate_ai(
         "atalar_target": atalar_target,
         "reading_mode": reading_mode,
         "google_only": google_only,
+        "use_ai": bool(body.use_ai),
+        "cultural": bool(body.cultural),
+        "surface": str(body.surface or ""),
     })
 
     if not text:
@@ -896,10 +1059,15 @@ def translate_ai(
         return {
             "ok": True,
             "translated": text,
+            "translation": text,
+            "text": text,
             "provider": "none",
             "ai_used": False,
             "charged": False,
         }
+
+    if is_facetoface_demo_ai_request(body, mode):
+        return translate_facetoface_demo_ai(text, source, target)
 
     short_phrase_hit = lookup_short_phrase(text, source, target)
     if short_phrase_hit:
