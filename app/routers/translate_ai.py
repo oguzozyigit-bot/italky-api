@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import html
@@ -18,6 +19,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
+CULTURAL_PROVIDER_TIMEOUT_SECONDS = float(os.getenv("CULTURAL_PROVIDER_TIMEOUT_SECONDS", "5"))
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
@@ -432,6 +434,21 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
         return False
 
     if should_force_literal_mode(s, tone, style):
+        return False
+
+    cultural_key = normalize_demo_cultural_key(s)
+    cultural_markers = {
+        "sakla saman",
+        "damlaya damlaya",
+        "bir tasla",
+        "iki kus",
+        "ayagini yorgan",
+        "etekleri zil",
+        "kulak ardi",
+        "lafin gelisi",
+        "gonlunu almak",
+    }
+    if any(marker in cultural_key for marker in cultural_markers):
         return True
 
     words = re.findall(r"\S+", s)
@@ -656,7 +673,7 @@ def should_force_ai_for_language_pair(source: str, target: str) -> bool:
 # GOOGLE PROVIDER CALLS
 # =========================================================
 
-def google_translate_free(text: str, source: str, target: str) -> str:
+def google_translate_free(text: str, source: str, target: str, timeout: float = 12) -> str:
     url = "https://translate.googleapis.com/translate_a/single"
     params = {
         "client": "gtx",
@@ -666,7 +683,7 @@ def google_translate_free(text: str, source: str, target: str) -> str:
         "q": text,
     }
 
-    r = requests.get(url, params=params, timeout=12)
+    r = requests.get(url, params=params, timeout=timeout)
     r.raise_for_status()
     data = r.json()
 
@@ -678,7 +695,7 @@ def google_translate_free(text: str, source: str, target: str) -> str:
     return cleanup_translation_text(translated)
 
 
-def google_translate_official(text: str, source: str, target: str) -> str:
+def google_translate_official(text: str, source: str, target: str, timeout: float = 12) -> str:
     if not GOOGLE_TRANSLATE_API_KEY:
         raise RuntimeError("GOOGLE_TRANSLATE_API_KEY missing")
 
@@ -691,7 +708,7 @@ def google_translate_official(text: str, source: str, target: str) -> str:
         "key": GOOGLE_TRANSLATE_API_KEY,
     }
 
-    r = requests.post(url, data=payload, timeout=12)
+    r = requests.post(url, data=payload, timeout=timeout)
     r.raise_for_status()
     data = r.json()
     translated = (
@@ -846,7 +863,7 @@ def call_openai_cultural_translate(text: str, source: str, target: str) -> Optio
     try:
         from openai import OpenAI
 
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = OpenAI(api_key=OPENAI_API_KEY, timeout=CULTURAL_PROVIDER_TIMEOUT_SECONDS)
         completion = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
@@ -887,7 +904,10 @@ def call_gemini_cultural_translate(text: str, source: str, target: str) -> Optio
 
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel(GEMINI_MODEL)
-        result = model.generate_content(cultural_translation_prompt(text, source, target))
+        result = model.generate_content(
+            cultural_translation_prompt(text, source, target),
+            request_options={"timeout": CULTURAL_PROVIDER_TIMEOUT_SECONDS},
+        )
         translated = cleanup_translation_text(getattr(result, "text", "") or "")
         ok, _ = validate_translation_output(
             text,
@@ -904,7 +924,12 @@ def call_gemini_cultural_translate(text: str, source: str, target: str) -> Optio
 
 def demo_google_translate_fallback(text: str, source: str, target: str) -> Optional[str]:
     try:
-        translated = google_translate_official(text, source, target)
+        translated = google_translate_official(
+            text,
+            source,
+            target,
+            timeout=CULTURAL_PROVIDER_TIMEOUT_SECONDS,
+        )
         ok, _ = validate_translation_output(text, translated, source, target)
         if translated and ok:
             return translated
@@ -912,7 +937,12 @@ def demo_google_translate_fallback(text: str, source: str, target: str) -> Optio
         print("[translate_ai] demo google official failed:", e1)
 
     try:
-        translated = google_translate_free(text, source, target)
+        translated = google_translate_free(
+            text,
+            source,
+            target,
+            timeout=CULTURAL_PROVIDER_TIMEOUT_SECONDS,
+        )
         ok, _ = validate_translation_output(text, translated, source, target)
         if translated and ok:
             return translated
@@ -922,10 +952,45 @@ def demo_google_translate_fallback(text: str, source: str, target: str) -> Optio
     return None
 
 
-def translate_facetoface_demo_ai(text: str, source: str, target: str) -> Dict[str, Any]:
+def _with_cultural_charge(
+    response: Dict[str, Any],
+    user_id: str,
+    cost: int,
+    source_text: str,
+    target_lang: str,
+) -> Dict[str, Any]:
+    charge = _charge_cultural_translation_tokens(
+        user_id=user_id,
+        cost=cost,
+        source_text=source_text,
+        target_lang=target_lang,
+    )
+    response.update(
+        {
+            "charged": bool(charge.get("charged", True)),
+            "tokens_charged": int(charge.get("tokens_charged") or charge.get("cost") or cost or 0),
+            "tokens_before": charge.get("tokens_before"),
+            "tokens_after": charge.get("tokens_after"),
+            "wallet": charge,
+        }
+    )
+    return response
+
+
+def translate_facetoface_demo_ai(
+    text: str,
+    source: str,
+    target: str,
+    tone: str,
+    style: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    cost = cultural_translation_token_cost(text)
+    _precheck_cultural_translation_tokens(user_id, cost)
+
     override_text = lookup_demo_cultural_override(text, source, target)
     if override_text:
-        return build_translation_response(
+        response = build_translation_response(
             override_text,
             "demo_cultural_override",
             True,
@@ -933,27 +998,46 @@ def translate_facetoface_demo_ai(text: str, source: str, target: str) -> Dict[st
             target,
             len(text),
         )
+        return _with_cultural_charge(response, user_id, cost, text, target)
+
+    needs_ai = should_force_ai_for_language_pair(source, target) or should_use_ai_for_cultural(text, tone, style)
+
+    if not needs_ai:
+        google_text = demo_google_translate_fallback(text, source, target)
+        if google_text:
+            response = build_translation_response(google_text, "google", False, source, target, len(text))
+            return _with_cultural_charge(response, user_id, cost, text, target)
+
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "CULTURAL_TRANSLATION_PROVIDER_FAILED",
+                "reason": "google_translate_failed",
+            },
+        )
 
     openai_text = call_openai_cultural_translate(text, source, target)
     if openai_text:
-        return build_translation_response(openai_text, "openai", True, source, target, len(text))
+        response = build_translation_response(openai_text, "openai", True, source, target, len(text))
+        return _with_cultural_charge(response, user_id, cost, text, target)
 
     gemini_text = call_gemini_cultural_translate(text, source, target)
     if gemini_text:
-        return build_translation_response(gemini_text, "gemini", True, source, target, len(text))
+        response = build_translation_response(gemini_text, "gemini", True, source, target, len(text))
+        return _with_cultural_charge(response, user_id, cost, text, target)
 
     google_text = demo_google_translate_fallback(text, source, target)
     if google_text:
-        return build_translation_response(google_text, "google", False, source, target, len(text))
+        response = build_translation_response(google_text, "google", False, source, target, len(text))
+        return _with_cultural_charge(response, user_id, cost, text, target)
 
-    return {
-        "ok": False,
-        "error": "google_translate_failed",
-        "ai_used": False,
-        "charged": False,
-        "from_lang": source,
-        "to_lang": target,
-    }
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "CULTURAL_TRANSLATION_PROVIDER_FAILED",
+            "reason": "all_providers_failed",
+        },
+    )
 
 
 # =========================================================
@@ -992,6 +1076,97 @@ def _get_user_from_jwt(jwt_token: str) -> Dict[str, Any]:
         raise
     except Exception as e:
         raise HTTPException(status_code=401, detail=f"jwt_verify_failed: {e}")
+
+
+def cultural_translation_token_cost(source_text: str) -> int:
+    source_len = len(normalize_text(source_text))
+    if source_len <= 0:
+        return 0
+    return max(1, math.ceil(source_len / 10))
+
+
+def _get_profile_tokens(user_id: str) -> int:
+    sb = _require_supabase()
+    try:
+        res = (
+            sb.table("profiles")
+            .select("tokens")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(res, "data", None) or []
+        if not rows:
+            raise HTTPException(status_code=404, detail="profile_not_found")
+        return int((rows[0] or {}).get("tokens") or 0)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"profile_tokens_failed: {e}")
+
+
+def _precheck_cultural_translation_tokens(user_id: str, cost: int) -> Dict[str, Any]:
+    tokens = _get_profile_tokens(user_id)
+    can_afford = tokens >= int(cost or 0)
+    result = {
+        "tokens": tokens,
+        "tokens_after": tokens - int(cost or 0) if can_afford else tokens,
+        "tokens_charged": int(cost or 0) if can_afford else 0,
+        "required_tokens": int(cost or 0),
+        "can_afford": can_afford,
+    }
+
+    if not can_afford:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_TOKENS",
+                "reason": "insufficient_tokens",
+                **result,
+            },
+        )
+
+    return result
+
+
+def _charge_cultural_translation_tokens(
+    user_id: str,
+    cost: int,
+    source_text: str,
+    target_lang: str,
+) -> Dict[str, Any]:
+    sb = _require_supabase()
+    try:
+        rpc = sb.rpc(
+            "charge_cultural_translation_tokens",
+            {
+                "p_user_id": user_id,
+                "p_cost": int(cost or 0),
+                "p_source_text": normalize_text(source_text),
+                "p_target_lang": canonical(target_lang),
+            },
+        ).execute()
+
+        data = rpc.data
+        if data is None:
+            raise HTTPException(status_code=500, detail="cultural_charge_empty")
+
+        if isinstance(data, dict) and data.get("ok") is False:
+            if data.get("reason") == "insufficient_tokens":
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "INSUFFICIENT_TOKENS",
+                        **data,
+                    },
+                )
+            raise HTTPException(status_code=500, detail=data)
+
+        return data if isinstance(data, dict) else {"ok": True, "raw": data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"cultural_charge_failed: {e}")
 
 
 def _get_wallet_summary(user_id: str) -> Dict[str, Any]:
@@ -1143,7 +1318,16 @@ def translate_ai(
         }
 
     if is_facetoface_demo_ai_request(body, mode):
-        return translate_facetoface_demo_ai(text, source, target)
+        jwt_token = _get_bearer(authorization)
+        user = _get_user_from_jwt(jwt_token)
+        return translate_facetoface_demo_ai(
+            text=text,
+            source=source,
+            target=target,
+            tone=tone,
+            style=style,
+            user_id=user["id"],
+        )
 
     short_phrase_hit = lookup_short_phrase(text, source, target)
     if short_phrase_hit:
