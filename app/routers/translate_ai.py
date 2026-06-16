@@ -426,18 +426,16 @@ def detect_register_hint(text: str) -> str:
     return "neutral"
 
 
-def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
+def has_cultural_intent_markers(text: str) -> bool:
     s = normalize_text(text)
     low = s.lower()
+    cultural_key = normalize_demo_cultural_key(s)
 
     if not s:
         return False
 
-    if should_force_literal_mode(s, tone, style):
-        return False
-
-    cultural_key = normalize_demo_cultural_key(s)
     cultural_markers = {
+        "minareyi calan",
         "sakla saman",
         "damlaya damlaya",
         "bir tasla",
@@ -447,9 +445,52 @@ def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
         "kulak ardi",
         "lafin gelisi",
         "gonlunu almak",
+        "icim sisti",
+        "yamuk yapti",
+        "kac pala",
+        "kac para",
+        "kaca olur",
+        "nerede park ettim",
+        "nere park ettim",
+        "cok yemek yedim",
+        "patlayacagim",
+        "ne haber lan",
+        "gidiyom",
+        "baya yordu",
     }
     if any(marker in cultural_key for marker in cultural_markers):
         return True
+
+    stt_or_broken_speech_patterns = [
+        r"\bbu\s+ka[cç]\s+pala\b",
+        r"\baraba\s+nere\b",
+        r"\bnere\s+park\s+ettim\b",
+        r"\bgidiyom\b",
+        r"\bpatlayaca[gğ]im\b",
+        r"\bpatlayaca[gğ][iı]m\b",
+        r"\bka[cç]a\s+olur\b",
+    ]
+    if any(re.search(p, low, flags=re.IGNORECASE) for p in stt_or_broken_speech_patterns):
+        return True
+
+    if re.search(r"\w\*{3,}|\*{3,}\w|\*{4,}", s):
+        return True
+
+    return False
+
+
+def should_use_ai_for_cultural(text: str, tone: str, style: str) -> bool:
+    s = normalize_text(text)
+    low = s.lower()
+
+    if not s:
+        return False
+
+    if has_cultural_intent_markers(s):
+        return True
+
+    if should_force_literal_mode(s, tone, style):
+        return False
 
     words = re.findall(r"\S+", s)
     word_count_local = len(words)
@@ -792,10 +833,10 @@ def build_translation_response(
 
 
 DEMO_CULTURAL_OVERRIDES = {
-    ("tr", "en", "sakla samanı gelir zamanı"): "Waste not, want not.",
-    ("tr", "en", "sakla samani gelir zamani"): "Waste not, want not.",
-    ("tr", "en", "sakla zamanı gelir zamanı"): "Waste not, want not.",
-    ("tr", "en", "sakla zamani gelir zamani"): "Waste not, want not.",
+    ("tr", "en", "sakla samanı gelir zamanı"): "You never know when something might come in handy.",
+    ("tr", "en", "sakla samani gelir zamani"): "You never know when something might come in handy.",
+    ("tr", "en", "sakla zamanı gelir zamanı"): "You never know when something might come in handy.",
+    ("tr", "en", "sakla zamani gelir zamani"): "You never know when something might come in handy.",
 }
 
 
@@ -835,25 +876,67 @@ def lookup_demo_cultural_override(text: str, source: str, target: str) -> str:
 
 def cultural_translation_prompt(text: str, source: str, target: str) -> str:
     return (
-        "You are a cultural proverb and conversation translator.\n"
-        "Your job is not literal translation.\n"
-        f"Translate the user's text from {lang_display(source)} ({source}) "
-        f"to {lang_display(target)} ({target}).\n"
-        "If the source text contains a proverb, idiom, joke, sarcasm, cultural phrase, "
-        "or figurative expression, replace it with the closest natural equivalent in the target language.\n"
-        "If the text is a proverb or idiom, choose the natural proverb/idiom in the target language.\n"
-        "For Turkish \"Sakla samanı, gelir zamanı.\", translate to English as \"Waste not, want not.\"\n"
-        "Never translate it as \"Save the straw\" or \"Hide the straw\".\n"
-        "Return only the final translation.\n"
-        "Return only the translated phrase/sentence.\n"
-        "No explanation.\n\n"
-        "Examples:\n"
-        "Turkish → English:\n"
-        "\"Sakla samanı, gelir zamanı.\" => \"Waste not, want not.\"\n"
-        "\"Damlaya damlaya göl olur.\" => \"Every little bit helps.\"\n"
-        "\"Bir taşla iki kuş vurmak.\" => \"Kill two birds with one stone.\"\n\n"
-        f"User text:\n{text}"
+        "You are an expert language editor, intent resolver, speech-error corrector, "
+        "and cultural translator.\n\n"
+        "The source text may come from speech recognition. It may contain missing words, "
+        "broken grammar, informal speech, slang, idioms, proverbs, metaphors, implied meaning, "
+        "or speech-to-text mistakes.\n\n"
+        "Before translating, silently infer what the speaker most likely means. "
+        "Correct obvious speech recognition mistakes and broken grammar when the intended "
+        "meaning is clear. Do not ask the user for clarification. Do not explain your "
+        "corrections. Do not translate word by word.\n\n"
+        "Translate the intended meaning into the target language in the most natural, fluent, "
+        "culturally appropriate way. Preserve the source tone: casual stays casual, polite "
+        "stays polite, annoyed stays annoyed. If the source contains slang or profanity, "
+        "preserve the tone naturally without adding new insults or making it harsher. "
+        "If the text is censored with asterisks, do not invent the missing offensive word; "
+        "translate only what can be safely inferred from the visible text.\n\n"
+        "Return only the final translated text. Do not add notes, explanations, labels, "
+        "quotes, alternatives, parentheses, or corrected-source text.\n\n"
+        "Examples for Turkish to English behavior:\n"
+        "TR: \"Minareyi calan kilifini hazirlar.\"\n"
+        "EN: \"A guilty person prepares their excuse in advance.\"\n\n"
+        "TR: \"Sakla samani, gelir zamani.\"\n"
+        "EN: \"You never know when something might come in handy.\"\n\n"
+        "TR: \"Bu kac pala?\"\n"
+        "Intent: asking the price; \"pala\" is most likely a speech/text error for \"para\".\n"
+        "EN: \"How much is this?\"\n\n"
+        "TR: \"Of cok yemek yedim birazdan patlayacagim.\"\n"
+        "EN: \"I ate way too much, I feel like I'm about to burst.\"\n\n"
+        "TR: \"Araba nere park ettim?\"\n"
+        "EN: \"Where did I park the car?\"\n\n"
+        "TR: \"Yarin gidiyom gidiyom.\"\n"
+        "EN: \"I'm leaving tomorrow.\"\n\n"
+        "TR: \"Bunu bana kaca olur?\"\n"
+        "EN: \"How much would this be for me?\"\n\n"
+        "TR: \"Icim sisti artik.\"\n"
+        "EN: \"I'm fed up with this.\"\n\n"
+        "TR: \"Bana yamuk yapti.\"\n"
+        "EN: \"He did me wrong.\"\n\n"
+        "TR: \"Ne haber lan?\"\n"
+        "EN: \"What's up, man?\"\n\n"
+        f"Source language: {lang_display(source)} ({source})\n"
+        f"Target language: {lang_display(target)} ({target})\n"
+        f"Source text: {text}\n\n"
+        "Final translation:"
     )
+
+
+def cleanup_cultural_translation_text(s: str) -> str:
+    t = cleanup_translation_text(s)
+    t = re.sub(
+        r"^(?:final translation|translation|translated text|the translation is|this means|corrected sentence)\s*:\s*",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    ).strip()
+    t = re.sub(
+        r"^(?:i think the user meant|the user likely meant)\s*:?.*?\n+",
+        "",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    return strip_outer_quotes(t)
 
 
 def call_openai_cultural_translate(text: str, source: str, target: str) -> Optional[str]:
@@ -870,8 +953,10 @@ def call_openai_cultural_translate(text: str, source: str, target: str) -> Optio
                 {
                     "role": "system",
                     "content": (
-                        "You translate conversation naturally across cultures. "
-                        "Return only the translation, with no label or explanation."
+                        "You are an expert language editor, intent resolver, speech-error "
+                        "corrector, and cultural translator. Return only the final translated "
+                        "text, with no label, notes, explanation, alternatives, or corrected "
+                        "source sentence."
                     ),
                 },
                 {
@@ -881,7 +966,7 @@ def call_openai_cultural_translate(text: str, source: str, target: str) -> Optio
             ],
             temperature=0.25,
         )
-        translated = cleanup_translation_text(completion.choices[0].message.content or "")
+        translated = cleanup_cultural_translation_text(completion.choices[0].message.content or "")
         ok, _ = validate_translation_output(
             text,
             translated,
@@ -908,7 +993,7 @@ def call_gemini_cultural_translate(text: str, source: str, target: str) -> Optio
             cultural_translation_prompt(text, source, target),
             request_options={"timeout": CULTURAL_PROVIDER_TIMEOUT_SECONDS},
         )
-        translated = cleanup_translation_text(getattr(result, "text", "") or "")
+        translated = cleanup_cultural_translation_text(getattr(result, "text", "") or "")
         ok, _ = validate_translation_output(
             text,
             translated,
