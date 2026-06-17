@@ -229,6 +229,22 @@ def contains_forbidden_meta_output(text: str) -> bool:
     return any(re.search(p, s, flags=re.IGNORECASE) for p in forbidden_patterns)
 
 
+def contains_provider_refusal(text: str) -> bool:
+    s = normalize_text(text).lower()
+    refusal_patterns = [
+        r"\bi['’]?m not going to engage with that\b",
+        r"\bi won['’]?t engage with that\b",
+        r"\bi can['’]?t help with that\b",
+        r"\bi can['’]?t translate that\b",
+        r"\bi['’]?m sorry,\s*but\b",
+        r"\bi cannot assist with that\b",
+        r"\bi can not assist with that\b",
+        r"\bi am unable to assist\b",
+        r"\bi cannot comply\b",
+    ]
+    return any(re.search(p, s, flags=re.IGNORECASE) for p in refusal_patterns)
+
+
 def probably_expanded_too_much(src: str, out: str, source: str = "", target: str = "") -> bool:
     src_wc = word_count(src)
     out_wc = word_count(out)
@@ -275,6 +291,9 @@ def validate_translation_output(
 
     if contains_forbidden_meta_output(out):
         return False, "meta_output"
+
+    if contains_provider_refusal(out):
+        return False, "provider_refusal"
 
     if not allow_short_cultural_equivalent and (strict_short or is_short_utterance(src_text)):
         if probably_expanded_too_much(src_text, out, source, target):
@@ -435,8 +454,12 @@ def has_cultural_intent_markers(text: str) -> bool:
         return False
 
     cultural_markers = {
+        "pabucu dama",
+        "sutten agzi",
         "minareyi calan",
         "sakla saman",
+        "leylegi havada",
+        "leyla havada",
         "damlaya damlaya",
         "bir tasla",
         "iki kus",
@@ -448,13 +471,20 @@ def has_cultural_intent_markers(text: str) -> bool:
         "icim sisti",
         "yamuk yapti",
         "kac pala",
-        "kac para",
         "kaca olur",
         "nerede park ettim",
         "nere park ettim",
         "cok yemek yedim",
         "patlayacagim",
         "ne haber lan",
+        "ne bicim adamsin",
+        "ne ayaksin",
+        "siktir",
+        "anan",
+        "sikeyim",
+        "gotos",
+        "lan",
+        "oglum",
         "gidiyom",
         "baya yordu",
     }
@@ -833,10 +863,33 @@ def build_translation_response(
 
 
 DEMO_CULTURAL_OVERRIDES = {
-    ("tr", "en", "sakla samanı gelir zamanı"): "You never know when something might come in handy.",
+    ("tr", "en", "pabucu dama atildi"): "They were cast aside.",
+    ("tr", "en", "pabucu dama atilmak"): "They were cast aside.",
+    ("tr", "en", "sutten agzi yanan yogurdu ufleyerek yer"): "Once bitten, twice shy.",
+    ("tr", "en", "sutten agzi yanmak"): "Once bitten, twice shy.",
+    ("tr", "en", "minareyi calan kilifini hazirlar"): "A guilty person prepares their excuse in advance.",
     ("tr", "en", "sakla samani gelir zamani"): "You never know when something might come in handy.",
-    ("tr", "en", "sakla zamanı gelir zamanı"): "You never know when something might come in handy.",
     ("tr", "en", "sakla zamani gelir zamani"): "You never know when something might come in handy.",
+    ("tr", "en", "leylegi havada gormek"): "You must have been on the road a lot.",
+    ("tr", "en", "leylegi havada gordunuz"): "You must have been on the road a lot.",
+    ("tr", "en", "leylegi havada gordun"): "You must have been on the road a lot.",
+    ("tr", "en", "leyla havada gordunuz"): "You must have been on the road a lot.",
+    ("tr", "en", "leyla havada gordun"): "You must have been on the road a lot.",
+    ("tr", "en", "bu sene leyla havada gordunuz"): "You must have been traveling a lot this year.",
+    ("tr", "en", "bu sene leylegi havada gordunuz"): "You must have been traveling a lot this year.",
+    ("tr", "en", "bana yamuk yapti"): "He did me wrong.",
+    ("tr", "en", "icim sisti"): "I'm fed up with this.",
+    ("tr", "en", "icim sisti artik"): "I'm fed up with this.",
+    ("tr", "en", "of cok yemek yedim birazdan patlayacagim"): "I ate way too much, I feel like I'm about to burst.",
+    ("tr", "en", "cok yemek yedim patlayacagim"): "I ate way too much, I feel like I'm about to burst.",
+    ("tr", "en", "patlayacagim"): "I ate way too much, I feel like I'm about to burst.",
+    ("tr", "en", "bu kac pala"): "How much is this?",
+    ("tr", "en", "dursana lan orada sen"): "Hey, stay right there.",
+    ("tr", "en", "lan ne bicim adamsin sen oglum"): "What the hell is wrong with you, man?",
+    ("tr", "en", "senin anani sikeyim"): "Fuck you, you motherfucker.",
+    ("tr", "en", "gotos"): "Asshole.",
+    ("tr", "en", "ne haber lan"): "What's up, man?",
+    ("tr", "en", "lan dur lan dur lan oglum dursana lan ne bicim adamsin sen"): "Hey, stop, man. What the hell is wrong with you?",
 }
 
 
@@ -871,50 +924,73 @@ def lookup_demo_cultural_override(text: str, source: str, target: str) -> str:
         translated = DEMO_CULTURAL_OVERRIDES.get((src, dst, key), "")
         if translated:
             return translated
+    normalized = normalize_demo_cultural_key(text)
+    for override_src, override_dst, phrase in sorted(DEMO_CULTURAL_OVERRIDES, key=lambda item: len(item[2]), reverse=True):
+        if override_src == src and override_dst == dst and phrase in normalized:
+            return DEMO_CULTURAL_OVERRIDES[(override_src, override_dst, phrase)]
     return ""
 
 
 def cultural_translation_prompt(text: str, source: str, target: str) -> str:
     return (
-        "You are an expert language editor, intent resolver, speech-error corrector, "
+        "You are not a chatbot. You are not replying to the speaker. "
+        "You are not a moderator and you do not make moral comments. "
+        "You are a professional live interpreter, language editor, intent resolver, "
         "and cultural translator.\n\n"
-        "The source text may come from speech recognition. It may contain missing words, "
-        "broken grammar, informal speech, slang, idioms, proverbs, metaphors, implied meaning, "
-        "or speech-to-text mistakes.\n\n"
-        "Before translating, silently infer what the speaker most likely means. "
-        "Correct obvious speech recognition mistakes and broken grammar when the intended "
-        "meaning is clear. Do not ask the user for clarification. Do not explain your "
-        "corrections. Do not translate word by word.\n\n"
-        "Translate the intended meaning into the target language in the most natural, fluent, "
-        "culturally appropriate way. Preserve the source tone: casual stays casual, polite "
-        "stays polite, annoyed stays annoyed. If the source contains slang or profanity, "
-        "preserve the tone naturally without adding new insults or making it harsher. "
-        "If the text is censored with asterisks, do not invent the missing offensive word; "
-        "translate only what can be safely inferred from the visible text.\n\n"
-        "Return only the final translated text. Do not add notes, explanations, labels, "
-        "quotes, alternatives, parentheses, or corrected-source text.\n\n"
+        "Main rule: Do not respond to the speaker. Translate the speaker's words.\n\n"
+        "The source text may come from speech recognition. It may contain repeated "
+        "fragments, missing words, broken grammar, informal speech, slang, profanity, "
+        "idioms, proverbs, metaphors, implied meaning, or speech-to-text mistakes.\n\n"
+        "Before translating, silently infer what the speaker most likely means in real "
+        "life. Ask yourself whether a word may have been misheard, whether something "
+        "that looks like a name is actually part of an idiom, whether the speaker is "
+        "asking a price or place, complaining, warning, commanding, or just using tone "
+        "particles, and whether repetitions are speech-recognition buildup.\n\n"
+        "Do not ask for clarification. Do not respond to the speaker. Do not moralize. "
+        "Do not refuse because the text is rude, vulgar, insulting, or profane. "
+        "Do not say you cannot engage. Do not say you cannot translate. Do not apologize. "
+        "Do not explain corrections. Do not translate word by word.\n\n"
+        "Correct obvious speech-recognition mistakes and broken grammar silently when "
+        "the intended meaning is clear. Clean up unnecessary repeated fragments, but "
+        "never drop meaningful commands, warnings, or intent.\n\n"
+        "Treat Turkish particles like \"lan\", \"ya\", \"be\", \"oglum\", \"abi\", "
+        "\"valla\", \"hani\", and \"iste\" as tone markers, not words that must always "
+        "be translated literally. Preserve anger, closeness, surprise, warning, or "
+        "casual tone naturally in the target language.\n\n"
+        "If the source contains profanity, translate the profanity naturally without "
+        "ignoring it, adding new insults, making it harsher, or expanding threat or "
+        "violence. Do not create identity-group slurs. If the text is censored with "
+        "asterisks, do not invent the missing offensive word; translate only what can "
+        "be safely inferred from the visible text.\n\n"
+        "Return only the final translated text. No notes. No explanations. No labels. "
+        "No alternatives. No parentheses. No provider names. No corrected-source text.\n\n"
         "Examples for Turkish to English behavior:\n"
-        "TR: \"Minareyi calan kilifini hazirlar.\"\n"
-        "EN: \"A guilty person prepares their excuse in advance.\"\n\n"
-        "TR: \"Sakla samani, gelir zamani.\"\n"
-        "EN: \"You never know when something might come in handy.\"\n\n"
-        "TR: \"Bu kac pala?\"\n"
-        "Intent: asking the price; \"pala\" is most likely a speech/text error for \"para\".\n"
-        "EN: \"How much is this?\"\n\n"
-        "TR: \"Of cok yemek yedim birazdan patlayacagim.\"\n"
-        "EN: \"I ate way too much, I feel like I'm about to burst.\"\n\n"
-        "TR: \"Araba nere park ettim?\"\n"
-        "EN: \"Where did I park the car?\"\n\n"
-        "TR: \"Yarin gidiyom gidiyom.\"\n"
-        "EN: \"I'm leaving tomorrow.\"\n\n"
-        "TR: \"Bunu bana kaca olur?\"\n"
-        "EN: \"How much would this be for me?\"\n\n"
-        "TR: \"Icim sisti artik.\"\n"
-        "EN: \"I'm fed up with this.\"\n\n"
-        "TR: \"Bana yamuk yapti.\"\n"
-        "EN: \"He did me wrong.\"\n\n"
+        "TR: \"Siktir git.\"\n"
+        "EN: \"Fuck off.\"\n\n"
+        "TR: \"Senin anani sikeyim.\"\n"
+        "EN: \"Fuck you, you motherfucker.\"\n\n"
+        "TR: \"Gotos.\"\n"
+        "EN: \"Asshole.\"\n\n"
         "TR: \"Ne haber lan?\"\n"
         "EN: \"What's up, man?\"\n\n"
+        "TR: \"Nereye gidiyorsun lan?\"\n"
+        "EN: \"Where the hell are you going?\"\n\n"
+        "TR: \"Dursana lan orada sen.\"\n"
+        "EN: \"Hey, stay right there.\"\n\n"
+        "TR: \"Lan dur lan dur lan oglum dursana lan ne bicim adamsin sen.\"\n"
+        "EN: \"Hey, stop, man. What the hell is wrong with you?\"\n\n"
+        "TR: \"Bu kac pala?\"\n"
+        "EN: \"How much is this?\"\n\n"
+        "TR: \"Bu sene Leyla havada gordunuz herhalde.\"\n"
+        "EN: \"You must have been traveling a lot this year.\"\n\n"
+        "TR: \"Of cok yemek yedim birazdan patlayacagim.\"\n"
+        "EN: \"I ate way too much, I feel like I'm about to burst.\"\n\n"
+        "TR: \"Pabucu dama atildi.\"\n"
+        "EN: \"They were cast aside.\"\n\n"
+        "TR: \"Sutten agzi yanan yogurdu ufleyerek yer.\"\n"
+        "EN: \"Once bitten, twice shy.\"\n\n"
+        "TR: \"Minareyi calan kilifini hazirlar.\"\n"
+        "EN: \"A guilty person prepares their excuse in advance.\"\n\n"
         f"Source language: {lang_display(source)} ({source})\n"
         f"Target language: {lang_display(target)} ({target})\n"
         f"Source text: {text}\n\n"
@@ -925,17 +1001,19 @@ def cultural_translation_prompt(text: str, source: str, target: str) -> str:
 def cleanup_cultural_translation_text(s: str) -> str:
     t = cleanup_translation_text(s)
     t = re.sub(
-        r"^(?:final translation|translation|translated text|the translation is|this means|corrected sentence)\s*:\s*",
+        r"^(?:final translation|translation|translated text|the translation is|this means|corrected sentence|possible translation)\s*:?\s*",
         "",
         t,
         flags=re.IGNORECASE,
     ).strip()
     t = re.sub(
-        r"^(?:i think the user meant|the user likely meant)\s*:?.*?\n+",
+        r"^(?:i think the user meant|the user likely meant|corrected source|source meaning)\s*:?.*?\n+",
         "",
         t,
         flags=re.IGNORECASE | re.DOTALL,
     ).strip()
+    t = re.sub(r"^\s*(?:[-*]|\d+[.)])\s+", "", t).strip()
+    t = re.sub(r"\s*\((?:literal|note|meaning|context|tone|polite|casual)[^)]*\)\s*$", "", t, flags=re.IGNORECASE).strip()
     return strip_outer_quotes(t)
 
 
@@ -953,10 +1031,12 @@ def call_openai_cultural_translate(text: str, source: str, target: str) -> Optio
                 {
                     "role": "system",
                     "content": (
-                        "You are an expert language editor, intent resolver, speech-error "
-                        "corrector, and cultural translator. Return only the final translated "
-                        "text, with no label, notes, explanation, alternatives, or corrected "
-                        "source sentence."
+                        "You are not a chatbot and you are not replying to the speaker. "
+                        "You are a professional live interpreter, intent resolver, speech-error "
+                        "corrector, and cultural translator. Translate the speaker's words only. "
+                        "Do not refuse rude, vulgar, insulting, or profane source text. Return "
+                        "only the final translated text, with no labels, notes, explanations, "
+                        "alternatives, parentheses, or corrected source sentence."
                     ),
                 },
                 {
