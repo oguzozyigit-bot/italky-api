@@ -335,6 +335,18 @@ def format_trendyol_digital_code(activation_links: list[str]) -> str:
     return f"Kullanim Linki: {link_text}"
 
 
+def format_panel_delivery_text(activation_links: list[str], days: Optional[int]) -> Optional[str]:
+    if not activation_links:
+        return None
+    link_text = "\n".join(activation_links)
+    duration_text = "12 ay" if days == 365 else f"{days} gün"
+    return (
+        "Merhaba, siparişiniz için kullanım linkiniz aşağıdadır:\n\n"
+        f"{link_text}\n\n"
+        f"Linke tıklayıp giriş yaptıktan sonra {duration_text} kullanım hakkınız hesabınıza otomatik tanımlanacaktır."
+    )
+
+
 def resolve_days_from_stock_code(stock_code: object = "", barcode: object = "") -> Optional[int]:
     stock = clean(stock_code).lower()
     code = clean(barcode).lower()
@@ -951,6 +963,8 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         raise HTTPException(status_code=400, detail="LINE_IS_NOT_DIGITAL_GOODS")
     if not dry_run and not mapping:
         raise HTTPException(status_code=400, detail="SKU_MAPPING_NOT_FOUND")
+    panel_delivery_required = bool(business_unit and business_unit != "Digital Goods" and resolved_days)
+    manual_action_reason = "ADEL_SKIPPED_BUSINESS_UNIT_PANEL_DELIVERY_REQUIRED" if panel_delivery_required else None
 
     existing_job = delivery_job_for(sb, order_number, package_id) if not dry_run else None
     existing_automation = automation_from_job(existing_job)
@@ -979,13 +993,23 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
             )
 
     digital_code = format_trendyol_digital_code(activation_links) if activation_links else "DRY_RUN_CODE_PLACEHOLDER"
+    panel_delivery_text = format_panel_delivery_text(activation_links, resolved_days)
     contact = customer_contact_from(pkg)
     email_result = send_trendyol_digital_code_email(contact["email"], digital_code, dry_run)
     sms_result = send_trendyol_digital_code_sms(contact["phone"], digital_code, dry_run)
     reserved_rows = get_reserved_rows(sb, reserved_codes) if not dry_run and reserved_codes else []
     processed_reason = already_processed_reason(reserved_rows, existing_automation) if not dry_run else None
     existing_manual = existing_manual_deliver(existing_automation)
-    if processed_reason:
+    if panel_delivery_required:
+        adel_result = {
+            "status": "skipped",
+            "sent": False,
+            "skipped": True,
+            "dry_run": dry_run,
+            "reason": manual_action_reason,
+            "message": "Business unit is not Digital Goods; panel delivery is required.",
+        }
+    elif processed_reason:
         existing_adel = (
             existing_automation.get("alternative_delivery")
             if isinstance(existing_automation.get("alternative_delivery"), dict)
@@ -1003,7 +1027,13 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
     else:
         adel_result = send_alternative_delivery(package_id, digital_code, dry_run)
 
-    if manual_deliver_already_done(existing_manual):
+    if panel_delivery_required:
+        manual_deliver = {
+            "attempted": False,
+            "status": "panel_manual_delivery_required",
+            "reason": manual_action_reason,
+        }
+    elif manual_deliver_already_done(existing_manual):
         manual_deliver = {**existing_manual, "status": "skipped_already_delivered", "attempted": False}
     elif not (adel_result.get("sent") or adel_already_sent(processed_reason, existing_automation)):
         manual_deliver = {
@@ -1032,6 +1062,10 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         "code": reserved_codes[0] if len(reserved_codes) == 1 else reserved_codes,
         "code_status": code_status_from(processed_reason, adel_result, reserved_codes),
         "digital_code": digital_code if reserved_codes else None,
+        "panel_delivery_required": panel_delivery_required,
+        "manual_action_required": panel_delivery_required,
+        "manual_action_reason": manual_action_reason,
+        "panel_delivery_text": panel_delivery_text,
         "customer_contact": contact,
         "already_processed": bool(processed_reason),
         "already_processed_reason": processed_reason,
@@ -1043,11 +1077,14 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         "cargoProviderName": clean(pkg.get("cargoProviderName")),
         "updated_at": iso_now(),
     }
+    automation["status"] = "panel_manual_delivery_required" if panel_delivery_required else code_status_from(processed_reason, adel_result, reserved_codes)
 
     if not dry_run:
         job_payload = dict(pkg)
         job_payload["automation"] = automation
-        if manual_deliver.get("status") in {"delivered", "skipped_already_delivered"}:
+        if panel_delivery_required:
+            job_status = "panel_manual_delivery_required"
+        elif manual_deliver.get("status") in {"delivered", "skipped_already_delivered"}:
             job_status = "delivered"
         elif manual_deliver.get("status") == "scheduled":
             job_status = "manual_deliver_scheduled"
@@ -1057,20 +1094,33 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
             job_status = "failed"
         upsert_delivery_job(sb, job_payload, status=job_status)
         if reserved_codes and not processed_reason:
-            update_reserved_rows(
-                sb,
-                reserved_codes,
-                {
-                    "delivery_status": "delivered"
-                    if manual_deliver.get("status") == "delivered"
-                    else ("sent" if adel_result.get("sent") else "failed"),
-                    "delivered_at": manual_deliver.get("delivered_at") if manual_deliver.get("status") == "delivered" else None,
-                    "delivery_payload": {"alternative_delivery": adel_result.get("payload"), "manual_deliver": manual_deliver},
-                    "delivery_response": adel_result.get("response"),
-                    "delivery_error": None if adel_result.get("sent") else clean(adel_result.get("reason") or adel_result.get("detail")),
-                },
-                increment_attempts=True,
-            )
+            if panel_delivery_required:
+                update_reserved_rows(
+                    sb,
+                    reserved_codes,
+                    {
+                        "delivery_status": "reserved",
+                        "delivery_payload": {"alternative_delivery": adel_result, "manual_deliver": manual_deliver},
+                        "delivery_response": None,
+                        "delivery_error": None,
+                    },
+                    increment_attempts=False,
+                )
+            else:
+                update_reserved_rows(
+                    sb,
+                    reserved_codes,
+                    {
+                        "delivery_status": "delivered"
+                        if manual_deliver.get("status") == "delivered"
+                        else ("sent" if adel_result.get("sent") else "failed"),
+                        "delivered_at": manual_deliver.get("delivered_at") if manual_deliver.get("status") == "delivered" else None,
+                        "delivery_payload": {"alternative_delivery": adel_result.get("payload"), "manual_deliver": manual_deliver},
+                        "delivery_response": adel_result.get("response"),
+                        "delivery_error": None if adel_result.get("sent") else clean(adel_result.get("reason") or adel_result.get("detail")),
+                    },
+                    increment_attempts=True,
+                )
 
     log_automation_step({
         "orderNumber": order_number,
@@ -1086,7 +1136,7 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         "alternative_delivery_sent": adel_result.get("sent"),
         "manual_deliver_status": manual_deliver.get("status") or manual_deliver.get("success") or manual_deliver.get("reason"),
     })
-    return {"ok": True, "automation": automation}
+    return {"ok": True, "status": automation["status"], "automation": automation}
 
 
 def deliverTrendyolDigitalCode(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1330,6 +1380,8 @@ def process_manual_deliver_jobs(limit: int = 20) -> dict[str, Any]:
 
 def status_from_automation_result(result: dict[str, Any]) -> str:
     automation = result.get("automation") if isinstance(result.get("automation"), dict) else {}
+    if automation.get("manual_action_required") is True or automation.get("panel_delivery_required") is True:
+        return "panel_manual_delivery_required"
     manual_deliver = automation.get("manual_deliver") if isinstance(automation.get("manual_deliver"), dict) else {}
     alternative_delivery = (
         automation.get("alternative_delivery")
