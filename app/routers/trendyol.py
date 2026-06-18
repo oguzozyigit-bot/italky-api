@@ -947,7 +947,7 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
     stock_code = clean(get_value(line, "merchantSku", "stockCode", "stock_code"))
     barcode = clean(line.get("barcode"))
     business_unit = clean(line.get("businessUnit"))
-    if business_unit and business_unit != "Digital Goods":
+    if business_unit and business_unit != "Digital Goods" and not resolved_days:
         raise HTTPException(status_code=400, detail="LINE_IS_NOT_DIGITAL_GOODS")
     if not dry_run and not mapping:
         raise HTTPException(status_code=400, detail="SKU_MAPPING_NOT_FOUND")
