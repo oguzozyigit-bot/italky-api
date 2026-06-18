@@ -4,6 +4,7 @@ import base64
 import logging
 import os
 import random
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import quote
@@ -15,6 +16,7 @@ from app.routers.admin import _get_supabase, _safe_data
 
 router = APIRouter(prefix="/api/trendyol", tags=["Trendyol"])
 mp_router = APIRouter(prefix="/api/mp", tags=["Marketplace"])
+activation_router = APIRouter(prefix="/api/activation-links", tags=["Activation Links"])
 logger = logging.getLogger(__name__)
 
 SKIPPED_PACKAGE_STATUSES = {
@@ -27,8 +29,10 @@ DEFAULT_DELIVERY_SUFFIX = "alternative-delivery"
 DEFAULT_BASE_URL = "https://api.trendyol.com/sapigw"
 DEFAULT_ANDROID_DOWNLOAD_URL = "https://italky.ai/indir"
 DEFAULT_SUPPORT_URL = "https://italky.ai/destek"
+DEFAULT_ACTIVATION_BASE_URL = "https://italky.ai"
 CODE_LETTERS = "ABCDEFGHJKLMNPRSTUVYZ"
 CODE_DIGITS = "23456789"
+TOKEN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 FORBIDDEN_CODE_PREFIXES = {"GS", "FB", "FG"}
 FORBIDDEN_CODE_NUMBERS = {"1903", "1905", "1907"}
 
@@ -66,6 +70,13 @@ def support_url() -> str:
     if value and not value.startswith(("http://", "https://")):
         value = f"https://{value}"
     return value
+
+
+def activation_base_url() -> str:
+    value = clean(os.getenv("ACTIVATION_LINK_BASE_URL")) or DEFAULT_ACTIVATION_BASE_URL
+    if not value.startswith(("http://", "https://")):
+        value = f"https://{value}"
+    return value.rstrip("/")
 
 
 def alternative_delivery_contact_mode() -> str:
@@ -311,15 +322,24 @@ def debug_trendyol_order_request(params: dict[str, str]) -> dict[str, Any]:
     return response
 
 
-def format_trendyol_digital_code(codes: list[str]) -> str:
-    code_text = " | ".join(f"{idx}) {code}" for idx, code in enumerate(codes, start=1)) if len(codes) > 1 else codes[0]
-    return f"Uygulamayi Indir: {android_download_url()}  Kodu Gir: {code_text}"
+def activation_url_from_token(token: str) -> str:
+    return f"{activation_base_url()}/a/{token}"
+
+
+def format_trendyol_digital_code(activation_links: list[str]) -> str:
+    link_text = (
+        " | ".join(f"{idx}) {link}" for idx, link in enumerate(activation_links, start=1))
+        if len(activation_links) > 1
+        else activation_links[0]
+    )
+    return f"Kullanim Linki: {link_text}"
 
 
 def resolve_days_from_stock_code(stock_code: object = "", barcode: object = "") -> Optional[int]:
     stock = clean(stock_code).lower()
     code = clean(barcode).lower()
     pairs = (
+        (365, "prm12", "itkai12pr"),
         (365, "prm365", "itkai365"),
         (180, "prm180", "itkai180"),
         (90, "prm90", "itkai90"),
@@ -379,6 +399,29 @@ def get_mapping_for_line(sb: Any, line: dict[str, Any]) -> Optional[dict[str, An
         rows = _safe_data(res) or []
         if rows:
             return rows[0]
+
+    stock_code = clean(get_value(line, "merchantSku", "stockCode", "stock_code"))
+    days = resolve_days_from_stock_code(stock_code, barcode)
+    campaign_id = clean(os.getenv(f"TRENDYOL_PROMO_CAMPAIGN_ID_{days}")) or clean(os.getenv("TRENDYOL_PROMO_CAMPAIGN_ID"))
+    if campaign_id:
+        return {"campaign_id": campaign_id, "barcode": barcode, "stock_code": stock_code, "source": "env"}
+
+    if days:
+        try:
+            res = (
+                sb.table("promo_campaigns")
+                .select("id")
+                .eq("is_active", True)
+                .eq("membership_days", days)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = _safe_data(res) or []
+            if rows:
+                return {"campaign_id": rows[0]["id"], "barcode": barcode, "stock_code": stock_code, "source": "campaign_days"}
+        except Exception as exc:
+            logger.info("trendyol campaign fallback skipped days=%s error=%s", days, safe_error(exc))
     return None
 
 
@@ -412,9 +455,114 @@ def generate_trendyol_activation_code() -> str:
     raise HTTPException(status_code=500, detail="CODE_GENERATION_FAILED")
 
 
+def generate_activation_token(length: int = 6) -> str:
+    return "".join(secrets.choice(TOKEN_ALPHABET) for _ in range(length))
+
+
 def code_exists(sb: Any, code_value: str) -> bool:
     res = sb.table("promo_codes").select("id").eq("code_value", code_value).limit(1).execute()
     return bool(_safe_data(res) or [])
+
+
+def activation_token_exists(sb: Any, token: str) -> bool:
+    res = sb.table("activation_links").select("id").eq("token", token).limit(1).execute()
+    return bool(_safe_data(res) or [])
+
+
+def existing_activation_link_for_code(sb: Any, code_value: str) -> Optional[dict[str, Any]]:
+    res = (
+        sb.table("activation_links")
+        .select("*")
+        .eq("code_value", clean(code_value).upper())
+        .eq("is_active", True)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = _safe_data(res) or []
+    return rows[0] if rows else None
+
+
+def create_or_get_activation_link(
+    sb: Any,
+    *,
+    code_value: str,
+    order_number: str,
+    package_id: int,
+    line_id: int,
+    quantity_index: int,
+    barcode: str,
+    stock_code: str,
+    days: int,
+) -> str:
+    clean_code = clean(code_value).upper()
+    existing = existing_activation_link_for_code(sb, clean_code)
+    if existing and clean(existing.get("token")):
+        return activation_url_from_token(clean(existing.get("token")).upper())
+
+    expires_at = (utc_now() + timedelta(days=370)).isoformat()
+    base_body = {
+        "code_value": clean_code,
+        "marketplace": "trendyol",
+        "marketplace_order_number": order_number,
+        "marketplace_package_id": package_id,
+        "marketplace_line_id": line_id,
+        "marketplace_quantity_index": quantity_index,
+        "marketplace_barcode": barcode,
+        "marketplace_stock_code": stock_code,
+        "days": days,
+        "expires_at": expires_at,
+        "is_active": True,
+    }
+    for length in (6, 7, 8):
+        for _ in range(40):
+            token = generate_activation_token(length)
+            if activation_token_exists(sb, token):
+                continue
+            try:
+                sb.table("activation_links").insert({**base_body, "token": token}).execute()
+                return activation_url_from_token(token)
+            except Exception as exc:
+                existing_after = existing_activation_link_for_code(sb, clean_code)
+                if existing_after and clean(existing_after.get("token")):
+                    return activation_url_from_token(clean(existing_after.get("token")).upper())
+                if activation_token_exists(sb, token):
+                    continue
+                raise HTTPException(status_code=500, detail=f"ACTIVATION_LINK_FAILED: {safe_error(exc)}")
+    raise HTTPException(status_code=500, detail="ACTIVATION_TOKEN_GENERATION_FAILED")
+
+
+def resolve_activation_token(token: str) -> dict[str, Any]:
+    cleaned = clean(token).upper()
+    if len(cleaned) < 6 or len(cleaned) > 8 or any(ch not in TOKEN_ALPHABET for ch in cleaned):
+        raise HTTPException(status_code=404, detail="ACTIVATION_LINK_NOT_FOUND")
+
+    sb = _get_supabase()
+    res = sb.table("activation_links").select("*").eq("token", cleaned).limit(1).execute()
+    rows = _safe_data(res) or []
+    if not rows:
+        raise HTTPException(status_code=404, detail="ACTIVATION_LINK_NOT_FOUND")
+
+    row = rows[0]
+    if row.get("is_active") is False:
+        raise HTTPException(status_code=410, detail="ACTIVATION_LINK_INACTIVE")
+
+    expires_at = parse_datetime(row.get("expires_at"))
+    if expires_at and expires_at <= utc_now():
+        raise HTTPException(status_code=410, detail="ACTIVATION_LINK_EXPIRED")
+
+    if not clean(row.get("clicked_at")):
+        try:
+            sb.table("activation_links").update({"clicked_at": iso_now()}).eq("id", row["id"]).execute()
+        except Exception:
+            logger.info("activation link clicked_at update skipped token=%s", cleaned)
+
+    return {"ok": True, "code_value": clean(row.get("code_value")).upper()}
+
+
+@activation_router.get("/{token}")
+def get_activation_link(token: str) -> dict[str, Any]:
+    return resolve_activation_token(token)
 
 
 def existing_trendyol_code(
@@ -459,6 +607,7 @@ def create_or_get_trendyol_activation_code(
     campaign_id = mapping.get("campaign_id")
     validate_campaign(sb, campaign_id)
     barcode = clean(line.get("barcode") or mapping.get("barcode"))
+    stock_code = clean(get_value(line, "merchantSku", "stockCode", "stock_code") or mapping.get("stock_code"))
 
     for _ in range(50):
         code_value = generate_trendyol_activation_code()
@@ -478,6 +627,7 @@ def create_or_get_trendyol_activation_code(
             "marketplace_line_id": line_id,
             "marketplace_quantity_index": quantity_index,
             "marketplace_barcode": barcode,
+            "marketplace_stock_code": stock_code,
         }
         try:
             sb.table("promo_codes").insert(body).execute()
@@ -811,7 +961,24 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         for quantity_index in range(1, line_quantity(line) + 1):
             reserved_codes.append(create_or_get_trendyol_activation_code(sb, mapping or {}, pkg, line, quantity_index))
 
-    digital_code = format_trendyol_digital_code(reserved_codes) if reserved_codes else "DRY_RUN_CODE_PLACEHOLDER"
+    activation_links: list[str] = []
+    if not dry_run and reserved_codes:
+        for idx, code_value in enumerate(reserved_codes, start=1):
+            activation_links.append(
+                create_or_get_activation_link(
+                    sb,
+                    code_value=code_value,
+                    order_number=order_number,
+                    package_id=package_id,
+                    line_id=line_id_from(line),
+                    quantity_index=idx,
+                    barcode=barcode,
+                    stock_code=stock_code,
+                    days=resolved_days,
+                )
+            )
+
+    digital_code = format_trendyol_digital_code(activation_links) if activation_links else "DRY_RUN_CODE_PLACEHOLDER"
     contact = customer_contact_from(pkg)
     email_result = send_trendyol_digital_code_email(contact["email"], digital_code, dry_run)
     sms_result = send_trendyol_digital_code_sms(contact["phone"], digital_code, dry_run)
@@ -861,6 +1028,7 @@ def automate_trendyol_package(pkg: dict[str, Any], dry_run: bool, attempt_manual
         "businessUnit": business_unit,
         "resolved_days": resolved_days,
         "reserved_codes": reserved_codes,
+        "activation_links": activation_links,
         "code": reserved_codes[0] if len(reserved_codes) == 1 else reserved_codes,
         "code_status": code_status_from(processed_reason, adel_result, reserved_codes),
         "digital_code": digital_code if reserved_codes else None,
@@ -926,7 +1094,7 @@ def deliverTrendyolDigitalCode(payload: dict[str, Any]) -> dict[str, Any]:
     digital_code = clean(payload.get("digitalCode"))
     if not package_id:
         raise HTTPException(status_code=400, detail="PACKAGE_ID_REQUIRED")
-    if len(digital_code) < 6 or len(digital_code) > 120:
+    if len(digital_code) < 6 or len(digital_code) > 1000:
         raise HTTPException(status_code=400, detail="DIGITAL_CODE_LENGTH_INVALID")
 
     body = build_alternative_delivery_payload(digital_code)

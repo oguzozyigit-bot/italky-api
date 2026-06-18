@@ -25,6 +25,7 @@ from app.routers.corporate_promo import router as corporate_promo_router
 from app.routers.corporate_promo_admin import router as corporate_promo_admin_router
 from app.routers.site_translate import router as site_translate_router
 from app.routers.meeting import router as meeting_router
+from app.routers.trendyol import activation_router
 from app.routers.trendyol import mp_router as marketplace_router
 from app.routers.trendyol import router as trendyol_router
 
@@ -141,6 +142,7 @@ app.include_router(promo_router)
 app.include_router(corporate_promo_router)
 app.include_router(site_translate_router)
 app.include_router(whatsapp_bridge_router)
+app.include_router(activation_router)
 app.include_router(trendyol_router)
 app.include_router(marketplace_router)
 if has_push_admin and push_admin_router:

@@ -446,6 +446,16 @@ def code_used_payload(code_rec: dict, user_id: str) -> dict:
     return payload
 
 
+def mark_activation_link_used(code_value: str) -> None:
+    final_code = clean(code_value).upper()
+    if not final_code:
+        return
+    try:
+        supabase.table("activation_links").update({"used_at": iso_now()}).eq("code_value", final_code).is_("used_at", "null").execute()
+    except Exception as exc:
+        promo_log("activation link used_at update skipped", {"message": str(exc), "code_value": final_code})
+
+
 def mark_code_used(code_rec: dict, user_id: str) -> None:
     payload = code_used_payload(code_rec, user_id)
     try:
@@ -458,6 +468,7 @@ def mark_code_used(code_rec: dict, user_id: str) -> None:
     assert_mutation_ok(upd, "PROMO_MARK_USED_FAILED")
     if not (getattr(upd, "data", None) or []):
         raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+    mark_activation_link_used(str(code_rec.get("code_value") or ""))
 
 
 def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
