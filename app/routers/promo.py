@@ -20,7 +20,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 
 class PromoRedeemRequest(BaseModel):
-    source: Literal["manual", "nfc"] = "manual"
+    source: Literal["manual", "qr", "nfc"] = "manual"
     user_id: Optional[str] = None
     code: Optional[str] = None
     uid: Optional[str] = None
@@ -130,19 +130,26 @@ def get_profile(user_id: str) -> dict:
 
 
 def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> Optional[dict]:
-    if source == "manual":
+    if source in {"manual", "qr"}:
         final_code = str(code or "").strip().upper()
         if not final_code:
             raise HTTPException(status_code=400, detail="CODE_REQUIRED")
         try:
             res = supabase.table("promo_codes").select(
                 "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id, marketplace"
-            ).eq("code_value", final_code).eq("delivery_type", "manual").limit(1).execute()
+            ).eq("code_value", final_code).limit(1).execute()
         except Exception as exc:
             promo_log("campaign promo lookup failed; simple fallback will be tried", {"message": str(exc)})
             return None
         rows = res.data or []
-        return rows[0] if rows else None
+        if not rows:
+            return None
+
+        row = rows[0]
+        delivery_type = str(row.get("delivery_type") or "manual").strip().lower()
+        if delivery_type not in {"manual", "qr"}:
+            return None
+        return row
 
     if source == "nfc":
         final_uid = str(uid or "").strip()
@@ -160,7 +167,7 @@ def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> Opt
 
 
 def get_simple_code_record(source: str, code: Optional[str]) -> dict:
-    if source != "manual":
+    if source not in {"manual", "qr"}:
         raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
 
     final_code = str(code or "").strip().upper()
