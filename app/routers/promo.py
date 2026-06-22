@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from supabase import Client, create_client
+
+PromoTableFound = Literal["promo_codes", "web_promo_codes"]
+PromoLookupKind = Literal["campaign", "simple", "web"]
 
 router = APIRouter(prefix="/api/promo", tags=["promo"])
 
@@ -38,6 +42,17 @@ class PromoRedeemResponse(BaseModel):
     tokens_loaded: int = 0
     tokens_after: Optional[int] = None
     message: Optional[str] = None
+    table_found: Optional[PromoTableFound] = None
+
+
+@dataclass
+class PromoLookupResult:
+    table_found: PromoTableFound
+    kind: PromoLookupKind
+    normalized_code: str
+    campaign_record: Optional[dict] = None
+    simple_record: Optional[dict] = None
+    web_record: Optional[dict] = None
 
 
 def promo_log(label: str, data: dict | None = None) -> None:
@@ -57,6 +72,10 @@ def iso_now() -> str:
 
 def clean(value: object) -> str:
     return str(value or "").strip()
+
+
+def normalize_promo_code(code: Optional[str]) -> str:
+    return str(code or "").strip().upper()
 
 
 def safe_int(value: object, default: int = 0) -> int:
@@ -129,25 +148,73 @@ def get_profile(user_id: str) -> dict:
     return rows[0]
 
 
+def promo_row_code_value(code_rec: dict) -> str:
+    return normalize_promo_code(code_rec.get("code_value") or code_rec.get("code"))
+
+
+def lookup_code_in_table(
+    table: PromoTableFound,
+    code: Optional[str],
+    *,
+    delivery_type: Optional[str] = None,
+    kind: str = "any",
+) -> Optional[dict]:
+    final_code = normalize_promo_code(code)
+    if not final_code:
+        return None
+
+    promo_log("query table", {
+        "table": table,
+        "column": "code_value",
+        "code_value": final_code,
+        "delivery_type": delivery_type,
+        "kind": kind,
+    })
+
+    try:
+        query = supabase.table(table).select("*").eq("code_value", final_code)
+        if delivery_type:
+            query = query.eq("delivery_type", delivery_type)
+        res = query.limit(1).execute()
+        rows = res.data or []
+        if rows:
+            promo_log("lookup hit", {"table_found": table, "kind": kind, "code_value": final_code, "column": "code_value"})
+            return rows[0]
+    except Exception as exc:
+        promo_log("code_value lookup failed", {"table": table, "kind": kind, "message": str(exc), "code_value": final_code})
+
+    return None
+
+
+def is_simple_promo_row(row: dict) -> bool:
+    if clean(row.get("campaign_id")):
+        return False
+    if safe_int(row.get("duration_days") or row.get("days"), 0) > 0:
+        return True
+    status = str(row.get("status") or "").strip().lower()
+    return status in {"active", "aktif", "used"}
+
+
 def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> Optional[dict]:
     if source == "manual":
-        final_code = str(code or "").strip().upper()
+        final_code = normalize_promo_code(code)
         if not final_code:
             raise HTTPException(status_code=400, detail="CODE_REQUIRED")
-        try:
-            res = supabase.table("promo_codes").select(
-                "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id, marketplace"
-            ).eq("code_value", final_code).eq("delivery_type", "manual").limit(1).execute()
-        except Exception as exc:
-            promo_log("campaign promo lookup failed; simple fallback will be tried", {"message": str(exc)})
-            return None
-        rows = res.data or []
-        return rows[0] if rows else None
+
+        web_rec = lookup_code_in_table("web_promo_codes", final_code, kind="campaign")
+        if web_rec:
+            campaign_like = web_promo_as_campaign_record(web_rec)
+            if campaign_like:
+                return campaign_like
+
+        return lookup_code_in_table("promo_codes", final_code, delivery_type="manual", kind="campaign")
 
     if source == "nfc":
         final_uid = str(uid or "").strip()
         if not final_uid:
             raise HTTPException(status_code=400, detail="UID_REQUIRED")
+
+        promo_log("query table", {"table": "promo_codes", "nfc_uid": final_uid, "delivery_type": "nfc"})
         res = supabase.table("promo_codes").select(
             "id, campaign_id, code_value, delivery_type, nfc_uid, is_active, is_used, used_by, used_at, bound_user_id, marketplace"
         ).eq("delivery_type", "nfc").eq("nfc_uid", final_uid).limit(1).execute()
@@ -159,26 +226,119 @@ def get_code_record(source: str, code: Optional[str], uid: Optional[str]) -> Opt
     raise HTTPException(status_code=400, detail="INVALID_SOURCE")
 
 
+def lookup_simple_code_record(code: Optional[str]) -> Optional[dict]:
+    final_code = normalize_promo_code(code)
+    if not final_code:
+        return None
+
+    web_rec = lookup_code_in_table("web_promo_codes", final_code, kind="simple")
+    if web_rec and is_simple_promo_row(web_rec):
+        return web_rec
+
+    promo_rec = lookup_code_in_table("promo_codes", final_code, kind="simple")
+    if promo_rec and is_simple_promo_row(promo_rec):
+        return promo_rec
+
+    return None
+
+
+def web_promo_as_campaign_record(web_rec: dict) -> Optional[dict]:
+    campaign_id = clean(web_rec.get("campaign_id"))
+    if not campaign_id:
+        return None
+
+    code_value = web_promo_code_value(web_rec)
+    if not code_value:
+        return None
+
+    status = str(web_rec.get("status") or "").strip().lower()
+    is_active_raw = web_rec.get("is_active")
+    if is_active_raw is None:
+        is_active = status in {"active", "aktif"}
+    else:
+        is_active = bool(is_active_raw)
+
+    return {
+        "id": web_rec.get("id"),
+        "campaign_id": campaign_id,
+        "code_value": code_value,
+        "delivery_type": str(web_rec.get("delivery_type") or "manual").strip() or "manual",
+        "nfc_uid": web_rec.get("nfc_uid"),
+        "is_active": is_active,
+        "is_used": bool(web_rec.get("is_used", False)),
+        "used_by": web_rec.get("used_by"),
+        "used_at": web_rec.get("used_at"),
+        "bound_user_id": web_rec.get("bound_user_id"),
+        "marketplace": web_rec.get("marketplace"),
+        "_web_promo_source": True,
+    }
+
+
+def resolve_manual_promo_lookup(code: Optional[str]) -> PromoLookupResult:
+    final_code = normalize_promo_code(code)
+    if not final_code:
+        raise HTTPException(status_code=400, detail="CODE_REQUIRED")
+
+    # 1) web_promo_codes first — code_value
+    web_rec = lookup_code_in_table("web_promo_codes", final_code, kind="any")
+    if web_rec:
+        campaign_like = web_promo_as_campaign_record(web_rec)
+        if campaign_like:
+            return PromoLookupResult(
+                table_found="web_promo_codes",
+                kind="campaign",
+                normalized_code=final_code,
+                campaign_record=campaign_like,
+            )
+        if is_simple_promo_row(web_rec):
+            return PromoLookupResult(
+                table_found="web_promo_codes",
+                kind="web",
+                normalized_code=final_code,
+                web_record=web_rec,
+            )
+
+    # 2) promo_codes campaign — code_value + delivery_type=manual
+    campaign_rec = lookup_code_in_table("promo_codes", final_code, delivery_type="manual", kind="campaign")
+    if campaign_rec:
+        return PromoLookupResult(
+            table_found="promo_codes",
+            kind="campaign",
+            normalized_code=final_code,
+            campaign_record=campaign_rec,
+        )
+
+    # 3) promo_codes simple — code_value
+    simple_rec = lookup_code_in_table("promo_codes", final_code, kind="simple")
+    if simple_rec and is_simple_promo_row(simple_rec):
+        return PromoLookupResult(
+            table_found="promo_codes",
+            kind="simple",
+            normalized_code=final_code,
+            simple_record=simple_rec,
+        )
+
+    promo_log("lookup miss", {
+        "code_value": final_code,
+        "column": "code_value",
+        "tables_queried": ["web_promo_codes", "promo_codes"],
+        "reason": "PROMO_NOT_FOUND",
+    })
+    raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
+
+
 def get_simple_code_record(source: str, code: Optional[str]) -> dict:
     if source != "manual":
         raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
 
-    final_code = str(code or "").strip().upper()
+    final_code = normalize_promo_code(code)
     if not final_code:
         raise HTTPException(status_code=400, detail="CODE_REQUIRED")
 
-    try:
-        res = supabase.table("promo_codes").select(
-            "id, code, duration_days, status, used_by, used_at, expires_at, marketplace"
-        ).eq("code", final_code).limit(1).execute()
-    except Exception as exc:
-        promo_log("simple promo lookup failed", {"message": str(exc)})
+    simple_rec = lookup_simple_code_record(final_code)
+    if not simple_rec:
         raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
-
-    rows = res.data or []
-    if not rows:
-        raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
-    return rows[0]
+    return simple_rec
 
 
 def get_campaign(campaign_id: str) -> dict:
@@ -265,6 +425,9 @@ def validate_code_and_campaign(code_rec: dict, campaign: dict, user_id: str) -> 
 
 
 def validate_simple_code(code_rec: dict, user_id: str) -> int:
+    if code_rec.get("_web_promo_source") or safe_int(code_rec.get("days"), 0) > 0:
+        return validate_web_promo_code(code_rec, user_id)
+
     status = str(code_rec.get("status") or "").strip().lower()
     used_by = str(code_rec.get("used_by") or "").strip()
 
@@ -280,7 +443,34 @@ def validate_simple_code(code_rec: dict, user_id: str) -> int:
     if expires_at and expires_at <= now_utc():
         raise HTTPException(status_code=400, detail="PROMO_EXPIRED")
 
-    duration_days = safe_int(code_rec.get("duration_days"), 0)
+    duration_days = safe_int(code_rec.get("duration_days") or code_rec.get("days"), 0)
+    if duration_days <= 0:
+        raise HTTPException(status_code=400, detail="PROMO_NOT_ACTIVE")
+
+    return duration_days
+
+
+def web_promo_code_value(code_rec: dict) -> str:
+    return promo_row_code_value(code_rec)
+
+
+def validate_web_promo_code(code_rec: dict, user_id: str) -> int:
+    status = str(code_rec.get("status") or "").strip().lower()
+    if status == "used":
+        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+    if status not in {"active", "aktif"}:
+        raise HTTPException(status_code=400, detail="PROMO_NOT_ACTIVE")
+
+    expires_at = parse_dt(code_rec.get("expires_at"))
+    if expires_at and expires_at <= now_utc():
+        raise HTTPException(status_code=400, detail="PROMO_EXPIRED")
+
+    used_count = safe_int(code_rec.get("used_count"), 0)
+    max_uses = safe_int(code_rec.get("max_uses"), 0)
+    if max_uses > 0 and used_count >= max_uses:
+        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+
+    duration_days = safe_int(code_rec.get("days") or code_rec.get("duration_days"), 0)
     if duration_days <= 0:
         raise HTTPException(status_code=400, detail="PROMO_NOT_ACTIVE")
 
@@ -457,7 +647,29 @@ def mark_activation_link_used(code_value: str) -> None:
 
 
 def mark_code_used(code_rec: dict, user_id: str) -> None:
+    if code_rec.get("_web_promo_source"):
+        payload = {
+            "is_used": True,
+            "used_by": user_id,
+            "used_at": iso_now(),
+            "bound_user_id": user_id,
+        }
+        promo_log("update table", {"table": "web_promo_codes", "action": "mark_used", "id": code_rec.get("id")})
+        upd = (
+            supabase.table("web_promo_codes")
+            .update(payload)
+            .eq("id", code_rec["id"])
+            .eq("is_used", False)
+            .execute()
+        )
+        assert_mutation_ok(upd, "PROMO_MARK_USED_FAILED")
+        if not (getattr(upd, "data", None) or []):
+            raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+        mark_activation_link_used(str(code_rec.get("code_value") or ""))
+        return
+
     payload = code_used_payload(code_rec, user_id)
+    promo_log("update table", {"table": "promo_codes", "action": "mark_used", "id": code_rec.get("id")})
     try:
         upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).eq("is_used", False).execute()
     except Exception as exc:
@@ -472,6 +684,10 @@ def mark_code_used(code_rec: dict, user_id: str) -> None:
 
 
 def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
+    if code_rec.get("_web_promo_source") or safe_int(code_rec.get("days"), 0) > 0:
+        mark_web_promo_code_used(code_rec, user_id)
+        return
+
     payload = {
         "status": "used",
         "used_by": user_id,
@@ -480,7 +696,28 @@ def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
     }
     if str(code_rec.get("marketplace") or "").strip().lower() == "trendyol":
         payload["invoice_status"] = "handled_by_trendyol"
+    promo_log("update table", {"table": "promo_codes", "action": "mark_simple_used", "id": code_rec.get("id")})
     upd = supabase.table("promo_codes").update(payload).eq("id", code_rec["id"]).eq("status", str(code_rec.get("status") or "")).execute()
+    assert_mutation_ok(upd, "PROMO_MARK_USED_FAILED")
+    if not (getattr(upd, "data", None) or []):
+        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+
+
+def mark_web_promo_code_used(code_rec: dict, user_id: str) -> None:
+    used_count = safe_int(code_rec.get("used_count"), 0)
+    max_uses = safe_int(code_rec.get("max_uses"), 0)
+    next_count = used_count + 1
+    payload: dict = {"used_count": next_count}
+    if max_uses > 0 and next_count >= max_uses:
+        payload["status"] = "used"
+
+    upd = (
+        supabase.table("web_promo_codes")
+        .update(payload)
+        .eq("id", code_rec["id"])
+        .eq("used_count", used_count)
+        .execute()
+    )
     assert_mutation_ok(upd, "PROMO_MARK_USED_FAILED")
     if not (getattr(upd, "data", None) or []):
         raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
@@ -520,10 +757,16 @@ def build_success_message(grant_type: str, membership_months: int, membership_da
     return " ve ".join(parts) if parts else "Promosyon başarıyla uygulandı."
 
 
-def redeem_simple_promo(payload: PromoRedeemRequest, redeem_user_id: str, profile_before: dict) -> PromoRedeemResponse:
-    simple_code = get_simple_code_record(payload.source, payload.code)
+def redeem_simple_promo(
+    payload: PromoRedeemRequest,
+    redeem_user_id: str,
+    profile_before: dict,
+    simple_code: Optional[dict] = None,
+    table_found: PromoTableFound = "promo_codes",
+) -> PromoRedeemResponse:
+    simple_code = simple_code or get_simple_code_record(payload.source, payload.code)
     duration_days = validate_simple_code(simple_code, redeem_user_id)
-    code_value = str(simple_code.get("code") or payload.code or "").strip().upper()
+    code_value = promo_row_code_value(simple_code) or normalize_promo_code(payload.code)
     package_code, membership_started_at, membership_ends_at = apply_simple_membership(
         profile_before,
         code_value,
@@ -531,6 +774,7 @@ def redeem_simple_promo(payload: PromoRedeemRequest, redeem_user_id: str, profil
     )
     mark_simple_code_used(simple_code, redeem_user_id)
     profile_after = get_profile_after(redeem_user_id)
+    promo_log("redeem success", {"table_found": table_found, "kind": "simple", "code": code_value})
 
     return PromoRedeemResponse(
         ok=True,
@@ -543,20 +787,49 @@ def redeem_simple_promo(payload: PromoRedeemRequest, redeem_user_id: str, profil
         tokens_loaded=0,
         tokens_after=int(profile_after.get("tokens") or 0),
         message=f"{duration_days} günlük kullanım süresi eklendi",
+        table_found=table_found,
     )
 
 
-@router.post("/redeem", response_model=PromoRedeemResponse)
-def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Header(None)):
-    redeem_user_id = resolve_redeem_user_id(payload.user_id, authorization)
+def redeem_web_promo(
+    web_rec: dict,
+    redeem_user_id: str,
+    profile_before: dict,
+    normalized_code: str,
+) -> PromoRedeemResponse:
+    validate_user_eligibility(profile_before)
+    duration_days = validate_web_promo_code(web_rec, redeem_user_id)
+    code_value = web_promo_code_value(web_rec) or normalized_code
+    package_code, membership_started_at, membership_ends_at = apply_simple_membership(
+        profile_before,
+        code_value,
+        duration_days,
+    )
+    mark_web_promo_code_used(web_rec, redeem_user_id)
+    profile_after = get_profile_after(redeem_user_id)
+    promo_log("redeem success", {"table_found": "web_promo_codes", "kind": "web", "code": code_value})
 
-    profile_before = get_profile(redeem_user_id)
+    return PromoRedeemResponse(
+        ok=True,
+        grant_type="membership",
+        membership_months=0,
+        membership_days=duration_days,
+        package_code=package_code,
+        membership_started_at=membership_started_at,
+        membership_ends_at=membership_ends_at,
+        tokens_loaded=0,
+        tokens_after=int(profile_after.get("tokens") or 0),
+        message=f"{duration_days} günlük kullanım süresi eklendi",
+        table_found="web_promo_codes",
+    )
 
-    code_rec = get_code_record(payload.source, payload.code, payload.uid)
-    if not code_rec:
-        validate_user_eligibility(profile_before)
-        return redeem_simple_promo(payload, redeem_user_id, profile_before)
 
+def redeem_campaign_promo(
+    code_rec: dict,
+    payload: PromoRedeemRequest,
+    redeem_user_id: str,
+    profile_before: dict,
+) -> PromoRedeemResponse:
     validate_code_unused(code_rec)
     validate_user_eligibility(profile_before)
 
@@ -567,7 +840,7 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
     membership_days = safe_int(campaign.get("membership_days"), 0)
     package_code = str(campaign.get("package_code") or "member").strip() or "member"
     grant_type = str(campaign.get("grant_type") or "").strip()
-    code_value = str(code_rec.get("code_value") or "").strip()
+    code_value = normalize_promo_code(code_rec.get("code_value") or payload.code)
 
     membership_started_at = None
     membership_ends_at = None
@@ -598,6 +871,11 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
         granted_tokens=tokens_loaded,
         package_code=package_code,
     )
+    promo_log("redeem success", {
+        "table_found": "web_promo_codes" if code_rec.get("_web_promo_source") else "promo_codes",
+        "kind": "campaign",
+        "code": code_value,
+    })
 
     return PromoRedeemResponse(
         ok=True,
@@ -610,4 +888,44 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
         tokens_loaded=tokens_loaded,
         tokens_after=int(profile_after.get("tokens") or 0),
         message=build_success_message(grant_type, membership_months, membership_days, tokens_loaded),
+        table_found="web_promo_codes" if code_rec.get("_web_promo_source") else "promo_codes",
     )
+
+
+@router.post("/redeem", response_model=PromoRedeemResponse)
+def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Header(None)):
+    redeem_user_id = resolve_redeem_user_id(payload.user_id, authorization)
+    profile_before = get_profile(redeem_user_id)
+    normalized_code = normalize_promo_code(payload.code)
+
+    promo_log("redeem request", {
+        "source": payload.source,
+        "code_value": normalized_code,
+        "user_id": redeem_user_id,
+        "lookup_column": "code_value",
+        "lookup_order": ["web_promo_codes", "promo_codes:campaign", "promo_codes:simple"],
+    })
+
+    if payload.source == "nfc":
+        code_rec = get_code_record(payload.source, payload.code, payload.uid)
+        return redeem_campaign_promo(code_rec, payload, redeem_user_id, profile_before)
+
+    lookup = resolve_manual_promo_lookup(payload.code)
+
+    if lookup.kind == "campaign" and lookup.campaign_record:
+        return redeem_campaign_promo(lookup.campaign_record, payload, redeem_user_id, profile_before)
+
+    if lookup.kind == "simple" and lookup.simple_record:
+        validate_user_eligibility(profile_before)
+        return redeem_simple_promo(
+            payload,
+            redeem_user_id,
+            profile_before,
+            simple_code=lookup.simple_record,
+            table_found=lookup.table_found,
+        )
+
+    if lookup.kind == "web" and lookup.web_record:
+        return redeem_web_promo(lookup.web_record, redeem_user_id, profile_before, lookup.normalized_code)
+
+    raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
