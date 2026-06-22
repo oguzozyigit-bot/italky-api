@@ -149,7 +149,7 @@ def get_profile(user_id: str) -> dict:
 
 
 def promo_row_code_value(code_rec: dict) -> str:
-    return normalize_promo_code(code_rec.get("code_value") or code_rec.get("code"))
+    return normalize_promo_code(code_rec.get("code_value"))
 
 
 def lookup_code_in_table(
@@ -774,7 +774,7 @@ def redeem_simple_promo(
     )
     mark_simple_code_used(simple_code, redeem_user_id)
     profile_after = get_profile_after(redeem_user_id)
-    promo_log("redeem success", {"table_found": table_found, "kind": "simple", "code": code_value})
+    promo_log("redeem success", {"table_found": table_found, "kind": "simple", "code_value": code_value})
 
     return PromoRedeemResponse(
         ok=True,
@@ -807,7 +807,7 @@ def redeem_web_promo(
     )
     mark_web_promo_code_used(web_rec, redeem_user_id)
     profile_after = get_profile_after(redeem_user_id)
-    promo_log("redeem success", {"table_found": "web_promo_codes", "kind": "web", "code": code_value})
+    promo_log("redeem success", {"table_found": "web_promo_codes", "kind": "web", "code_value": code_value})
 
     return PromoRedeemResponse(
         ok=True,
@@ -840,7 +840,7 @@ def redeem_campaign_promo(
     membership_days = safe_int(campaign.get("membership_days"), 0)
     package_code = str(campaign.get("package_code") or "member").strip() or "member"
     grant_type = str(campaign.get("grant_type") or "").strip()
-    code_value = normalize_promo_code(code_rec.get("code_value") or payload.code)
+    code_value = promo_row_code_value(code_rec) or normalize_promo_code(payload.code)
 
     membership_started_at = None
     membership_ends_at = None
@@ -874,7 +874,7 @@ def redeem_campaign_promo(
     promo_log("redeem success", {
         "table_found": "web_promo_codes" if code_rec.get("_web_promo_source") else "promo_codes",
         "kind": "campaign",
-        "code": code_value,
+        "code_value": code_value,
     })
 
     return PromoRedeemResponse(
