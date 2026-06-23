@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 from supabase import Client, create_client
 
@@ -16,6 +19,16 @@ router = APIRouter(prefix="/api/promo", tags=["promo"])
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+API_PUBLIC_BASE = os.getenv("API_PUBLIC_BASE", "https://italky-api.onrender.com").rstrip("/")
+IOS_APP_STORE_URL = os.getenv(
+    "PROMO_IOS_APP_STORE_URL",
+    "https://apps.apple.com/app/italkyai/id6768123713",
+).strip()
+ANDROID_PLAY_STORE_URL = os.getenv(
+    "PROMO_ANDROID_PLAY_STORE_URL",
+    "https://play.google.com/store/apps/details?id=com.ozyigits.italkyai",
+).strip()
+PROMO_DEEP_LINK_FALLBACK_MS = int(os.getenv("PROMO_DEEP_LINK_FALLBACK_MS", "1500") or 1500)
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing")
@@ -43,6 +56,9 @@ class PromoRedeemResponse(BaseModel):
     tokens_after: Optional[int] = None
     message: Optional[str] = None
     table_found: Optional[PromoTableFound] = None
+    app_deep_link: Optional[str] = None
+    fallback_store_url: Optional[str] = None
+    redirect_url: Optional[str] = None
 
 
 @dataclass
@@ -806,6 +822,137 @@ def build_success_message(grant_type: str, membership_months: int, membership_da
     return " ve ".join(parts) if parts else "Promosyon başarıyla uygulandı."
 
 
+def store_fallback_url(user_agent: str) -> str:
+    ua = str(user_agent or "").lower()
+    if "android" in ua:
+        return ANDROID_PLAY_STORE_URL
+    return IOS_APP_STORE_URL
+
+
+def build_promo_deep_link(code_value: str) -> str:
+    final_code = normalize_promo_code(code_value)
+    query = urlencode({"code": final_code, "ok": "1"})
+    return f"italky://promo/redeemed?{query}"
+
+
+def build_redeem_open_url(code_value: str) -> str:
+    final_code = normalize_promo_code(code_value)
+    query = urlencode({"code": final_code, "ok": "1"})
+    return f"{API_PUBLIC_BASE}/api/promo/redeem/open?{query}"
+
+
+def with_redirect_metadata(response: PromoRedeemResponse, code_value: str) -> PromoRedeemResponse:
+    if not response.ok:
+        return response
+    final_code = normalize_promo_code(code_value)
+    if not final_code:
+        return response
+    deep_link = build_promo_deep_link(final_code)
+    open_url = build_redeem_open_url(final_code)
+    promo_log("post redeem redirect targets", {
+        "app_deep_link": deep_link,
+        "fallback_store_url": IOS_APP_STORE_URL,
+        "redirect_url": open_url,
+    })
+    return response.model_copy(update={
+        "app_deep_link": deep_link,
+        "fallback_store_url": IOS_APP_STORE_URL,
+        "redirect_url": open_url,
+    })
+
+
+def render_redeem_open_html(*, deep_link: str, store_url: str, code_value: str) -> str:
+    safe_code = escape_html(normalize_promo_code(code_value))
+    fallback_ms = max(800, PROMO_DEEP_LINK_FALLBACK_MS)
+    deep_link_js = json.dumps(deep_link)
+    store_url_js = json.dumps(store_url)
+    return f"""<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>italkyAI</title>
+  <style>
+    body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#05070f;color:#fff;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-align:center;padding:24px}}
+    .card{{max-width:420px}}
+    h1{{margin:0 0 10px;font-size:24px}}
+    p{{margin:0;color:rgba(255,255,255,.72);line-height:1.6}}
+    a{{display:inline-block;margin-top:18px;padding:14px 20px;border-radius:14px;background:#fff;color:#101421;text-decoration:none;font-weight:800}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Promosyon uygulandı</h1>
+    <p>Kod: <strong>{safe_code}</strong></p>
+    <p>italkyAI uygulaması açılıyor. Otomatik yönlendirme olmazsa aşağıdaki bağlantıyı kullanın.</p>
+    <a id="storeLink" href="{escape_html(store_url)}">Uygulamayı indir</a>
+  </div>
+  <script>
+    (function () {{
+      var deepLink = {deep_link_js};
+      var storeUrl = {store_url_js};
+      var fallbackMs = {fallback_ms};
+      try {{ window.location.href = deepLink; }} catch (e) {{}}
+      setTimeout(function () {{
+        try {{ window.location.href = storeUrl; }} catch (e) {{}}
+      }}, fallbackMs);
+    }})();
+  </script>
+</body>
+</html>"""
+
+
+def escape_html(value: str) -> str:
+    return (
+        str(value or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#39;")
+    )
+
+
+@router.get("/redeem/open")
+def redeem_open_after_success(
+    request: Request,
+    code: Optional[str] = Query(None),
+    ok: Optional[str] = Query(None),
+):
+    final_code = normalize_promo_code(code)
+    if not final_code:
+        raise HTTPException(status_code=400, detail="CODE_REQUIRED")
+
+    deep_link = build_promo_deep_link(final_code)
+    store_url = store_fallback_url(request.headers.get("user-agent", ""))
+    promo_log("redeem open redirect page", {
+        "code_value": final_code,
+        "app_deep_link": deep_link,
+        "fallback_store_url": store_url,
+        "ok": ok,
+    })
+    return HTMLResponse(
+        content=render_redeem_open_html(
+            deep_link=deep_link,
+            store_url=store_url,
+            code_value=final_code,
+        )
+    )
+
+
+def maybe_redirect_after_redeem(response: PromoRedeemResponse, code_value: str, follow_redirect: bool):
+    enriched = with_redirect_metadata(response, code_value)
+    if not follow_redirect or not enriched.ok:
+        return enriched
+    redirect_target = enriched.redirect_url or build_redeem_open_url(code_value)
+    promo_log("redirect after redeem", {
+        "redirect_url": redirect_target,
+        "app_deep_link": enriched.app_deep_link,
+        "fallback_store_url": enriched.fallback_store_url,
+    })
+    return RedirectResponse(url=redirect_target, status_code=303)
+
+
 def redeem_simple_promo(
     payload: PromoRedeemRequest,
     redeem_user_id: str,
@@ -941,8 +1088,12 @@ def redeem_campaign_promo(
     )
 
 
-@router.post("/redeem", response_model=PromoRedeemResponse)
-def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Header(None)):
+@router.post("/redeem")
+def redeem_promo(
+    payload: PromoRedeemRequest,
+    authorization: Optional[str] = Header(None),
+    follow_redirect: bool = Query(False),
+) -> Union[PromoRedeemResponse, RedirectResponse]:
     redeem_user_id = resolve_redeem_user_id(payload.user_id, authorization)
     profile_before = get_profile(redeem_user_id)
     normalized_code = normalize_promo_code(payload.code)
@@ -952,30 +1103,36 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
         "source": payload.source,
         "code_value": normalized_code,
         "user_id": redeem_user_id,
+        "follow_redirect": follow_redirect,
         "lookup_columns": ["code_value", "code"],
         "lookup_order": ["web_promo_codes", "promo_codes:campaign", "promo_codes:simple"],
     })
 
     if payload.source == "nfc":
         code_rec = get_code_record(payload.source, payload.code, payload.uid)
-        return redeem_campaign_promo(code_rec, payload, redeem_user_id, profile_before)
+        result = redeem_campaign_promo(code_rec, payload, redeem_user_id, profile_before)
+        return maybe_redirect_after_redeem(result, normalized_code, follow_redirect)
 
     lookup = resolve_manual_promo_lookup(payload.code)
+    redirect_code = lookup.normalized_code or normalized_code
 
     if lookup.kind == "campaign" and lookup.campaign_record:
-        return redeem_campaign_promo(lookup.campaign_record, payload, redeem_user_id, profile_before)
+        result = redeem_campaign_promo(lookup.campaign_record, payload, redeem_user_id, profile_before)
+        return maybe_redirect_after_redeem(result, redirect_code, follow_redirect)
 
     if lookup.kind == "simple" and lookup.simple_record:
         validate_user_eligibility(profile_before)
-        return redeem_simple_promo(
+        result = redeem_simple_promo(
             payload,
             redeem_user_id,
             profile_before,
             simple_code=lookup.simple_record,
             table_found=lookup.table_found,
         )
+        return maybe_redirect_after_redeem(result, redirect_code, follow_redirect)
 
     if lookup.kind == "web" and lookup.web_record:
-        return redeem_web_promo(lookup.web_record, redeem_user_id, profile_before, lookup.normalized_code)
+        result = redeem_web_promo(lookup.web_record, redeem_user_id, profile_before, lookup.normalized_code)
+        return maybe_redirect_after_redeem(result, redirect_code, follow_redirect)
 
     raise HTTPException(status_code=404, detail="PROMO_NOT_FOUND")
