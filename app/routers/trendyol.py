@@ -16,7 +16,6 @@ from app.routers.admin import _get_supabase, _safe_data
 
 router = APIRouter(prefix="/api/trendyol", tags=["Trendyol"])
 mp_router = APIRouter(prefix="/api/mp", tags=["Marketplace"])
-activation_router = APIRouter(prefix="/api/activation-links", tags=["Activation Links"])
 logger = logging.getLogger(__name__)
 
 SKIPPED_PACKAGE_STATUSES = {
@@ -570,11 +569,6 @@ def resolve_activation_token(token: str) -> dict[str, Any]:
             logger.info("activation link clicked_at update skipped token=%s", cleaned)
 
     return {"ok": True, "code_value": clean(row.get("code_value")).upper()}
-
-
-@activation_router.get("/{token}")
-def get_activation_link(token: str) -> dict[str, Any]:
-    return resolve_activation_token(token)
 
 
 def existing_trendyol_code(

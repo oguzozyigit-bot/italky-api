@@ -25,7 +25,7 @@ from app.routers.corporate_promo import router as corporate_promo_router
 from app.routers.corporate_promo_admin import router as corporate_promo_admin_router
 from app.routers.site_translate import router as site_translate_router
 from app.routers.meeting import router as meeting_router
-from app.routers.trendyol import activation_router
+from app.routers.activation_links import activation_router
 from app.routers.trendyol import mp_router as marketplace_router
 from app.routers.trendyol import router as trendyol_router
 
