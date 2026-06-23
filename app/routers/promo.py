@@ -4,7 +4,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from typing import Literal, Optional
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -1088,12 +1088,12 @@ def redeem_campaign_promo(
     )
 
 
-@router.post("/redeem")
+@router.post("/redeem", response_model=None)
 def redeem_promo(
     payload: PromoRedeemRequest,
     authorization: Optional[str] = Header(None),
     follow_redirect: bool = Query(False),
-) -> Union[PromoRedeemResponse, RedirectResponse]:
+):
     redeem_user_id = resolve_redeem_user_id(payload.user_id, authorization)
     profile_before = get_profile(redeem_user_id)
     normalized_code = normalize_promo_code(payload.code)
