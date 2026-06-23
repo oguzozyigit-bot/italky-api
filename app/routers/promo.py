@@ -770,24 +770,38 @@ def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
 
 
 def mark_web_promo_code_used(code_rec: dict, user_id: str) -> None:
+    """Atomically marks the code as used via a PostgreSQL RPC function.
+
+    The SQL function executes a single UPDATE inside an implicit transaction:
+      - Guards on status='active' AND used_count=<current> (optimistic lock)
+      - Returns ok=false (PROMO_ALREADY_USED) if 0 rows were updated
+      - Any mid-function error rolls back automatically (no partial state)
+
+    Requires: supabase/mark_web_promo_used_atomic.sql deployed to Supabase.
+    """
     used_count = safe_int(code_rec.get("used_count"), 0)
     max_uses = safe_int(code_rec.get("max_uses"), 0)
-    next_count = used_count + 1
-    exhausted = (max_uses > 0 and next_count >= max_uses) or max_uses == 1
-    payload: dict = {"used_count": next_count}
-    if exhausted:
-        payload["status"] = "used"
 
-    upd = (
-        supabase.table("web_promo_codes")
-        .update(payload)
-        .eq("id", code_rec["id"])
-        .eq("used_count", used_count)
-        .execute()
-    )
-    assert_mutation_ok(upd, "PROMO_MARK_USED_FAILED")
-    if not (getattr(upd, "data", None) or []):
-        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+    promo_log("rpc call", {
+        "fn": "mark_web_promo_used_atomic",
+        "id": code_rec.get("id"),
+        "used_count": used_count,
+        "max_uses": max_uses,
+    })
+
+    result = supabase.rpc("mark_web_promo_used_atomic", {
+        "p_code_id":    str(code_rec["id"]),
+        "p_user_id":    str(user_id),
+        "p_used_count": used_count,
+        "p_max_uses":   max_uses,
+    }).execute()
+
+    data = getattr(result, "data", None) or {}
+    promo_log("rpc result", {"fn": "mark_web_promo_used_atomic", "data": data})
+
+    if not data.get("ok"):
+        reason = str(data.get("reason") or "PROMO_MARK_USED_FAILED")
+        raise HTTPException(status_code=400, detail=reason)
 
 
 def get_profile_after(user_id: str) -> dict:
@@ -998,12 +1012,18 @@ def redeem_web_promo(
     validate_user_eligibility(profile_before)
     duration_days = validate_web_promo_code(web_rec, redeem_user_id)
     code_value = web_promo_code_value(web_rec) or normalized_code
+
+    # Step 1: Atomically lock the code BEFORE touching the user's profile.
+    # If the code is already used / concurrently claimed, this raises
+    # PROMO_ALREADY_USED and no membership is applied.
+    mark_web_promo_code_used(web_rec, redeem_user_id)
+
+    # Step 2: Code is now exclusively ours — apply the membership days.
     package_code, membership_started_at, membership_ends_at = apply_simple_membership(
         profile_before,
         code_value,
         duration_days,
     )
-    mark_web_promo_code_used(web_rec, redeem_user_id)
     profile_after = get_profile_after(redeem_user_id)
     promo_log("redeem success", {"table_found": "web_promo_codes", "kind": "web", "code_value": code_value})
 
