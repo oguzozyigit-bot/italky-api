@@ -715,6 +715,7 @@ def mark_code_used(code_rec: dict, user_id: str) -> None:
     if code_rec.get("_web_promo_source"):
         payload = {
             "is_used": True,
+            "status": "used",
             "used_by": user_id,
             "used_at": iso_now(),
             "bound_user_id": user_id,
@@ -772,8 +773,9 @@ def mark_web_promo_code_used(code_rec: dict, user_id: str) -> None:
     used_count = safe_int(code_rec.get("used_count"), 0)
     max_uses = safe_int(code_rec.get("max_uses"), 0)
     next_count = used_count + 1
+    exhausted = (max_uses > 0 and next_count >= max_uses) or max_uses == 1
     payload: dict = {"used_count": next_count}
-    if max_uses > 0 and next_count >= max_uses:
+    if exhausted:
         payload["status"] = "used"
 
     upd = (
