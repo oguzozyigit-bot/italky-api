@@ -101,18 +101,37 @@ app.mount("/assets", StaticFiles(directory="static"), name="assets")
 # ===============================
 # CORS
 # ===============================
-ALLOWED_ORIGINS: List[str] = [
+_BASE_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
     "https://italky-web.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
+    "http://localhost:8080",
 ]
+
+# Extra origins from env var (comma-separated), e.g. Render env:
+#   CORS_ORIGINS=https://italky.ai,https://staging.italky.ai
+_ENV_ORIGINS: List[str] = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", "").split(",")
+    if o.strip().startswith("http")
+]
+
+ALLOWED_ORIGINS: List[str] = list(dict.fromkeys(_BASE_ORIGINS + _ENV_ORIGINS))
+
+# Regex covers:
+#   - any *.italky.ai subdomain
+#   - any italky-web Vercel preview deploy  (italky-web-<hash>-<team>.vercel.app)
+ALLOWED_ORIGIN_REGEX = (
+    r"https://([\w-]+\.)?italky\.ai"
+    r"|https://italky-web[\w-]*\.vercel\.app"
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=None,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
