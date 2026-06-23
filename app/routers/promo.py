@@ -149,7 +149,16 @@ def get_profile(user_id: str) -> dict:
 
 
 def promo_row_code_value(code_rec: dict) -> str:
-    return normalize_promo_code(code_rec.get("code_value"))
+    return normalize_promo_code(code_rec.get("code_value") or code_rec.get("code"))
+
+
+def is_missing_column_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "42703" in text
+        or "does not exist" in text
+        or ("column" in text and ("code_value" in text or ".code" in text or " code " in text))
+    )
 
 
 def lookup_code_in_table(
@@ -163,26 +172,66 @@ def lookup_code_in_table(
     if not final_code:
         return None
 
-    promo_log("query table", {
+    columns = ("code_value", "code")
+    for column in columns:
+        promo_log("query table", {
+            "table": table,
+            "column": column,
+            "value": final_code,
+            "delivery_type": delivery_type,
+            "kind": kind,
+        })
+
+        try:
+            query = supabase.table(table).select("*").eq(column, final_code)
+            if delivery_type:
+                query = query.eq("delivery_type", delivery_type)
+            res = query.limit(1).execute()
+            rows = res.data or []
+            if rows:
+                promo_log("lookup hit", {
+                    "table_found": table,
+                    "kind": kind,
+                    "column": column,
+                    "value": final_code,
+                    "response": "hit",
+                    "row_id": rows[0].get("id"),
+                })
+                return rows[0]
+
+            promo_log("lookup miss", {
+                "table": table,
+                "kind": kind,
+                "column": column,
+                "value": final_code,
+                "response": "miss",
+            })
+        except Exception as exc:
+            if column == "code_value" and is_missing_column_error(exc):
+                promo_log("code_value column unavailable; falling back to code", {
+                    "table": table,
+                    "kind": kind,
+                    "message": str(exc),
+                })
+                continue
+            promo_log("lookup error", {
+                "table": table,
+                "kind": kind,
+                "column": column,
+                "value": final_code,
+                "response": "error",
+                "message": str(exc),
+            })
+            if column == "code":
+                break
+
+    promo_log("lookup exhausted", {
         "table": table,
-        "column": "code_value",
-        "code_value": final_code,
-        "delivery_type": delivery_type,
         "kind": kind,
+        "value": final_code,
+        "response": "miss",
+        "columns_tried": list(columns),
     })
-
-    try:
-        query = supabase.table(table).select("*").eq("code_value", final_code)
-        if delivery_type:
-            query = query.eq("delivery_type", delivery_type)
-        res = query.limit(1).execute()
-        rows = res.data or []
-        if rows:
-            promo_log("lookup hit", {"table_found": table, "kind": kind, "code_value": final_code, "column": "code_value"})
-            return rows[0]
-    except Exception as exc:
-        promo_log("code_value lookup failed", {"table": table, "kind": kind, "message": str(exc), "code_value": final_code})
-
     return None
 
 
@@ -899,10 +948,11 @@ def redeem_promo(payload: PromoRedeemRequest, authorization: Optional[str] = Hea
     normalized_code = normalize_promo_code(payload.code)
 
     promo_log("redeem request", {
+        "route": "POST /api/promo/redeem",
         "source": payload.source,
         "code_value": normalized_code,
         "user_id": redeem_user_id,
-        "lookup_column": "code_value",
+        "lookup_columns": ["code_value", "code"],
         "lookup_order": ["web_promo_codes", "promo_codes:campaign", "promo_codes:simple"],
     })
 
