@@ -769,15 +769,33 @@ def mark_simple_code_used(code_rec: dict, user_id: str) -> None:
         raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
 
 
+def _mark_web_promo_direct(code_rec: dict, used_count: int, max_uses: int) -> None:
+    """Direct optimistic-lock update — fallback when RPC is unavailable."""
+    next_count = used_count + 1
+    exhausted = (max_uses > 0 and next_count >= max_uses) or max_uses == 1
+    payload: dict = {"used_count": next_count}
+    if exhausted:
+        payload["status"] = "used"
+    upd = (
+        supabase.table("web_promo_codes")
+        .update(payload)
+        .eq("id", code_rec["id"])
+        .eq("used_count", used_count)
+        .execute()
+    )
+    assert_mutation_ok(upd, "PROMO_MARK_USED_FAILED")
+    if not (getattr(upd, "data", None) or []):
+        raise HTTPException(status_code=400, detail="PROMO_ALREADY_USED")
+
+
 def mark_web_promo_code_used(code_rec: dict, user_id: str) -> None:
-    """Atomically marks the code as used via a PostgreSQL RPC function.
+    """Atomically marks the code as used.
 
-    The SQL function executes a single UPDATE inside an implicit transaction:
-      - Guards on status='active' AND used_count=<current> (optimistic lock)
-      - Returns ok=false (PROMO_ALREADY_USED) if 0 rows were updated
-      - Any mid-function error rolls back automatically (no partial state)
+    Primary path: PostgreSQL RPC (mark_web_promo_used_atomic) — requires the
+    SQL function to be deployed to Supabase (see supabase/mark_web_promo_used_atomic.sql).
 
-    Requires: supabase/mark_web_promo_used_atomic.sql deployed to Supabase.
+    Fallback path: direct PostgREST UPDATE with optimistic-lock on used_count.
+    Used automatically when the RPC function is not yet available.
     """
     used_count = safe_int(code_rec.get("used_count"), 0)
     max_uses = safe_int(code_rec.get("max_uses"), 0)
@@ -789,19 +807,31 @@ def mark_web_promo_code_used(code_rec: dict, user_id: str) -> None:
         "max_uses": max_uses,
     })
 
-    result = supabase.rpc("mark_web_promo_used_atomic", {
-        "p_code_id":    str(code_rec["id"]),
-        "p_user_id":    str(user_id),
-        "p_used_count": used_count,
-        "p_max_uses":   max_uses,
-    }).execute()
+    try:
+        result = supabase.rpc("mark_web_promo_used_atomic", {
+            "p_code_id":    str(code_rec["id"]),
+            "p_user_id":    str(user_id),
+            "p_used_count": used_count,
+            "p_max_uses":   max_uses,
+        }).execute()
 
-    data = getattr(result, "data", None) or {}
-    promo_log("rpc result", {"fn": "mark_web_promo_used_atomic", "data": data})
+        data = getattr(result, "data", None) or {}
+        promo_log("rpc result", {"fn": "mark_web_promo_used_atomic", "data": data})
 
-    if not data.get("ok"):
-        reason = str(data.get("reason") or "PROMO_MARK_USED_FAILED")
-        raise HTTPException(status_code=400, detail=reason)
+        if not data.get("ok"):
+            reason = str(data.get("reason") or "PROMO_MARK_USED_FAILED")
+            raise HTTPException(status_code=400, detail=reason)
+
+    except HTTPException:
+        raise
+    except Exception as rpc_err:
+        # RPC function not yet deployed → fall back to direct optimistic-lock update
+        promo_log("rpc fallback", {
+            "fn": "mark_web_promo_used_atomic",
+            "error": str(rpc_err),
+            "id": code_rec.get("id"),
+        })
+        _mark_web_promo_direct(code_rec, used_count, max_uses)
 
 
 def get_profile_after(user_id: str) -> dict:
