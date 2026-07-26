@@ -9,23 +9,26 @@ httpx
 python-multipart==0.0.9
 
 # --- Database & Utilities ---
+supabase==2.6.0
 sqlalchemy
 psycopg2-binary
 Pillow
-gunicorn
 setuptools
 wheel
 
-# --- AI Services (Existing) ---
-supabase==2.6.0
-edge-tts==6.1.12
+# --- AI / Billing Services ---
 google-generativeai==0.8.3
 google-auth==2.33.0
 openai==1.51.2
+edge-tts==6.1.12
 
-# --- Bridge & OCR (New & Compatible) ---
+# --- Lightweight translation / speech helpers ---
 SpeechRecognition
 deep-translator
 pydub
-easyocr
-static-ffmpeg
+
+# NOTE:
+# easyocr and static-ffmpeg were removed from the Vercel build because they pull
+# very large native/ML dependencies and exceed Vercel's 500 MB function limit.
+# The OCR router is optional in app/main.py and will stay disabled unless a
+# separate OCR service/function is introduced.
