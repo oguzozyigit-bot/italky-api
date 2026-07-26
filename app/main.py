@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.routers.auth import router as auth_router
 from app.routers.session import router as session_router
+from app.routers.sso_bridge import router as sso_bridge_router
 from app.routers.ios_iap import router as ios_iap_router
 from app.routers.license import router as license_router
 from app.routers.delete_account import router as delete_account_router
@@ -110,8 +111,6 @@ _BASE_ORIGINS: List[str] = [
     "http://localhost:8080",
 ]
 
-# Extra origins from env var (comma-separated), e.g. Render env:
-#   CORS_ORIGINS=https://italky.ai,https://staging.italky.ai
 _ENV_ORIGINS: List[str] = [
     o.strip()
     for o in os.getenv("CORS_ORIGINS", "").split(",")
@@ -120,9 +119,6 @@ _ENV_ORIGINS: List[str] = [
 
 ALLOWED_ORIGINS: List[str] = list(dict.fromkeys(_BASE_ORIGINS + _ENV_ORIGINS))
 
-# Regex covers:
-#   - any *.italky.ai subdomain
-#   - any italky-web Vercel preview deploy  (italky-web-<hash>-<team>.vercel.app)
 ALLOWED_ORIGIN_REGEX = (
     r"https://([\w-]+\.)?italky\.ai"
     r"|https://italky-web[\w-]*\.vercel\.app"
@@ -168,6 +164,7 @@ if has_push_admin and push_admin_router:
     app.include_router(push_admin_router)
 
 app.include_router(session_router)
+app.include_router(sso_bridge_router)
 app.include_router(ios_iap_router)
 app.include_router(license_router)
 app.include_router(delete_account_router)
