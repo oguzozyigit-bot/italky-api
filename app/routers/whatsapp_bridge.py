@@ -5,10 +5,15 @@ import uuid
 import speech_recognition as sr
 from deep_translator import GoogleTranslator  # googletrans yerine bu geldi
 from pydub import AudioSegment
-import static_ffmpeg
 
-# Render üzerindeki ffmpeg yetki sorununu kökten çözer
-static_ffmpeg.add_paths()
+try:
+    import static_ffmpeg  # type: ignore
+    static_ffmpeg.add_paths()
+    FFMPEG_READY = True
+except Exception:
+    # Vercel paket boyutu nedeniyle static-ffmpeg kullanılmıyor.
+    # Ana API açılmalı; bu endpoint çağrılırsa kontrollü hata döner.
+    FFMPEG_READY = False
 
 router = APIRouter(
     prefix="/api/whatsapp",
@@ -18,8 +23,13 @@ router = APIRouter(
 def convert_ogg_to_wav(ogg_path, wav_path):
     """
     Android'den gelen OGG dosyasını STT için WAV formatına çevirir.
-    pydub, static-ffmpeg sayesinde arka planda ffmpeg motorunu kullanır.
+    Vercel ortamında ffmpeg yoksa ana API çökmez, sadece bu işlem devre dışı kalır.
     """
+    if not FFMPEG_READY:
+        raise HTTPException(
+            status_code=503,
+            detail="WhatsApp ses dönüştürme bu ortamda geçici olarak devre dışı: ffmpeg yok."
+        )
     audio = AudioSegment.from_file(ogg_path, format="ogg")
     audio.export(wav_path, format="wav")
 
@@ -67,6 +77,8 @@ async def process_whatsapp_voice(
 
     except sr.UnknownValueError:
         return {"status": "error", "message": "Ses anlaşılamadı, lütfen tekrar deneyin."}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Bridge Hatası: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -77,5 +89,5 @@ async def process_whatsapp_voice(
             if os.path.exists(f):
                 try:
                     os.remove(f)
-                except:
+                except Exception:
                     pass
