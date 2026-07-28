@@ -105,6 +105,8 @@ app.mount("/assets", StaticFiles(directory="static"), name="assets")
 _BASE_ORIGINS: List[str] = [
     "https://italky.ai",
     "https://www.italky.ai",
+    "https://icany.ai",
+    "https://www.icany.ai",
     "https://italky-web.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
@@ -121,6 +123,7 @@ ALLOWED_ORIGINS: List[str] = list(dict.fromkeys(_BASE_ORIGINS + _ENV_ORIGINS))
 
 ALLOWED_ORIGIN_REGEX = (
     r"https://([\w-]+\.)?italky\.ai"
+    r"|https://([\w-]+\.)?icany\.ai"
     r"|https://italky-web[\w-]*\.vercel\.app"
 )
 
@@ -205,13 +208,16 @@ def root():
         "version": APP_VERSION,
     }
 
+
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
 
+
 @app.get("/api/healthz")
 def api_healthz():
     return {"status": "ok"}
+
 
 @app.get("/favicon.ico")
 async def favicon():
