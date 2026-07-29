@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from fastapi import APIRouter, Header, HTTPException
@@ -14,82 +18,28 @@ router = APIRouter(tags=["usage-billing"])
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+ICANY_PERSONAL_SPEND_URL = "https://icany.ai/api/bridge/personal-spend"
 
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# Yeni bireysel fiyatlandırma:
-# - İlk başarılı çeviri kullanımıyla 7 günlük deneme başlar.
-# - Deneme sonrasında ilk başarılı kullanım 5 jeton karşılığında 24 saat açar.
-# - Aynı 24 saat içindeki diğer çeviri modülleri yeniden ücretlenmez.
 TRANSLATION_MODULES = {
-    "text_ai",
-    "text_translate",
-    "text_translate_paid",
-    "document_translate",
-    "document_ai",
-    "photo_translate",
-    "photo_ai",
-    "ocr_translate",
-    "facetoface_ai",
-    "usage_face_to_face",
-    "face_to_face",
-    "facetoface",
-    "eartoear_ai",
-    "ear_to_ear",
-    "side_to_side",
-    "sidetoside",
-    "culture_translate",
-    "cultural_translate",
-    "italky_call",
-    "two_phone",
-    "interpreter",
-    "interpreter_live",
-    "interpreter_qr",
-    "regional_translate",
-    "geographic_translate",
+    "text_ai", "text_translate", "text_translate_paid", "document_translate", "document_ai",
+    "photo_translate", "photo_ai", "ocr_translate", "facetoface_ai", "usage_face_to_face",
+    "face_to_face", "facetoface", "eartoear_ai", "ear_to_ear", "side_to_side", "sidetoside",
+    "culture_translate", "cultural_translate", "italky_call", "two_phone", "interpreter",
+    "interpreter_live", "interpreter_qr", "regional_translate", "geographic_translate",
 }
-
 TRANSLATION_HINTS = (
-    "translate",
-    "translation",
-    "facetoface",
-    "face_to_face",
-    "eartoear",
-    "ear_to_ear",
-    "side_to_side",
-    "sidetoside",
-    "document",
-    "photo",
-    "ocr",
-    "interpreter",
-    "italky_call",
-    "two_phone",
-    "culture",
-    "cultural",
+    "translate", "translation", "facetoface", "face_to_face", "eartoear", "ear_to_ear",
+    "side_to_side", "sidetoside", "document", "photo", "ocr", "interpreter",
+    "italky_call", "two_phone", "culture", "cultural",
 )
-
-PAID_TEXT_MODULES = {
-    "chat_ai",
-    "practice_ai",
-}
-
-PAID_VOICE_MODULES = {
-    "voice_clone",
-    "voice_clone_preview",
-    "voice_ai",
-    "voice_preset_use",
-    "voice_live",
-    "practice_ai",
-}
-
-FREE_MODULES = {
-    "voice_preset_preview",
-    "offline",
-    "offline_mode",
-}
+PAID_TEXT_MODULES = {"chat_ai", "practice_ai"}
+PAID_VOICE_MODULES = {"voice_clone", "voice_clone_preview", "voice_ai", "voice_preset_use", "voice_live", "practice_ai"}
+FREE_MODULES = {"voice_preset_preview", "offline", "offline_mode"}
 
 
 class UsageBillingReq(BaseModel):
@@ -105,11 +55,9 @@ class UsageBillingReq(BaseModel):
 def _get_bearer(auth_header: Optional[str]) -> str:
     if not auth_header:
         raise HTTPException(status_code=401, detail="Authorization header missing")
-
     parts = auth_header.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
         raise HTTPException(status_code=401, detail="Invalid authorization header")
-
     return parts[1].strip()
 
 
@@ -119,10 +67,7 @@ def _get_user_from_jwt(jwt_token: str) -> Dict[str, Any]:
         user = getattr(response, "user", None)
         if not user or not getattr(user, "id", None):
             raise HTTPException(status_code=401, detail="User not found from token")
-        return {
-            "id": str(user.id),
-            "email": getattr(user, "email", None),
-        }
+        return {"id": str(user.id), "email": getattr(user, "email", None)}
     except HTTPException:
         raise
     except Exception as exc:
@@ -131,12 +76,7 @@ def _get_user_from_jwt(jwt_token: str) -> Dict[str, Any]:
 
 def _normalize_module(module: str) -> str:
     value = str(module or "").strip().lower()
-    aliases = {
-        "practic_ai": "practice_ai",
-        "practice": "practice_ai",
-        "practiceai": "practice_ai",
-    }
-    return aliases.get(value, value)
+    return {"practic_ai": "practice_ai", "practice": "practice_ai", "practiceai": "practice_ai"}.get(value, value)
 
 
 def _normalize_kind(kind: str) -> str:
@@ -147,9 +87,7 @@ def _normalize_kind(kind: str) -> str:
 
 
 def _is_translation_module(module: str) -> bool:
-    if module in TRANSLATION_MODULES:
-        return True
-    return any(hint in module for hint in TRANSLATION_HINTS)
+    return module in TRANSLATION_MODULES or any(hint in module for hint in TRANSLATION_HINTS)
 
 
 def _requires_legacy_billing(module: str, kind: str) -> bool:
@@ -163,24 +101,142 @@ def _requires_legacy_billing(module: str, kind: str) -> bool:
 
 
 def _usage_type_for(kind: str) -> str:
-    if kind in {"voice", "voice_out"}:
-        return "voice_tts"
-    return "ai_text"
+    return "voice_tts" if kind in {"voice", "voice_out"} else "ai_text"
 
 
-def _normalize_rpc_data(data: Any) -> Dict[str, Any]:
-    if isinstance(data, dict):
-        return data
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        return data[0]
-    raise HTTPException(status_code=500, detail="RPC boş veya geçersiz cevap döndü")
+def _parse_time(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _shared_wallet_spend(jwt_token: str, amount: int, module: str, request_id: str, note: str = "") -> Dict[str, Any]:
+    body = json.dumps({
+        "amount": int(amount),
+        "module": module,
+        "requestId": request_id,
+        "note": note,
+    }).encode("utf-8")
+    req = Request(
+        ICANY_PERSONAL_SPEND_URL,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {jwt_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8") or "{}")
+    except HTTPError as exc:
+        try:
+            data = json.loads(exc.read().decode("utf-8") or "{}")
+        except Exception:
+            data = {}
+        if exc.code == 402 or data.get("code") == "INSUFFICIENT_TOKENS":
+            raise HTTPException(status_code=402, detail={
+                "code": "INSUFFICIENT_TOKENS",
+                "message": data.get("error") or "Jeton yetersiz.",
+                "required_tokens": amount,
+                "tokens_after": data.get("tokenBalance", 0),
+            })
+        raise HTTPException(status_code=502, detail=data.get("error") or "Ortak cüzdan yanıt vermedi")
+    except (URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=502, detail=f"Ortak cüzdana ulaşılamadı: {exc}")
+    if not data.get("ok"):
+        raise HTTPException(status_code=502, detail=data.get("error") or "Ortak cüzdan işlemi başarısız")
+    return data
+
+
+def _translation_access(user_id: str, module: str, request_id: str, jwt_token: str) -> Dict[str, Any]:
+    previous = (
+        supabase.table("translation_access_requests")
+        .select("result")
+        .eq("user_id", user_id)
+        .eq("request_key", request_id)
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(previous, "data", None) or []
+    if rows and isinstance(rows[0].get("result"), dict):
+        return {**rows[0]["result"], "idempotent_replay": True}
+
+    state_res = (
+        supabase.table("translation_access_state")
+        .select("*")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    state_rows = getattr(state_res, "data", None) or []
+    now = datetime.now(timezone.utc)
+
+    if not state_rows:
+        trial_end = now + timedelta(days=7)
+        state = {
+            "user_id": user_id,
+            "trial_started_at": now.isoformat(),
+            "trial_ends_at": trial_end.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+        supabase.table("translation_access_state").insert(state).execute()
+        result = {
+            "ok": True, "charged": False, "access_mode": "trial_started", "tokens_charged": 0,
+            "trial_started_at": state["trial_started_at"], "trial_ends_at": state["trial_ends_at"],
+            "access_ends_at": state["trial_ends_at"], "module": module, "request_key": request_id,
+        }
+    else:
+        state = state_rows[0]
+        trial_end = _parse_time(state.get("trial_ends_at"))
+        paid_end = _parse_time(state.get("paid_access_ends_at"))
+        if trial_end and now < trial_end:
+            result = {
+                "ok": True, "charged": False, "access_mode": "trial_active", "tokens_charged": 0,
+                "trial_started_at": state.get("trial_started_at"), "trial_ends_at": state.get("trial_ends_at"),
+                "access_ends_at": state.get("trial_ends_at"), "module": module, "request_key": request_id,
+            }
+        elif paid_end and now < paid_end:
+            result = {
+                "ok": True, "charged": False, "access_mode": "paid_active", "tokens_charged": 0,
+                "paid_access_started_at": state.get("paid_access_started_at"),
+                "paid_access_ends_at": state.get("paid_access_ends_at"),
+                "access_ends_at": state.get("paid_access_ends_at"), "module": module, "request_key": request_id,
+            }
+        else:
+            wallet = _shared_wallet_spend(jwt_token, 5, "translation_day", request_id, "Tüm çeviri modülleri - 24 saat")
+            paid_end = now + timedelta(hours=24)
+            supabase.table("translation_access_state").update({
+                "paid_access_started_at": now.isoformat(),
+                "paid_access_ends_at": paid_end.isoformat(),
+                "updated_at": now.isoformat(),
+            }).eq("user_id", user_id).execute()
+            result = {
+                "ok": True, "charged": True, "access_mode": "paid_started", "tokens_charged": 5,
+                "tokens_before": wallet.get("tokensBefore"), "tokens_after": wallet.get("tokensAfter"),
+                "paid_access_started_at": now.isoformat(), "paid_access_ends_at": paid_end.isoformat(),
+                "access_ends_at": paid_end.isoformat(), "module": module, "request_key": request_id,
+                "wallet": "icany_personal",
+            }
+
+    supabase.table("translation_access_requests").insert({
+        "user_id": user_id,
+        "request_key": request_id,
+        "module": module,
+        "access_mode": result.get("access_mode", "unknown"),
+        "tokens_charged": int(result.get("tokens_charged") or 0),
+        "access_ends_at": result.get("access_ends_at"),
+        "result": result,
+    }).execute()
+    return result
 
 
 @router.post("/api/usage/commit")
-async def usage_commit(
-    req: UsageBillingReq,
-    authorization: Optional[str] = Header(default=None),
-):
+async def usage_commit(req: UsageBillingReq, authorization: Optional[str] = Header(default=None)):
     jwt_token = _get_bearer(authorization)
     user = _get_user_from_jwt(jwt_token)
     user_id = user["id"]
@@ -192,34 +248,10 @@ async def usage_commit(
     module = _normalize_module(req.module)
     usage_kind = _normalize_kind(req.usage_kind)
     char_count = int(req.char_count or 0)
+    request_id = str(req.request_id or "").strip() or str(uuid4())
 
     if _is_translation_module(module):
-        request_id = str(req.request_id or "").strip() or str(uuid4())
-        try:
-            rpc = supabase.rpc(
-                "claim_translation_daily_access",
-                {
-                    "p_user_id": user_id,
-                    "p_request_key": request_id,
-                    "p_module": module,
-                },
-            ).execute()
-            data = _normalize_rpc_data(rpc.data)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Translation access error: {exc}")
-
-        if not data.get("ok") and data.get("reason") == "insufficient_tokens":
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    **data,
-                    "code": "INSUFFICIENT_TOKENS",
-                    "message": "Bu çeviri günü için 5 jeton gerekli.",
-                },
-            )
-
+        data = _translation_access(user_id, module, request_id, jwt_token)
         return {
             **data,
             "ok": True,
@@ -227,7 +259,7 @@ async def usage_commit(
             "usage_kind": usage_kind,
             "char_count": char_count,
             "request_id": request_id,
-            "billing_model": "translation_daily_access_v1",
+            "billing_model": "translation_daily_access_shared_wallet_v2",
             "daily_access": True,
             "jetons_spent": int(data.get("tokens_charged") or 0),
             "free_only": int(data.get("tokens_charged") or 0) == 0,
@@ -235,17 +267,9 @@ async def usage_commit(
 
     if not _requires_legacy_billing(module, usage_kind):
         return {
-            "ok": True,
-            "module": module,
-            "usage_kind": usage_kind,
-            "char_count": char_count,
-            "tokens_before": None,
-            "tokens_after": None,
-            "tokens_charged": 0,
-            "jetons_spent": 0,
-            "free_only": True,
-            "chars_per_jeton": CHARS_PER_JETON,
-            "billing_model": "free_or_unmetered",
+            "ok": True, "module": module, "usage_kind": usage_kind, "char_count": char_count,
+            "tokens_before": None, "tokens_after": None, "tokens_charged": 0, "jetons_spent": 0,
+            "free_only": True, "chars_per_jeton": CHARS_PER_JETON, "billing_model": "free_or_unmetered",
         }
 
     usage_type = _usage_type_for(usage_kind)
@@ -253,6 +277,8 @@ async def usage_commit(
         user_id=user_id,
         used_chars=char_count,
         usage_type=usage_type,
+        jwt_token=jwt_token,
+        request_id=request_id,
         extra_meta={
             "original_module": module,
             "usage_kind": usage_kind,
@@ -260,38 +286,49 @@ async def usage_commit(
             **(req.meta or {}),
         },
     )
-
     charged = int(result.get("charged_tokens") or 0)
     return {
-        "ok": True,
-        "module": module,
-        "engine_module": usage_type,
-        "usage_kind": usage_kind,
-        "char_count": char_count,
-        "tokens_before": result.get("tokens_before"),
-        "tokens_after": result.get("tokens_after"),
-        "tokens_charged": charged,
-        "jetons_spent": charged,
-        "chars_per_jeton": result.get("chars_per_jeton", CHARS_PER_JETON),
-        "free_only": False,
-        "billing_model": "legacy_character_usage",
+        "ok": True, "module": module, "engine_module": usage_type, "usage_kind": usage_kind,
+        "char_count": char_count, "tokens_before": result.get("tokens_before"),
+        "tokens_after": result.get("tokens_after"), "tokens_charged": charged,
+        "jetons_spent": charged, "chars_per_jeton": result.get("chars_per_jeton", CHARS_PER_JETON),
+        "free_only": False, "billing_model": "shared_personal_wallet_v2", "wallet": "icany_personal",
     }
 
 
 @router.get("/api/usage/translation-status")
-def translation_status(
-    authorization: Optional[str] = Header(default=None),
-):
+def translation_status(authorization: Optional[str] = Header(default=None)):
     jwt_token = _get_bearer(authorization)
     user = _get_user_from_jwt(jwt_token)
-
-    try:
-        rpc = supabase.rpc(
-            "get_translation_daily_access_status",
-            {"p_user_id": user["id"]},
-        ).execute()
-        return _normalize_rpc_data(rpc.data)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Translation status error: {exc}")
+    state_res = (
+        supabase.table("translation_access_state")
+        .select("*")
+        .eq("user_id", user["id"])
+        .limit(1)
+        .execute()
+    )
+    rows = getattr(state_res, "data", None) or []
+    now = datetime.now(timezone.utc)
+    if not rows:
+        return {"ok": True, "access_mode": "not_started", "access_active": False, "daily_cost": 5}
+    state = rows[0]
+    trial_end = _parse_time(state.get("trial_ends_at"))
+    paid_end = _parse_time(state.get("paid_access_ends_at"))
+    if trial_end and now < trial_end:
+        mode, end = "trial_active", trial_end
+    elif paid_end and now < paid_end:
+        mode, end = "paid_active", paid_end
+    else:
+        mode, end = "payment_required", None
+    return {
+        "ok": True,
+        "access_mode": mode,
+        "access_active": end is not None,
+        "access_ends_at": end.isoformat() if end else None,
+        "trial_started_at": state.get("trial_started_at"),
+        "trial_ends_at": state.get("trial_ends_at"),
+        "paid_access_started_at": state.get("paid_access_started_at"),
+        "paid_access_ends_at": state.get("paid_access_ends_at"),
+        "daily_cost": 5,
+        "wallet": "icany_personal",
+    }
