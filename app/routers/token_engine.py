@@ -1,81 +1,21 @@
 from __future__ import annotations
 
+import json
 import math
-import os
 from typing import Any, Dict, Optional
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from fastapi import HTTPException
-from supabase import Client, create_client
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    raise RuntimeError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-
-# Tek sabit kural:
-# AI metin = 1000 karakter / 1 jeton
-# Ses/TTS   = 1000 karakter / 1 jeton
 CHARS_PER_JETON = 1000
+ICANY_PERSONAL_SPEND_URL = "https://icany.ai/api/bridge/personal-spend"
 
-# İleride farklı tarifeler istersek tek yerden açarız.
 VALID_USAGE_TYPES = {
     "ai_text",
     "voice_tts",
     "general",
 }
-
-
-def _get_profile_or_404(user_id: str) -> Dict[str, Any]:
-    prof = (
-        supabase.table("profiles")
-        .select("id,tokens")
-        .eq("id", user_id)
-        .limit(1)
-        .execute()
-    )
-
-    rows = getattr(prof, "data", None) or []
-    if not rows:
-        raise HTTPException(status_code=404, detail="profile not found")
-
-    return rows[0] or {}
-
-
-def _reason_for(usage_type: str) -> str:
-    if usage_type == "voice_tts":
-        return f"Ses kullanımı ({CHARS_PER_JETON} karakter = 1 jeton)"
-    if usage_type == "ai_text":
-        return f"AI metin kullanımı ({CHARS_PER_JETON} karakter = 1 jeton)"
-    return f"Kullanım kesintisi ({CHARS_PER_JETON} karakter = 1 jeton)"
-
-
-def _wallet_tx_type_for(usage_type: str) -> str:
-    if usage_type == "voice_tts":
-        return "usage_voice"
-    if usage_type == "ai_text":
-        return "usage_text"
-    return "usage_general"
-
-
-def _insert_wallet_tx(
-    user_id: str,
-    tx_type: str,
-    amount: int,
-    reason: str,
-    meta: Dict[str, Any],
-) -> None:
-    supabase.table("wallet_tx").insert(
-        {
-            "user_id": user_id,
-            "type": tx_type,
-            "amount": amount,
-            "reason": reason,
-            "meta": meta,
-        }
-    ).execute()
 
 
 def calc_tokens_for_chars(used_chars: int) -> int:
@@ -85,15 +25,73 @@ def calc_tokens_for_chars(used_chars: int) -> int:
     return math.ceil(used_chars / CHARS_PER_JETON)
 
 
+def _shared_wallet_spend(
+    jwt_token: str,
+    amount: int,
+    module: str,
+    request_id: str,
+    note: str = "",
+) -> Dict[str, Any]:
+    payload = json.dumps(
+        {
+            "amount": int(amount),
+            "module": str(module or "usage"),
+            "requestId": str(request_id or ""),
+            "note": str(note or ""),
+        }
+    ).encode("utf-8")
+    request = Request(
+        ICANY_PERSONAL_SPEND_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {jwt_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8") or "{}")
+    except HTTPError as exc:
+        try:
+            data = json.loads(exc.read().decode("utf-8") or "{}")
+        except Exception:
+            data = {}
+        if exc.code == 402 or data.get("code") == "INSUFFICIENT_TOKENS":
+            raise HTTPException(
+                status_code=402,
+                detail={
+                    "code": "INSUFFICIENT_TOKENS",
+                    "message": data.get("error") or "Jeton yetersiz.",
+                    "required_tokens": amount,
+                    "tokens_after": data.get("tokenBalance", 0),
+                },
+            )
+        raise HTTPException(status_code=502, detail=data.get("error") or "Ortak cüzdan yanıt vermedi")
+    except (URLError, TimeoutError) as exc:
+        raise HTTPException(status_code=502, detail=f"Ortak cüzdana ulaşılamadı: {exc}")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Ortak cüzdan hatası: {exc}")
+
+    if not data.get("ok"):
+        raise HTTPException(status_code=502, detail=data.get("error") or "Ortak cüzdan işlemi başarısız")
+    return data
+
+
 def spend_chars(
     user_id: str,
     used_chars: int,
     usage_type: str = "general",
     extra_meta: Optional[Dict[str, Any]] = None,
+    jwt_token: str = "",
+    request_id: str = "",
 ) -> Dict[str, Any]:
     if not user_id:
         raise HTTPException(status_code=422, detail="user_id required")
-
+    if not jwt_token:
+        raise HTTPException(status_code=401, detail="Authorization token required")
     if usage_type not in VALID_USAGE_TYPES:
         raise HTTPException(status_code=400, detail="invalid usage_type")
 
@@ -108,55 +106,23 @@ def spend_chars(
             "chars_per_jeton": CHARS_PER_JETON,
         }
 
-    extra_meta = extra_meta or {}
-
-    row = _get_profile_or_404(user_id)
-
-    tokens_before = int(row.get("tokens") or 0)
     charged_tokens = calc_tokens_for_chars(used_chars)
-    tokens_after = tokens_before - charged_tokens
-
-    if tokens_after < 0:
-        raise HTTPException(status_code=402, detail="insufficient_tokens")
-
-    (
-        supabase.table("profiles")
-        .update({
-            "tokens": tokens_after,
-        })
-        .eq("id", user_id)
-        .execute()
+    meta = extra_meta or {}
+    shared = _shared_wallet_spend(
+        jwt_token=jwt_token,
+        amount=charged_tokens,
+        module=str(meta.get("original_module") or usage_type),
+        request_id=request_id,
+        note=str(meta.get("note") or ""),
     )
-
-    if charged_tokens > 0:
-        tx_type = _wallet_tx_type_for(usage_type)
-        reason = _reason_for(usage_type)
-        temp_balance = tokens_before
-
-        for idx in range(charged_tokens):
-            temp_balance -= 1
-            _insert_wallet_tx(
-                user_id=user_id,
-                tx_type=tx_type,
-                amount=-1,
-                reason=reason,
-                meta={
-                    "usage_type": usage_type,
-                    "used_chars": used_chars,
-                    "charge_type": "per_request_ceil_1000",
-                    "step_index": idx + 1,
-                    "charged_tokens_total": charged_tokens,
-                    "chars_per_jeton": CHARS_PER_JETON,
-                    "balance_after": temp_balance,
-                    **extra_meta,
-                },
-            )
 
     return {
         "ok": True,
-        "charged_tokens": charged_tokens,
+        "charged_tokens": int(shared.get("chargedTokens") or charged_tokens),
         "module": usage_type,
-        "tokens_before": tokens_before,
-        "tokens_after": tokens_after,
+        "tokens_before": shared.get("tokensBefore"),
+        "tokens_after": shared.get("tokensAfter", shared.get("tokenBalance")),
         "chars_per_jeton": CHARS_PER_JETON,
+        "wallet": "icany_personal",
+        "idempotent_replay": bool(shared.get("idempotentReplay")),
     }
